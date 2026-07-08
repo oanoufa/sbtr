@@ -23,23 +23,31 @@ WORKSPACE_PATH = config.WORKSPACE_PATH
 ST_TO_ID_DICT = config.ST_TO_ID_DICT
 NUM_SUBTYPES       = len(ST_TO_ID_DICT)
 MODEL_CONFIG       = config.MODEL_CONFIG
-MAX_LENGTH         = MODEL_CONFIG["sequence_length"]
-PAD_MULTIPLE_OF    = MODEL_CONFIG["pad_multiple_of"]
+MAX_LENGTH         = config.SEQ_LEN_AFTER_PAD
+PAD_MULTIPLE_OF    = config.PAD_LEN
 
-from hiv_dataset_class import HIVSequenceDataset, open_memmaps
-from hiv_nt_training_class import HFModelForHIVSubtyping, train_step, validation_step
-from hiv_nt_metrics_class import HIVSubtypingMetrics
-
+from dataset_class import HIVSequenceDataset, open_memmaps
+from model_class import HFModelForHIVSubtyping, train_step, validation_step
+from metrics_class import HIVSubtypingMetrics
 
 if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(MODEL_CONFIG["model_name"], trust_remote_code=True)
 
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"CUDA device count: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            print(f"  cuda:{i} → {torch.cuda.get_device_name(i)}")
     device = torch.device(MODEL_CONFIG["device"])
     print(f"Using device: {device}")
     print(f"Torch CPU threads: {torch.get_num_threads()}")
 
     model = HFModelForHIVSubtyping(model_name=MODEL_CONFIG["model_name"], num_subtypes=NUM_SUBTYPES)
     model = model.to(device)
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = torch.nn.DataParallel(model)
+
     model.train()
 
     print(f"Model loaded: {MODEL_CONFIG['model_name']}")
@@ -89,8 +97,10 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Optimizer & scheduler
     # ------------------------------------------------------------------
+    backbone = model.module.backbone if isinstance(model, torch.nn.DataParallel) else model.backbone
+
     optimizer = AdamW([
-        {"params": model.backbone.parameters(),
+        {"params": backbone.parameters(),
          "lr": MODEL_CONFIG["learning_rate"] * MODEL_CONFIG["backbone_learning_rate_multiplier"]},
         {"params": model.subtype_head.parameters(), "lr": MODEL_CONFIG["learning_rate"]},
     ], weight_decay=MODEL_CONFIG["weight_decay"])

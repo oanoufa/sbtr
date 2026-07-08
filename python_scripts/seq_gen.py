@@ -26,9 +26,17 @@ import sys
 import gzip
 import config
 from pathlib import Path
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+import math
 
 from utils import build_hxb2_ata_maps
-
+from mutator_class import (
+    SequenceMutator,
+    compute_n_muts,
+    mutate_sequence_gtr,
+    _ACGT_BYTES,
+)
 
 workspace_path = config.WORKSPACE_PATH
 # ---------------------------------------------------------------------------
@@ -39,6 +47,9 @@ parser.add_argument("--n_seq",             type=int,   default=100)
 parser.add_argument("--rp",               type=float, default=0.8)
 parser.add_argument("--seed",             type=int,   default=42)
 parser.add_argument("--n_workers",        type=int,   default=None)
+parser.add_argument("--ref_alignment",    type=str,
+                    default=f"{workspace_path}/data/input/HIV1_PURE_REF.fasta",
+                    help="Reference alignment (FASTA) from which sequences are drawn.")
 parser.add_argument("--window_half",      type=int,   default=50,
                     help="Half-window (each side) for divergence profile.")
 parser.add_argument("--min_div",          type=int,   default=15,
@@ -54,13 +65,14 @@ N_SEQ         = args.n_seq
 RP            = args.rp
 SEED          = args.seed
 N_WORKERS     = args.n_workers or mp.cpu_count()
+REF_ALIGNMENT = args.ref_alignment
 WINDOW_HALF   = args.window_half
 MIN_DIV       = args.min_div
 MAX_RETRIES   = args.max_retries
 REALISTIC     = args.realistic
 FORCE_DIV     = args.force_divergent
 
-out_dir    = f"{workspace_path}/data/output/{N_SEQ}_{RP}"
+out_dir    = f"{workspace_path}/data/output/seq_gen/{N_SEQ}_{RP}"
 out_seqs   = f"{out_dir}/sequences_{N_SEQ}_{RP}.npy"
 out_labels = f"{out_dir}/labels_{N_SEQ}_{RP}.npy"
 out_masks  = f"{out_dir}/loss_masks_{N_SEQ}_{RP}.npy"
@@ -71,26 +83,38 @@ os.makedirs(out_dir, exist_ok=True)
 # Subtype divergence groups
 # ---------------------------------------------------------------------------
 SUBTYPE_GROUPS = {
-    "A1": 0, "A2": 0, "A3": 0, "A4": 0, "A6": 0, "A7": 0, "A8": 0,
+    "A1": 0, "A2": 0, "A3": 0, "A4": 0, "A5": 0, "A6": 0, "A7": 0, "A8": 0,
     "F1": 1, "F2": 1,
-    "B": 2, "C": 2, "D": 2, "G": 2, "H": 2, "J": 2,
-    "K": 2, "L": 2, "E": 2, "O": 2, "N": 2, "P": 2, "CPZ": 2, "GOR": 2,
+    "B": 2, "C": 2, "D": 2, "E": 2, "G": 2, "H": 2, "J": 2, "K": 2, "L": 2,
+    "N": 3, "O": 3, "P": 3,
 }
+
+# Only recombine within M-group
 DIVERGENCE_WEIGHTS = [
-    [0.05, 1.00, 1.00],
-    [1.00, 0.05, 1.00],
-    [1.00, 1.00, 1.00],
+    [0.05, 1.00, 1.00, 0.05],
+    [1.00, 0.05, 1.00, 0.05],
+    [1.00, 1.00, 1.00, 0.05],
+    [0.05, 0.05, 0.05, 1.00],
 ]
 
-_ATCG = np.array([ord("A"), ord("T"), ord("C"), ord("G")], dtype=np.uint8)
-_BASE_TO_IDX = np.zeros(256, dtype=np.int8)
-for _i, _b in enumerate(_ATCG):
-    _BASE_TO_IDX[_b] = _i
+ST_TO_ID_DICT = config.ST_TO_ID_DICT
+MAX_YEAR = config.MAX_YEAR
 
-_TRANSITIONS = np.array([3, 2, 1, 0], dtype=np.int8)  # A->G(3), T->C(2), C->T(1), G->A(0)
-# Transversions (2 options per base)
-_TRANSVERSIONS_1 = np.array([1, 0, 3, 2], dtype=np.int8) # A->T, T->A, C->G, G->C
-_TRANSVERSIONS_2 = np.array([2, 3, 0, 1], dtype=np.int8) # A->C, T->G, C->A, G->T
+# Sequence Class used to store both the sequence and some metadata
+class Sequence:
+    def __init__(self,
+                 seq: str,
+                 subtype: str,
+                 country_code: str | None = None,
+                 year: int | None = None):
+        self.arr = np.frombuffer(seq.upper().encode(), dtype=np.uint8)
+        self.subtype = subtype
+        self.country_code = country_code  # None if unknown
+        self.year = year  # None if unknown
+
+    def __len__(self):
+        return len(self.arr)
+
 
 # ---------------------------------------------------------------------------
 # Parameter inference
@@ -144,7 +168,7 @@ def compare_generated_vs_real(names, out_labels, n_subtypes, n_packed, ata_len,
     gen_seg_lens_ata  = []
     gen_seg_lens_hxb2 = []
 
-    rec_indices = [i for i, n in enumerate(names) if n.startswith("recombinant")]
+    rec_indices = [i for i, n in enumerate(names) if n.startswith("r")]
 
     for idx in tqdm(rec_indices, desc="Analyzing generated recombinants", mininterval=10):
         lbl = np.unpackbits(lbl_mm[idx], axis=-1)[:, :n_subtypes]
@@ -237,6 +261,117 @@ def compare_generated_vs_real(names, out_labels, n_subtypes, n_packed, ata_len,
             _row("log-normal μ", np.log(r).mean(), np.log(g).mean(), fmt=".3f")
             _row("log-normal σ", np.log(r).std(),  np.log(g).std(),  fmt=".3f")
 
+    def _plot_distribution_comparison(n_bp, n_st, seg_lens, path, title):
+
+        color_scheme = ['#072C4B', '#F28089', '#71cddd']
+
+        # -- n_breakpoints / sequence --
+        n_bp = pd.Series(n_bp)
+        n_st = pd.Series(n_st)
+        seg_lens = pd.Series(seg_lens)
+        bp_values = n_bp.value_counts().sort_index().index.tolist()
+        bp_real_pct = n_bp.value_counts(normalize=True).sort_index().values.tolist()
+
+        # -- n_subtypes / sequence --
+        st_values = n_st.value_counts().sort_index().index.tolist()
+        st_real_pct = n_st.value_counts(normalize=True).sort_index().values.tolist()
+
+        # -- segment lengths --
+        sl_mu = seg_lens.apply(lambda x: np.log(x)).mean()
+        sl_sigma = seg_lens.apply(lambda x: np.log(x)).std()
+        bin_width = 200
+
+        # 1A. Data for the bars (binned percentages)
+        bin_edges = np.arange(0, 9500 + bin_width, bin_width)
+        bin_centers = bin_edges[:-1] + (bin_width / 2)
+        sl_real_pct = []
+        sl_hover_text = []
+
+        def lognorm_cdf(x, mu, sigma):
+            if x <= 0: return 0.0
+            return 0.5 * (1 + math.erf((np.log(x) - mu) / (sigma * np.sqrt(2))))
+
+        for i in range(len(bin_edges)-1):
+            left_edge = bin_edges[i]
+            right_edge = bin_edges[i+1]
+            prob = lognorm_cdf(right_edge, sl_mu, sl_sigma) - lognorm_cdf(left_edge, sl_mu, sl_sigma)
+            sl_real_pct.append(prob * 100)
+            sl_hover_text.append(f"{int(left_edge)} - {int(right_edge)} bp<br>{prob*100:.1f}%")
+
+        # 1B. Data for the continuous line (scaled PDF)
+        # Generate a smooth range of x values (start slightly above 0 to avoid log(0))
+        sl_x_line = np.linspace(10, 9500, 500)
+
+        # Calculate standard PDF
+        sl_pdf = (1 / (sl_x_line * sl_sigma * np.sqrt(2 * np.pi))) * \
+                np.exp(- (np.log(sl_x_line) - sl_mu)**2 / (2 * sl_sigma**2))
+
+        # Scale PDF to match the percentage bar heights: PDF * bin_width * 100
+        sl_y_line = sl_pdf * bin_width * 100
+
+        fig = make_subplots(
+            rows=1, cols=3, 
+            subplot_titles=(
+                "Breakpoints per sequence", 
+                "Subtypes per sequence", 
+                "Segment lengths distribution"
+            ),
+            horizontal_spacing=0.08
+        )
+
+        # Panel 1: Breakpoints (bar chart)
+        fig.add_trace(
+            go.Bar(x=bp_values, y=bp_real_pct, marker_color=color_scheme[0], hoverinfo='x+y', opacity=0.8),
+            row=1, col=1
+        )
+
+        # Panel 2: Subtypes (bar chart)
+        fig.add_trace(
+            go.Bar(x=st_values, y=st_real_pct, marker_color=color_scheme[1], hoverinfo='x+y', opacity=0.8),
+            row=1, col=2
+        )
+
+        # Panel 3A: Segment lengths (binned percentage bars)
+        fig.add_trace(
+            go.Bar(x=bin_centers, y=sl_real_pct, width=bin_width*0.9, 
+                marker_color=color_scheme[0], # Semi-transparent green
+                hoverinfo="text", hovertext=sl_hover_text,
+                opacity=0.8,
+                name="Binned data"),
+            row=1, col=3
+        )
+
+        # Panel 3B: Segment lengths (continuous line overlay)
+        fig.add_trace(
+            go.Scatter(x=sl_x_line, y=sl_y_line, mode='lines',
+                    line=dict(color=color_scheme[1], width=3), # Darker green for contrast
+                    hoverinfo="none", # Hide hover for line to keep it clean
+                    name="Continuous fit"),
+            row=1, col=3
+        )
+
+        # Update axes labels and tick marks
+        fig.update_xaxes(title_text="Number of breakpoints", tickmode='linear', tick0=1, dtick=2, row=1, col=1)
+        fig.update_yaxes(title_text="Percentage (%)", row=1, col=1)
+
+        fig.update_xaxes(title_text="Number of subtypes", tickmode='linear', tick0=2, dtick=1, row=1, col=2)
+        fig.update_yaxes(title_text="Percentage (%)", row=1, col=2)
+
+        fig.update_xaxes(title_text="Segment length (HXB2 bp)", row=1, col=3)
+        fig.update_yaxes(title_text="Percentage (%)", row=1, col=3)
+
+        # Update overall layout
+        fig.update_layout(
+            title=title,
+            title_x=0.5,
+            template="plotly_white",
+            showlegend=False, 
+            height=500,
+            width=1200,
+            bargap=0.15
+        )
+        fig.write_html(path)
+
     # ------------------------------------------------------------------
     # Print
     # ------------------------------------------------------------------
@@ -247,95 +382,12 @@ def compare_generated_vs_real(names, out_labels, n_subtypes, n_packed, ata_len,
     _continuous("segment lengths (HXB2 bp)", real_seg_lens, gen_seg_lens_hxb2)
     _continuous("segment lengths (ATA pos)", pd.Series(dtype=float), gen_seg_lens_ata)
 
-# ---------------------------------------------------------------------------
-# Empirical mutation rates
-# ---------------------------------------------------------------------------
-def compute_empirical_mutation_rates(
-    alignment_path:   str,
-    ata_len:          int,
-    target_mean_rate: float = 0.04,
-) -> np.ndarray:
-    """
-    Derives site-specific mutation rates from the diversity of a reference
-    alignment.  Fully vectorised — no Python loop over columns.
-
-    Uses a large within-subtype alignment for best results (see notes above).
-    """
-    print("\nComputing empirical per-position mutation rates from alignment...")
-
-    # ── 1. Load all sequences into a (N, ata_len) uint8 array ─────────────
-    rows = []
-    opener = gzip.open if alignment_path.endswith(".gz") else open
-    with opener(alignment_path, "rt") as fh:
-        for rec in SeqIO.parse(fh, "fasta"):
-            seq = np.frombuffer(str(rec.seq).upper().encode(), dtype=np.uint8)
-            if seq.shape[0] == ata_len:
-                rows.append(seq)
-
-    if not rows:
-        raise ValueError("No sequences of expected length found.")
-
-    arr = np.stack(rows)                         # (N, ata_len)  uint8
-
-    # ── 2. Gap mask  ──────────────────────────────────────────────────────
-    GAP   = ord("-")
-    DOT   = ord(".")
-    is_gap = (arr == GAP) | (arr == DOT)         # (N, ata_len) bool
-
-    # ── 3. Vectorised per-column diversity ────────────────────────────────
-    # For each column we need  1 - (count of modal base / valid base count).
-    # Strategy: iterate over the 4 nucleotide bytes; for each base compute
-    # its frequency, then take the column-wise maximum.
-
-    BASES = [ord("A"), ord("C"), ord("G"), ord("T")]
-
-    valid_counts = (~is_gap).sum(axis=0).astype(np.float32)   # (ata_len,)
-    max_counts   = np.zeros(ata_len, dtype=np.float32)
-
-    for base in BASES:
-        counts = (arr == base).sum(axis=0).astype(np.float32) # (ata_len,)
-        np.maximum(max_counts, counts, out=max_counts)
-
-    # Avoid division by zero at fully-gapped columns
-    safe_valid  = np.where(valid_counts > 0, valid_counts, 1.0)
-    max_freq    = max_counts / safe_valid                      # (ata_len,)
-    diversity   = np.where(valid_counts > 0, 1.0 - max_freq, 0.0)
-
-    # ── 4. Scale to target mean rate ──────────────────────────────────────
-    mean_div = diversity.mean()
-    if mean_div > 0:
-        diversity *= target_mean_rate / mean_div
-
-    # ── 5. Clip extremes ──────────────────────────────────────────────────
-    return np.clip(diversity, 0.0, 1.0).astype(np.float32)
-
-# ---------------------------------------------------------------------------
-# Mutation
-# ---------------------------------------------------------------------------
-def mutate_sequence_vec(seg_arr, seg_start, rate_array, rng):
-    is_base = np.isin(seg_arr, _ATCG)
-    n = len(seg_arr)
-    mutate_mask = is_base & (rng.random(n, dtype=np.float32) < rate_array[seg_start:seg_start + n])
-    
-    if mutate_mask.any():
-        idx = np.where(mutate_mask)[0]
-        cur = _BASE_TO_IDX[seg_arr[idx]]
-        
-        # 80% Transition, 20% Transversion
-        rand_ti_tv = rng.random(len(idx), dtype=np.float32)
-        
-        # Default to Transition
-        new = _TRANSITIONS[cur]
-        
-        # Overwrite with Transversions where applicable
-        tv1_mask = (rand_ti_tv > 0.8) & (rand_ti_tv <= 0.9)
-        new[tv1_mask] = _TRANSVERSIONS_1[cur[tv1_mask]]
-        
-        tv2_mask = rand_ti_tv > 0.9
-        new[tv2_mask] = _TRANSVERSIONS_2[cur[tv2_mask]]
-        
-        seg_arr[idx] = _ATCG[new]
-    return seg_arr
+    crf_dist_path = f"{workspace_path}/figs/crf_dist.html"
+    synthetic_dist_path = f"{workspace_path}/figs/synthetic_dist.html"
+    _plot_distribution_comparison(gen_n_bp, gen_n_st, pd.Series(gen_seg_lens_hxb2), synthetic_dist_path,
+                                  title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">{len(gen_n_bp)} generated recombinants</sup>')
+    _plot_distribution_comparison(real_n_bp, real_n_st, real_seg_lens, crf_dist_path,
+                                  title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">Data taken from LANL Sequence Database - {len(real_n_bp)} CRFs</sup>')
 
 # ---------------------------------------------------------------------------
 # Subtype sampling
@@ -350,7 +402,7 @@ def sample_subtypes(n, pool, py_rng):
             weights = []
             for st_cand in remain:
                 g = SUBTYPE_GROUPS.get(st_cand, 2)
-                w = max(DIVERGENCE_WEIGHTS[g][SUBTYPE_GROUPS.get(a, 2)] for a in chosen)
+                w = max(DIVERGENCE_WEIGHTS[g][SUBTYPE_GROUPS[a]] for a in chosen)
                 weights.append(w)
             total = sum(weights)
             r = py_rng.random() * total
@@ -372,8 +424,8 @@ def divergence_profile(seq1, seq2, window_half):
     Windowed Hamming distance (each side = window_half positions).
     Returns float32 array, same length as input.  ~50 µs for 10,475 positions.
     """
-    v1 = np.isin(seq1, _ATCG)
-    v2 = np.isin(seq2, _ATCG)
+    v1 = np.isin(seq1, _ACGT_BYTES)
+    v2 = np.isin(seq2, _ACGT_BYTES)
     diff = ((seq1 != seq2) & v1 & v2).astype(np.float32)
     kernel = np.ones(2 * window_half + 1, dtype=np.float32)
     return np.convolve(diff, kernel, mode="same")
@@ -412,6 +464,8 @@ def place_breakpoints(seg_subtypes, parents, ata_len,
     """
     n_bp = len(seg_subtypes) - 1
     
+    parents_seq = {st: seq.arr for st, seq in parents.items()}
+    
     # ML Robustness: Force segments to be at least 200bp to survive loss masking
     min_seg_len = max(min_seg_len, 200)
 
@@ -427,9 +481,9 @@ def place_breakpoints(seg_subtypes, parents, ata_len,
             remaining_bps = n_bp - i - 1
             right_limit   = ata_len - (remaining_bps + 1) * min_seg_len
 
-            key = (id(parents[st_L]), id(parents[st_R]))
+            key = (id(parents_seq[st_L]), id(parents_seq[st_R]))
             if key not in _cache:
-                _cache[key] = divergence_profile(parents[st_L], parents[st_R], window_half)
+                _cache[key] = divergence_profile(parents_seq[st_L], parents_seq[st_R], window_half)
             profile = _cache[key]
             eligible = profile >= min_div
             eligible[: prev + min_seg_len] = False
@@ -480,22 +534,20 @@ def _worker(cfg):
     n_st_total = len(st_id)
     ata_len    = cfg["ata_len"]
     n_packed   = cfg["n_packed"]
-    rate_arrays   = cfg["rate_arrays"]
+    site_rates_dict = cfg["site_rates_dict"]
+    sub_probs_dict  = cfg["sub_probs_dict"]
     st_list    = cfg["pure_st_list"]
     whalf      = cfg["window_half"]
     mdiv       = cfg["min_div"]
     max_ret    = cfg["max_retries"]
     force_div  = cfg["force_divergent"]
     realistic  = cfg["realistic"]
+    st_to_seq_dict = cfg["st_to_seq_dict"]
+
 
     seq_mm  = np.load(cfg["out_seqs"],   mmap_mode="r+")
     lbl_mm  = np.load(cfg["out_labels"], mmap_mode="r+")
     mask_mm = np.load(cfg["out_masks"],  mmap_mode="r+")
-
-    st_arr = {
-        st: [np.frombuffer(s.encode(), dtype=np.uint8) for s in seqs]
-        for st, seqs in cfg["st_to_seq_dict"].items()
-    }
 
     rng    = np.random.default_rng(cfg["worker_seed"])
     py_rng = random.Random(cfg["worker_seed"])
@@ -504,17 +556,23 @@ def _worker(cfg):
     for li in range(chunk_sz):
         is_rec = py_rng.random() <= RP
         ok = False
+        total_muts = 0
 
         if not is_rec:
             n_bp = 0
             st  = py_rng.choice(st_list)
-            src = py_rng.choice(st_arr[st]).copy()
-            rate_arr = rate_arrays.get(st[0], rate_arrays['avg'])
-            seq_row = mutate_sequence_vec(src, 0, rate_arr, rng)
+            seq_obj = py_rng.choice(st_to_seq_dict[st]) 
+            # Target year is sampled to be between the sequence's year and 2030
+            target_year = py_rng.randint(seq_obj.year, MAX_YEAR)
+            rate_arr  = site_rates_dict.get(st[0], site_rates_dict['avg']) # st[0] takes the first character (A1 -> A) to match the diversity_arrays keys
+            sub_probs = sub_probs_dict.get(st[0],  sub_probs_dict['avg'])
+            n_muts    = compute_n_muts(seq_obj.year, target_year, rate_arr, 0, len(seq_obj.arr), subtype=seq_obj.subtype)
+            seq_row, total_muts = mutate_sequence_gtr(
+                seq_obj.arr.copy(), 0, rate_arr, rng, n_muts, sub_probs)
             lbl_row = np.zeros((ata_len, n_st_total), dtype=bool)
             lbl_row[:, st_id[st]] = True
             mask_row = np.ones(ata_len, dtype=bool)  # No ambiguity
-            name = f"pure_{st}"
+            name = f"p_{st}_{target_year}"
             ok = True
         else:
             for _attempt in range(max_ret):
@@ -533,8 +591,10 @@ def _worker(cfg):
 
                 chosen = sample_subtypes(n_sub, st_list, py_rng)
                 seg_st = assign_subtypes_to_segments(n_seg, chosen, py_rng)
-                parents = {st: py_rng.choice(st_arr[st]) for st in chosen}
-
+                parents = {st: py_rng.choice(st_to_seq_dict[st]) for st in chosen}
+                # Sample target year between max parent year and MAX_YEAR
+                max_parent_year = max(p.year for p in parents.values())
+                target_year = py_rng.randint(max_parent_year, MAX_YEAR)
                 bps = place_breakpoints(seg_st, parents, ata_len,
                                         whalf, mdiv, min_seg, rng, force_div)
                 if bps is None:
@@ -549,16 +609,23 @@ def _worker(cfg):
                 for si in range(n_seg):
                     s, e = bounds[si], bounds[si + 1]
                     if e <= s: continue
-                    chunk = parents[seg_st[si]][s:e].copy()
-                    rate_arr = rate_arrays.get(seg_st[si][0], rate_arrays['avg'])
-                    seq_row[s:e] = mutate_sequence_vec(chunk, s, rate_arr, rng)
+                    chunk = parents[seg_st[si]].arr[s:e].copy()
+                    rate_arr = site_rates_dict.get(seg_st[si][0], site_rates_dict['avg'])
+                    sub_probs = sub_probs_dict.get(seg_st[si][0], sub_probs_dict['avg'])
+                    chunk_len = e - s
+                    n_muts = compute_n_muts(
+                        parents[seg_st[si]].year, target_year, rate_arr,
+                        s, chunk_len, subtype=parents[seg_st[si]].subtype
+                    )
+                    seq_row[s:e], muts = mutate_sequence_gtr(chunk, s, rate_arr, rng, n_muts, sub_probs)
+                    total_muts += muts
                     lbl_row[s:e, st_id[seg_st[si]]] = True
 
                 # 2) Build Ambiguity Mask (Loss Mask)
                 # Find regions where Parent A == Parent B across the breakpoint
                 for si in range(n_seg - 1):
-                    p1 = parents[seg_st[si]]
-                    p2 = parents[seg_st[si+1]]
+                    p1 = parents[seg_st[si]].arr
+                    p2 = parents[seg_st[si+1]].arr
                     bp = bps[si]
                     
                     l = bp - 1
@@ -569,27 +636,34 @@ def _worker(cfg):
                     # Set mask to False in identical/ambiguous regions
                     mask_row[l+1:r] = False
 
-                name = f"recombinant_{'+'.join(dict.fromkeys(seg_st))}"
+                name = f"r_{'+'.join(dict.fromkeys(seg_st))}_{target_year}"
                 ok = True
                 break
 
             if not ok:
                 n_bp = 0
                 st  = py_rng.choice(st_list)
-                src = py_rng.choice(st_arr[st]).copy()
-                rate_arr = rate_arrays.get(st[0], rate_arrays['avg'])
-                seq_row = mutate_sequence_vec(src, 0, rate_arr, rng)
+                seq_obj = py_rng.choice(st_to_seq_dict[st])
+                rate_arr = site_rates_dict.get(st[0], site_rates_dict['avg'])
+                sub_probs = sub_probs_dict.get(st[0], sub_probs_dict['avg'])
+                # Target year is sampled to be between the sequence's year and 2030
+                target_year = py_rng.randint(seq_obj.year, MAX_YEAR)
+                n_muts = compute_n_muts(
+                    seq_obj.year, target_year, rate_arr,
+                    0, len(seq_obj.arr), subtype=seq_obj.subtype
+                )
+                seq_row, total_muts = mutate_sequence_gtr(seq_obj.arr.copy(), 0, rate_arr, rng, n_muts, sub_probs)
                 lbl_row = np.zeros((ata_len, n_st_total), dtype=bool)
                 lbl_row[:, st_id[st]] = True
-                mask_row = np.ones(ata_len, dtype=bool)
-                name = f"pure_{st}"
+                mask_row = np.ones(ata_len, dtype=bool)  # No ambiguity
+                name = f"p_{st}_{target_year}"
 
         # ---- cleanup & write ---------------------------------------------
-        seq_row[seq_row == ord("-")] = ord("N")
+        seq_row[seq_row == ord("-")] = ord("N") # Replace gaps with 'N' in the final sequence
         seq_mm[row_start + li] = seq_row
         lbl_mm[row_start + li] = np.packbits(lbl_row, axis=-1)
         mask_mm[row_start + li] = mask_row
-        records.append((name, n_bp))
+        records.append((name, n_bp, total_muts, target_year))
 
     seq_mm.flush()
     lbl_mm.flush()
@@ -603,18 +677,29 @@ if __name__ == "__main__":
     mp.set_start_method("fork", force=True)
 
     # ---- load pure-subtype alignment ------------------------------------
-    st_to_seq_dict = defaultdict(list)
-    fasta_path = (f"{workspace_path}/data/input/HIV1_PURE_REF.fasta")
+    st_to_seq_dict: dict[str, list[Sequence]] = defaultdict(list)
     hxb2_ata_seq = ""
-    for i, rec in enumerate(SeqIO.parse(fasta_path, "fasta")):
+
+    for i, rec in enumerate(SeqIO.parse(REF_ALIGNMENT, "fasta")):
         if i == 0:
             hxb2_ata_seq = str(rec.seq)
         else:
-            st_to_seq_dict[rec.id.split(".")[1]].append(str(rec.seq))
+            parts = rec.id.split(".") # Ref.A1.CD.87.PBS6126.MH705153
+            subtype = parts[1]
+            country_code = parts[2]
+            two_digit_year = int(parts[3])
+            year = 2000 + two_digit_year if two_digit_year < 40 else 1900 + two_digit_year
+            st_to_seq_dict[subtype].append(Sequence(str(rec.seq),
+                                                    country_code=country_code,
+                                                    subtype=subtype,
+                                                    year=year))
 
-    pure_st_list   = list(st_to_seq_dict.keys())
-    st_to_id       = {s: i for i, s in enumerate(pure_st_list)}
-    n_subtypes     = len(st_to_id)
+    # SORT st_to_seq_dict like ST_TO_ID_DICT
+    pure_st_list   = list(ST_TO_ID_DICT.keys())
+    st_to_seq_dict_sorted = {st: st_to_seq_dict[st] for st in pure_st_list}
+    st_to_seq_dict = st_to_seq_dict_sorted
+    del st_to_seq_dict_sorted
+    n_subtypes     = len(ST_TO_ID_DICT)
     n_packed       = int(np.ceil(n_subtypes / 8))
     ata_len        = len(hxb2_ata_seq)
 
@@ -623,41 +708,25 @@ if __name__ == "__main__":
     print("Inferred parameters:")
     params = infer_params(df_seg, ata_len)
 
-    # ---- rate arrays for mutation ----------------------------------------
-    ata_to_hxb2 = build_hxb2_ata_maps(hxb2_ata_seq)
-    # Retrieve rate arrays if they exist, otherwise build them
-    rate_arrays = {}
-    for st in ['A', 'B', 'C']:
-        rate_array_path = Path(f"{workspace_path}/data/input/mutation_rates/empirical_mutation_rates_{st}.npy")
-        if rate_array_path.exists():
-            with open(rate_array_path, "rb") as f:
-                rate_array = np.load(f)
-        else:
-            large_alignment_path = f"{workspace_path}/data/output/HIV1_{st}_ALIGNED.fasta"
-            # This alignment corresponds to all complete genomes in LANL SEQ DB as of 23/04/2026, aligned to our pure alignment
-            rate_array = compute_empirical_mutation_rates(large_alignment_path, ata_len, target_mean_rate=0.04)
-            # Save the rate array to look at it after
-            with open(rate_array_path, "wb") as f:
-                np.save(f, rate_array)
-        rate_arrays[st] = rate_array
+    # ---- rate arrays and GTR substitution probabilities ----------------
+    ata_to_hxb2, hxb2_to_ata = build_hxb2_ata_maps(hxb2_ata_seq)
 
-    avg_rate_array_path = Path(f"{workspace_path}/data/input/mutation_rates/empirical_mutation_rates_avg.npy")
-    if avg_rate_array_path.exists():
-        with open(avg_rate_array_path, "rb") as f:
-            avg_rate_array = np.load(f)
-    else:
-        avg_rate_array = np.mean([rate_arrays[st] for st in ['A', 'B', 'C']], axis=0)
-        with open(avg_rate_array_path, "wb") as f:
-            np.save(f, avg_rate_array)
+    mutator = SequenceMutator(
+        iqtree_dir=f"{workspace_path}/data/output/rates/",
+        ata_len=ata_len,
+        seed=SEED,
+        cache_dir=f"{workspace_path}/data/input/diversity/",
+    )
+    site_rates_dict = mutator.site_rates_dict
+    sub_probs_dict  = mutator.sub_probs_dict
 
-    rate_arrays['avg'] = avg_rate_array
-
-    print(f"Max mutation rate at any site: {avg_rate_array.max():.4f}")
-    print(f"Min mutation rate at any site: {avg_rate_array.min():.4f}")
-    print(f"Mean mutation rate across sites: {avg_rate_array.mean():.4f}")
+    avg_rates = site_rates_dict['avg']
+    print(f"Max site rate   (avg): {avg_rates.max():.6f}")
+    print(f"Min site rate   (avg): {avg_rates.min():.6f}")
+    print(f"Mean site rate  (avg): {avg_rates.mean():.6f}")
 
     # ---- info -----------------------------------------------------------
-    print(f"\nSubtypes       : {pure_st_list}")
+    print(f"\nSubtypes       : {pure_st_list}, \n{st_to_seq_dict.keys()}")
     print(f"ATA length     : {ata_len}")
     print(f"Output shape   : seq ({N_SEQ},{ata_len})  "
           f"lbl ({N_SEQ},{ata_len},{n_packed})")
@@ -682,8 +751,10 @@ if __name__ == "__main__":
         dict(worker_id=wid, row_start=int(c[0]), row_end=int(c[-1])+1,
              worker_seed=seeds[wid], out_seqs=out_seqs, out_labels=out_labels, out_masks=out_masks,
              st_to_seq_dict=dict(st_to_seq_dict), pure_st_list=pure_st_list,
-             pure_st_to_id_dict=st_to_id, params=params,
-             rate_arrays=rate_arrays, ata_len=ata_len, n_packed=n_packed,
+             pure_st_to_id_dict=ST_TO_ID_DICT, params=params,
+             site_rates_dict=site_rates_dict,      # ← was diversity_arrays
+             sub_probs_dict=sub_probs_dict,         # ← new
+             ata_len=ata_len, n_packed=n_packed,
              window_half=WINDOW_HALF, min_div=MIN_DIV, max_retries=MAX_RETRIES,
              force_divergent=FORCE_DIV, realistic=REALISTIC)
         for wid, c in enumerate(chunks) if len(c)
@@ -694,17 +765,19 @@ if __name__ == "__main__":
         results = list(tqdm(pool.imap(_worker, worker_args),
                             total=len(worker_args), desc="Chunks"))
 
-    records = [(n, nbp) for chunk in results for n, nbp in chunk]
+    records = [(n, nbp, nmuts, ty) for chunk in results for n, nbp, nmuts, ty in chunk]
     names   = [r[0] for r in records]
     n_bps   = [r[1] for r in records]
+    n_muts  = [r[2] for r in records]
+    target_years = [r[3] for r in records]
 
     # ---- stats ----------------------------------------------------------
-    n_rec = sum(n.startswith("recombinant") for n in names)
+    n_rec = sum(n.startswith("r") for n in names)
     print(f"\nRecombinant proportion: {n_rec/len(names):.2%}")
 
     st_counts = defaultdict(int)
     for name in names:
-        raw = name.split("_", 1)[1]
+        raw = name.split("_")[1]
         for st in raw.split("+"):
             st_counts[st] += 1
     print("\nSubtype appearances:")
@@ -715,15 +788,23 @@ if __name__ == "__main__":
     splits = np.random.default_rng(SEED).choice(
         ["train","val","test"], size=len(names), p=[0.9,0.05,0.05])
     with open(out_meta, "w") as f:
-        f.write("sequence_id\tsequence_name\tpure_or_recombinant\tsubtypes\tn_subtypes\tn_breakpoints\tsplit\n")
+        f.write("sequence_id\tsequence_name\tpure_or_recombinant\tsubtypes\tn_subtypes\tn_breakpoints\tn_mutations\ttarget_year\tsplit\n")
         for i, name in enumerate(names):
-            kind = "pure" if name.startswith("pure") else "recombinant"
-            # Strip the "pure_" or "recombinant_" prefix
-            raw = name.split("_", 1)[1]          # "A2+01_AE" or "B"
-            st_list = raw.split("+")             # ["A2", "01_AE"] or ["B"]
-            f.write(f"{i+1}\t{name}\t{kind}\t{'/'.join(st_list)}\t{len(st_list)}\t{n_bps[i]}\t{splits[i]}\n")
+            kind = "pure" if name.startswith("p") else "recombinant"
+            raw = name.split("_")[1]
+            st_list = raw.split("+")
+            f.write(f"{i+1}\t{name}\t{kind}\t{'/'.join(st_list)}\t{len(st_list)}\t{n_bps[i]}\t{n_muts[i]}\t{target_years[i]}\t{splits[i]}\n")
 
     print(f"\nFiles: {out_seqs}  {out_labels}  {out_meta}  {out_masks}")
+
+    # ---- Print Mutation Distribution Summary ----------------------------
+    print("\n  === Generated Mutations per Sequence ===")
+    muts_s = pd.Series(n_muts)
+    print(f"  Min   : {muts_s.min():.0f}")
+    print(f"  Median: {muts_s.median():.0f}")
+    print(f"  Mean  : {muts_s.mean():.1f}")
+    print(f"  Max   : {muts_s.max():.0f}")
+    print(f"  Std   : {muts_s.std():.1f}")
 
     # ---- distribution comparison ----------------------------------------
     compare_generated_vs_real(
@@ -735,7 +816,7 @@ if __name__ == "__main__":
     seq_mm = np.load(out_seqs,   mmap_mode="r")
     lbl_mm = np.load(out_labels, mmap_mode="r")
     for idx, name in enumerate(names):
-        if name.startswith("recombinant"):
+        if name.startswith("r"):
             lbl = np.unpackbits(lbl_mm[idx], axis=-1)[:, :n_subtypes]
             any_active = lbl.any(axis=1)   # True where at least one subtype is labeled
             present = [pure_st_list[j] for j in range(n_subtypes) if lbl[:, j].any()]
@@ -745,7 +826,7 @@ if __name__ == "__main__":
             print(f"  Subtypes in labels: {', '.join(present)}")
 
             for st_name in present:
-                col  = lbl[:, st_to_id[st_name]]
+                col  = lbl[:, ST_TO_ID_DICT[st_name]]
                 runs = np.diff(np.concatenate([[0], col.astype(int), [0]]))
                 raw_starts = np.where(runs ==  1)[0]
                 raw_ends   = np.where(runs == -1)[0]

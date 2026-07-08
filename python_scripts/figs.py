@@ -7,6 +7,7 @@ from plotly.subplots import make_subplots
 from Bio import SeqIO
 import pandas as pd
 import sys
+import re
 import os
 from collections import defaultdict
 import plotly.io as pio
@@ -19,8 +20,9 @@ from utils import build_hxb2_ata_maps
 
 workspace_path = config.WORKSPACE_PATH
 
-color_scheme = ['#072C4B', '#F28089', '#71cddd']
-
+GENES_RAW = config.GENES_RAW
+GENE_COLORS = config.GENE_COLORS
+COLOR_SCHEME = config.COLOR_SCHEME
 
 
 def visualize_breakpoints(
@@ -37,56 +39,9 @@ def visualize_breakpoints(
         1: (0.65, 0.95)
     }
 
-    genes_raw_data = {
-        # LTR
-        "5'LTR":   (1, 790, 1),
-        "3'LTR":   (9417, 9719, 2),
-
-        # Gag Subunits
-        "p17":     (790, 1186, 1),
-        "p24":     (1186, 1879, 1),
-        "p2":      (1879, 1921, 1),
-        "p7":      (1921, 2086, 1),
-        "p1":      (2086, 2134, 1),
-        "p6":      (2134, 2292, 1),
-        
-        # Pol Subunits (Frame 3)
-        "prot":    (2085, 2550, 3),
-        "p51_RT":  (2550, 3870, 3),
-        "p15":     (3870, 4230, 3),
-        "p31_int": (4230, 5096, 3),
-        
-        # Env Subunits (Frame 3)
-        "gp120":   (6225, 7758, 3),
-        "gp41":    (7758, 8795, 3),
-        
-        # Accessory/Regulatory Genes
-        "vif":     (5041, 5619, 1),
-        "vpr":     (5559, 5850, 3),
-        "vpu":     (6062, 6310, 2),
-        "nef":     (8797, 9417, 1),
-        
-        # Split Spliced Genes
-        "tat1":    (5831, 6045, 2),
-        "tat2":    (8379, 8469, 1),
-        "rev1":    (5970, 6045, 3),
-        "rev2":    (8379, 8653, 2),
-    }
-
-    # The restored color palette
-    line_colors = {
-        # Grey for LTRs
-        "5'LTR": "#7f7f7f", "3'LTR": "#7f7f7f",
-        "p17": "#1f77b4", "p24": "#ff7f0e", "p2": "#2ca02c", "p7": "#d62728", "p1": "#9467bd", "p6": "#8c564b",
-        "prot": "#e377c2", "p51_RT": "#7f7f7f", "p15": "#bcbd22", "p31_int": "#17becf",
-        "gp120": "#aec7e8", "gp41": "#ffbb78",
-        "vif": "#98df8a", "vpr": "#ff9896", "vpu": "#c5b0d5", "nef": "#c49c94",
-        "tat1": "#f7b6d2", "tat2": "#f7b6d2", "rev1": "#dbdb8d", "rev2": "#dbdb8d"
-    }
-
-    for i, (gene, (start, end, frame)) in enumerate(genes_raw_data.items()):
+    for i, (gene, (start, end, frame)) in enumerate(GENES_RAW.items()):
         y0, y1 = frame_lanes[frame]
-        color = line_colors.get(gene, "grey")
+        color = GENE_COLORS.get(gene, "grey")
         
         # 1. Add the "Lane" segment for this gene
         fig.add_vrect(
@@ -149,75 +104,49 @@ def visualize_breakpoints(
             html_path = save_path + '.html'
             fig.write_html(html_path)
             fig.write_image(png_path, scale=2)
-        print(f"Mutation rate visualization saved to: {save_path}", flush=True)
+        print(f"Breakpoints visualization saved to: {save_path}", flush=True)
 
 
-def visualize_mutation_rates(
-    rate_arrays: dict,  # name -> rate_array
-    ata_to_hxb2,
+def visualize_diversity(
+    diversity_arrays: dict,
+    hxb2_to_ata: np.ndarray,
     window_size=100,
-    save_path=f"{workspace_path}/figs/mutation_rate_profile.html"):
+    save_path=f"{workspace_path}/figs/diversity_rate_profile.html"):
     """
-    Visualizes empirical mutation rate arrays with HIV genes in the background.
-    rate_arrays: dict of {name: rate_array}, all must have the same length.
+    Visualizes empirical diversity arrays with HIV genes in the background.
+    diversity_arrays: dict of {name: diversity_array}, all must have the same length.
     """
     # Use first array for reference length/mean
-    first_array = next(iter(rate_arrays.values()))
+    first_array = next(iter(diversity_arrays.values()))
     ata_len = len(first_array)
     x_positions = np.arange(ata_len)
-    y_max = max(arr.max() for arr in rate_arrays.values()) * 1.1
+    y_max = max(arr.max() for arr in diversity_arrays.values()) * 1.1
 
     kernel = np.ones(window_size) / window_size
-
-    # Build inverse map: HXB2 -> ATA
-    hxb2_to_ata = {}
-    for ata_idx, hxb2_idx in enumerate(ata_to_hxb2):
-        if hxb2_idx > 0 and hxb2_idx not in hxb2_to_ata:
-            hxb2_to_ata[hxb2_idx] = ata_idx
 
     fig = make_subplots(
         rows=1, cols=1,
         row_heights=[1.0],
-        subplot_titles=("<b>Empirical mutation rate across the genome</b>",)
+        subplot_titles=("<b>Empirical diversity across the genome</b>",)
     )
-
-    # =========================================================================
-    # GENE MAP BACKGROUND (unchanged)
-    # =========================================================================
-    genes_raw_data = {
-        "5'LTR":   (1, 790, 1),    "3'LTR":   (9417, 9719, 2),
-        "p17":     (790, 1186, 1), "p24":     (1186, 1879, 1),
-        "p2":      (1879, 1921, 1),"p7":      (1921, 2086, 1),
-        "p1":      (2086, 2134, 1),"p6":      (2134, 2292, 1),
-        "prot":    (2085, 2550, 3),"p51_RT":  (2550, 3870, 3),
-        "p15":     (3870, 4230, 3),"p31_int": (4230, 5096, 3),
-        "gp120":   (6225, 7758, 3),"gp41":    (7758, 8795, 3),
-        "vif":     (5041, 5619, 1),"vpr":     (5559, 5850, 3),
-        "vpu":     (6062, 6310, 2),"nef":     (8797, 9417, 1),
-        "tat1":    (5831, 6045, 2),"tat2":    (8379, 8469, 1),
-        "rev1":    (5970, 6045, 3),"rev2":    (8379, 8653, 2),
-    }
-
-    line_colors = {
-        "5'LTR": "#7f7f7f", "3'LTR": "#7f7f7f",
-        "p17": "#1f77b4", "p24": "#ff7f0e", "p2": "#2ca02c", "p7": "#d62728", "p1": "#9467bd", "p6": "#8c564b",
-        "prot": "#e377c2", "p51_RT": "#7f7f7f", "p15": "#bcbd22", "p31_int": "#17becf",
-        "gp120": "#aec7e8", "gp41": "#ffbb78",
-        "vif": "#98df8a", "vpr": "#ff9896", "vpu": "#c5b0d5", "nef": "#c49c94",
-        "tat1": "#f7b6d2", "tat2": "#f7b6d2", "rev1": "#dbdb8d", "rev2": "#dbdb8d"
-    }
 
     frame_lanes = {
         3: (0, y_max * 0.32),
         2: (y_max * 0.33, y_max * 0.64),
         1: (y_max * 0.65, y_max * 0.95)
     }
+    
+    frame_pos_axis = {
+        3: y_max * 0.15,
+        2: y_max * 0.485,
+        1: y_max * 0.85,
+    }
 
-    for i, (gene, (start_hxb2, end_hxb2, frame)) in enumerate(genes_raw_data.items()):
-        start_ata = hxb2_to_ata.get(start_hxb2, 0)
-        end_ata   = hxb2_to_ata.get(end_hxb2, ata_len - 1)
+    for i, (gene, (start_hxb2, end_hxb2, frame)) in enumerate(GENES_RAW.items()):
+        start_ata = hxb2_to_ata[start_hxb2]
+        end_ata   = hxb2_to_ata[end_hxb2]
         y0, y1    = frame_lanes[frame]
-        color     = line_colors.get(gene, "grey")
+        color     = GENE_COLORS.get(gene, "grey")
 
         fig.add_shape(
             type="rect", x0=start_ata, x1=end_ata, y0=y0, y1=y1,
@@ -236,7 +165,7 @@ def visualize_mutation_rates(
 
     for frame, (y0, y1) in frame_lanes.items():
         fig.add_annotation(
-            x=-0.02, y=(y0 + y1) / 2,
+            x=-0.02, y=frame_pos_axis[frame],
             xref="paper", yref="y",
             text=f"<b>F{frame}</b>", showarrow=False,
             font=dict(size=12, color="black"),
@@ -252,13 +181,13 @@ def visualize_mutation_rates(
         "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
     ]
 
-    for i, (name, rate_array) in enumerate(rate_arrays.items()):
+    for i, (name, diversity_array) in enumerate(diversity_arrays.items()):
         color          = trace_colors[i % len(trace_colors)]
-        smoothed_rates = np.convolve(rate_array, kernel, mode='same')
-        mean_rate      = np.mean(rate_array)
+        smoothed_rates = np.convolve(diversity_array, kernel, mode='same')
+        mean_rate      = np.mean(diversity_array)
 
         fig.add_trace(go.Scatter(
-            x=x_positions, y=rate_array,
+            x=x_positions, y=diversity_array,
             mode='lines', line=dict(color=color, width=1),
             opacity=0.3, name=f'{name} raw',
         ), row=1, col=1)
@@ -286,7 +215,7 @@ def visualize_mutation_rates(
     )
 
     fig.update_xaxes(title_text="ATA Alignment Position (bp)", range=[0, ata_len], row=1, col=1)
-    fig.update_yaxes(title_text="Mutation Rate", range=[0, y_max], row=1, col=1)
+    fig.update_yaxes(title_text="diversity", range=[0, y_max], row=1, col=1)
 
     if save_path:
         if save_path.endswith('.html'):
@@ -296,12 +225,13 @@ def visualize_mutation_rates(
         else:
             fig.write_html(save_path + '.html')
             fig.write_image(save_path + '.png', scale=2)
-        print(f"Mutation rate visualization saved to: {save_path}", flush=True)
+        print(f"Diversity visualization saved to: {save_path}", flush=True)
 
 
 def visualize_sample(
     sample: dict,
     pure_st_to_id_dict: dict,
+    hxb2_to_ata: np.ndarray,
     idx: int = 0,
     path: str = None,
 ) -> None:
@@ -313,38 +243,35 @@ def visualize_sample(
         loss_mask      = loss_mask[0]
         labels         = labels[0]
 
-    real_mask      = attention_mask.astype(bool)
     real_loss_mask = loss_mask.astype(bool)
-    mask_used      = real_loss_mask
-    n_real         = mask_used.sum()
-    n_total        = len(mask_used)
+    n_real         = real_loss_mask.sum()
+    n_total        = len(real_loss_mask)
 
-    # ── Build full-length label array (NaN where masked out) ──────────────
     id_to_st      = {v: k for k, v in pure_st_to_id_dict.items()}
     subtype_names = [id_to_st[i] for i in range(len(pure_st_to_id_dict))]
     n_subtypes    = len(subtype_names)
+    full_labels   = labels.T                                  # (n_subtypes, n_total)
 
-    # full_labels = np.full((n_subtypes, n_total), np.nan)          # NaN = masked
-    # full_labels[:, mask_used] = labels[mask_used].T               # fill real positions
-    full_labels = labels.T
-
-    # ── Layout: 2 rows × 2 cols, right col is narrow colorbar ────────────
-    fig = plt.figure(figsize=(14, 4 + 0.3 * n_subtypes))
+    # ── Layout: 3 rows × 2 cols ───────────────────────────────────────────
+    # row 0 = loss mask, row 1 = gene track, row 2 = heatmap
+    gene_track_h = 2.4                                        # relative height
+    fig = plt.figure(figsize=(14, 2 + gene_track_h + 0.3 * n_subtypes))
     gs  = fig.add_gridspec(
-        2, 2,
-        height_ratios=[1, n_subtypes],
-        width_ratios=[40, 1],          # main panels | colorbar
-        hspace=0.15,
+        3, 2,
+        height_ratios=[1, gene_track_h, n_subtypes],
+        width_ratios=[40, 1],
+        hspace=0.10,
         wspace=0.03,
     )
 
     ax_mask = fig.add_subplot(gs[0, 0])
-    ax_lab  = fig.add_subplot(gs[1, 0], sharex=ax_mask)   # ← shared x-axis
-    ax_cb   = fig.add_subplot(gs[:, 1])                    # colorbar spans both rows
+    ax_gene = fig.add_subplot(gs[1, 0], sharex=ax_mask)
+    ax_lab  = fig.add_subplot(gs[2, 0], sharex=ax_mask)
+    ax_cb   = fig.add_subplot(gs[:, 1])
 
-    # ── Top panel: attention/loss mask ────────────────────────────────────
+    # ── Row 0: loss mask ──────────────────────────────────────────────────
     ax_mask.imshow(
-        mask_used[np.newaxis, :], aspect="auto",
+        real_loss_mask[np.newaxis, :], aspect="auto",
         cmap="Blues", vmin=0, vmax=1, interpolation="nearest",
     )
     ax_mask.set_yticks([0])
@@ -355,11 +282,49 @@ def visualize_sample(
         f"({n_total - n_real} padding)",
         fontsize=10,
     )
-    plt.setp(ax_mask.get_xticklabels(), visible=False)     # hide redundant x labels
+    plt.setp(ax_mask.get_xticklabels(), visible=False)
 
-    # ── Bottom panel: per-token label heatmap (full length, NaN = grey) ──
+    # ── Row 1: gene track ─────────────────────────────────────────────────
+    ax_gene.set_xlim(0, n_total)
+    ax_gene.set_ylim(0, 1)
+    ax_gene.axis("off")
+
+    # 3 frame lanes mapped to y-bands within [0, 1]
+    frame_lanes = {3: (0.67, 1.0), 2: (0.33, 0.66), 1: (0.0, 0.33)}
+
+    for gene, (start_hxb2, end_hxb2, frame) in GENES_RAW.items():
+        start_ata = hxb2_to_ata[start_hxb2]
+        end_ata   = hxb2_to_ata[end_hxb2]
+        y0, y1    = frame_lanes[frame]
+        color     = GENE_COLORS.get(gene, "grey")
+        width     = max(end_ata - start_ata, 1)
+
+        ax_gene.add_patch(plt.Rectangle(
+            (start_ata, y0 + 0.02), width, (y1 - y0) - 0.04,
+            color=color, alpha=0.40, linewidth=0,
+        ))
+        # Label only if the patch is wide enough to fit text
+        if width > n_total * 0.025:
+            ax_gene.text(
+                start_ata + width / 2, (y0 + y1) / 2,
+                gene, ha="center", va="center",
+                fontsize=6.5, color="black",
+                bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.6),
+            )
+
+    # Frame lane labels on the left
+    for frame, (y0, y1) in frame_lanes.items():
+        ax_gene.text(
+            -n_total * 0.005, (y0 + y1) / 2, f"F{frame}",
+            ha="right", va="center", fontsize=7,
+            color="grey", transform=ax_gene.transData,
+        )
+
+    plt.setp(ax_gene.get_xticklabels(), visible=False)
+
+    # ── Row 2: subtype heatmap ────────────────────────────────────────────
     cmap = plt.cm.viridis.copy()
-    cmap.set_bad(color="#cccccc")                          # NaN → light grey
+    cmap.set_bad(color="#cccccc")
 
     im = ax_lab.imshow(
         full_labels, aspect="auto",
@@ -367,13 +332,17 @@ def visualize_sample(
     )
     ax_lab.set_yticks(range(n_subtypes))
     ax_lab.set_yticklabels(subtype_names, fontsize=7)
-    ax_lab.set_xlabel("Token position", fontsize=9)
+    ax_lab.set_xlabel("ATA alignment position (bp)", fontsize=9)
     ax_lab.xaxis.set_major_locator(ticker.MultipleLocator(max(1, n_total // 10)))
+    # Increase fontsize of the axis
+    ax_lab.tick_params(axis='x', labelsize=8)
+    ax_lab.tick_params(axis='y', labelsize=7)
 
-    # ── Colorbar in its own dedicated axes ────────────────────────────────
-    fig.colorbar(im, cax=ax_cb, label="label (0/1)")
+    # ── Colorbar ──────────────────────────────────────────────────────────
+    fig.colorbar(im, cax=ax_cb, label="score")
 
     plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
     print(f"Figure saved to {path}", flush=True)
 
 
@@ -490,6 +459,279 @@ def visualize_metrics(save_path_loss,
         fig_perf.write_image(save_path_evol + '.png', scale=2)
     print(f"Performance evolution saved to: {save_path_evol}", flush=True)
 
+def visualize_confusion_matrix( # Not used here but imported in test
+    metrics,
+    save_path: str = None,
+) -> None:
+    """
+    Two-panel interactive confusion matrix:
+      - Left : FP co-occurrence heatmap (row = predicted subtype, col = true subtype)
+               normalized by column (true count), i.e. false-positive rate per true label.
+      - Right: Per-subtype performance bar chart (F1 / precision / recall).
+    """
+    m = metrics.compute_detailed()
+    st_names   = [metrics.id_to_st[i] for i in range(metrics.num_subtypes)]
+    n          = metrics.num_subtypes
+
+    # ── FP matrix (n x n), zero diagonal ──────────────────────────────────
+    fp_raw = m["fp_confusion"].numpy().copy()        # (n_pred, n_true)
+    np.fill_diagonal(fp_raw, 0)
+
+    # TP sits on the diagonal: predicted i AND true i
+    tp_vec = m["tp_counts"].numpy()                  # (n,)
+    fn_vec = m["fn_counts"].numpy()                  # (n,)
+
+    # True positives on diagonal, FP off-diagonal → full "predicted × true" matrix
+    full_raw = fp_raw.copy()
+    for i in range(n):
+        full_raw[i, i] = tp_vec[i]
+
+    # Normalize by column (true label total = TP + FN)
+    true_totals = tp_vec + fn_vec                    # how many times each subtype was the TRUE label
+    true_totals_safe = np.where(true_totals == 0, 1, true_totals)
+    full_norm = full_raw / true_totals_safe[np.newaxis, :]   # normalize columns
+
+    # Hover text: "Predicted X | True Y\nrate: 0.03\ncount: 1234"
+    hover = np.empty((n, n), dtype=object)
+    for i in range(n):
+        for j in range(n):
+            label = "TP" if i == j else "FP"
+            hover[i, j] = (
+                f"Predicted: {st_names[i]}<br>"
+                f"True: {st_names[j]}<br>"
+                f"{label} rate: {full_norm[i, j]:.3f}<br>"
+                f"Count: {int(full_raw[i, j]):,}"
+            )
+
+    # ── Per-subtype bar data ───────────────────────────────────────────────
+    per_st  = m["per_subtype"]                       # dict subtype -> {f1, precision, recall}
+    f1_vals = [per_st[s]["f1"]        for s in st_names]
+    p_vals  = [per_st[s]["precision"] for s in st_names]
+    r_vals  = [per_st[s]["recall"]    for s in st_names]
+
+    # Sort by F1 ascending for readability
+    order    = np.argsort(f1_vals)
+    st_ord   = [st_names[i] for i in order]
+    f1_ord   = [f1_vals[i]  for i in order]
+    p_ord    = [p_vals[i]   for i in order]
+    r_ord    = [r_vals[i]   for i in order]
+
+    # ── Figure ─────────────────────────────────────────────────────────────
+    fig = make_subplots(
+        rows=1, cols=2,
+        column_widths=[0.60, 0.40],
+        subplot_titles=(
+            "<b>FP / TP confusion (col-normalized by true label)</b>",
+            "<b>Per-subtype F1 / precision / recall</b>",
+        ),
+        horizontal_spacing=0.12,
+    )
+
+    # ── Left: heatmap ──────────────────────────────────────────────────────
+    # Mask diagonal separately so it gets a different colorscale feel
+    # We use a diverging-ish blue scale; diagonal TPs are visually distinct
+    fig.add_trace(
+        go.Heatmap(
+            z=full_norm,
+            x=st_names,          # true label (columns)
+            y=st_names,          # predicted label (rows)
+            text=hover,
+            hovertemplate="%{text}<extra></extra>",
+            colorscale="Blues",
+            zmin=0, zmax=1,
+            colorbar=dict(
+                title="Rate",
+                len=0.5, y=0.75,
+                thickness=12,
+            ),
+            xgap=1, ygap=1,
+        ),
+        row=1, col=1,
+    )
+
+    # Overlay diagonal boxes to highlight TPs visually
+    for i, st in enumerate(st_names):
+        fig.add_shape(
+            type="rect",
+            x0=i - 0.5, x1=i + 0.5,
+            y0=i - 0.5, y1=i + 0.5,
+            line=dict(color="#072C4B", width=1.5),
+            fillcolor="rgba(0,0,0,0)",
+            row=1, col=1,
+        )
+
+    # ── Right: horizontal grouped bar ─────────────────────────────────────
+    bar_colors = {"F1": "#072C4B", "Precision": "#F28089", "Recall": "#71cddd"}
+
+    for metric, vals in [("F1", f1_ord), ("Precision", p_ord), ("Recall", r_ord)]:
+        fig.add_trace(
+            go.Bar(
+                x=vals,
+                y=st_ord,
+                name=metric,
+                orientation="h",
+                marker_color=bar_colors[metric],
+                opacity=0.85,
+                hovertemplate=f"{metric}: %{{x:.3f}}<extra>%{{y}}</extra>",
+            ),
+            row=1, col=2,
+        )
+
+    # ── Layout ─────────────────────────────────────────────────────────────
+    fig.update_layout(
+        template="plotly_white",
+        width=1400,
+        height=max(500, 30 * n + 150),
+        barmode="group",
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1),
+        margin=dict(t=80, l=100, r=40, b=80),
+        title=dict(
+            text=f"<b>Confusion matrix — {metrics.split.upper()} split</b>",
+            font=dict(size=14),
+        ),
+    )
+
+    fig.update_xaxes(title_text="True subtype",      tickangle=45, row=1, col=1)
+    fig.update_yaxes(title_text="Predicted subtype",               row=1, col=1)
+    fig.update_xaxes(title_text="Score", range=[0, 1],             row=1, col=2)
+    fig.update_yaxes(title_text="",                                row=1, col=2)
+
+    if save_path:
+        if save_path.endswith(".html"):
+            fig.write_html(save_path)
+        elif save_path.endswith(".png"):
+            fig.write_image(save_path, scale=2)
+        else:
+            fig.write_html(save_path + ".html")
+            fig.write_image(save_path + ".png", scale=2)
+        print(f"Confusion matrix saved to: {save_path}", flush=True)
+
+    return fig
+
+
+def parse_fasta_headers(filepath):
+    """
+    Parse FASTA headers in format:
+    >Ref.SUBTYPE.COUNTRY.YEAR.SAMPLE_NAME.ACCESSION
+    e.g. >Ref.A.CH.03.HIV_CH_BID_V3538_2003.JQ403028
+    Year can be 2-digit (03 → 2003) or 4-digit (2003).
+    """
+    subtype_data = defaultdict(list)
+ 
+    with open(filepath, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith(">"):
+                continue
+ 
+            header = line[1:]
+            parts = header.split(".")
+ 
+            if len(parts) < 3:
+                continue
+ 
+            subtype = parts[1].strip()
+            year_str = parts[3].strip()
+ 
+            # Normalize 2-digit years
+            if re.fullmatch(r"\d{2}", year_str):
+                yy = int(year_str)
+                # Heuristic: 00-26 → 2000s, 27-99 → 1900s
+                year = 2000 + yy if yy <= 26 else 1900 + yy
+            elif re.fullmatch(r"\d{4}", year_str):
+                year = int(year_str)
+            else:
+                continue  # skip unparseable years
+ 
+            subtype_data[subtype].append(year)
+ 
+    return subtype_data
+ 
+ 
+def plot_reference_distribution(subtype_data,
+                                save_path=f"{workspace_path}/figs/subtype_distribution.html"):
+    subtypes = sorted(subtype_data.keys())
+
+    CLADE_GROUPS = {
+        "A_Clade": ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8"],
+        "F_Clade": ["F1", "F2"],
+        "B/D": ["B", "D"],
+        "N/O/P": ["N", "O", "P"],
+    }
+    # Colour clades with similar hues, but distinct enough to differentiate
+    clade_colors = {
+        "A_Clade": "#1f77b4",  # blue
+        "F_Clade": "#ff7f0e",  # orange
+        "B/D": "#2ca02c",      # green
+        "N/O/P": "#d62728",   # red
+        "Other": "#7f7f7f",    # grey for ungrouped subtypes
+    }
+    subtype_colors = []
+    for st in subtypes:
+        group = next((g for g, sts in CLADE_GROUPS.items() if st in sts), "Other")
+        subtype_colors.append(clade_colors[group])
+
+    counts     = [len(subtype_data[s]) for s in subtypes]
+    min_years  = [min(subtype_data[s]) for s in subtypes]
+    max_years  = [max(subtype_data[s]) for s in subtypes]
+    year_labels = [
+        f"{mn} – {mx}" if mn != mx else str(mn)
+        for mn, mx in zip(min_years, max_years)
+    ]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=subtypes,
+        y=counts,
+        marker_color=subtype_colors,
+        marker_line_width=0,
+        text=year_labels,
+        textposition="outside",
+        textfont=dict(size=11, family="monospace"),
+        customdata=list(zip(min_years, max_years, counts)),
+        hovertemplate=(
+            "<b>Subtype %{x}</b><br>"
+            "Sequences: %{customdata[2]}<br>"
+            "Earliest: %{customdata[0]}<br>"
+            "Latest: %{customdata[1]}<extra></extra>"
+        ),
+    ))
+
+    fig.update_layout(
+        title=dict(
+            text="HIV-1 sequences by subtype in LANL Super Filtered alignment",
+            font=dict(size=18, family="Arial"),
+            x=0.5,
+            xanchor="center",
+        ),
+        xaxis=dict(
+            title="Subtype",
+            tickfont=dict(size=12, family="monospace"),
+            categoryorder="array",
+            categoryarray=subtypes,
+        ),
+        yaxis=dict(
+            title="Number of sequences (log scale)",
+            gridcolor="rgba(0,0,0,0.06)",
+            zeroline=False,
+        ),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(t=80, b=60, l=60, r=30),
+        bargap=0.3,
+        font=dict(family="Arial"),
+        height=520,
+    )
+ 
+    # Subtle grid lines only on y
+    fig.update_xaxes(showgrid=False, linecolor="rgba(0,0,0,0.15)", linewidth=1)
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.07)", type="log")
+    fig.write_html(save_path_ref_dist, include_plotlyjs="cdn")
+    print(f"\nPlot saved at {save_path_ref_dist}")
+
+    return fig
+
 if __name__ == "__main__":
     breakpoints_path = f"{workspace_path}/data/output/lanl_crf_breakpoints.csv"
     df_bp = pd.read_csv(breakpoints_path)
@@ -506,28 +748,49 @@ if __name__ == "__main__":
                           save_path=f"{workspace_path}/figs/breakpoint_distribution_with_genes.html")
     
     st_to_seq_dict = defaultdict(list)
-    fasta_path = (f"{workspace_path}/data/input/HIV1_PURE_REF.fasta")
+    ref_fasta_path = (f"{workspace_path}/data/input/HIV1_PURE_REF.fasta")
     hxb2_ata_seq = ""
-    for i, rec in enumerate(SeqIO.parse(fasta_path, "fasta")):
+    for i, rec in enumerate(SeqIO.parse(ref_fasta_path, "fasta")):
         if i == 0:
             hxb2_ata_seq = str(rec.seq)
         else:
             st_to_seq_dict[rec.id.split(".")[1]].append(str(rec.seq))
 
-    # ---- rate array for mutation ----------------------------------------
-    ata_to_hxb2 = build_hxb2_ata_maps(hxb2_ata_seq)
-    names = ['A', 'B', 'C', 'avg']
-    rate_arrays = {}
-    for name in names:
-        rate_array_path = f"{workspace_path}/data/input/mutation_rates/empirical_mutation_rates_{name}.npy"
-        rate_array = np.load(rate_array_path)
-        rate_arrays[name] = rate_array
+    print(f"Parsing {ref_fasta_path} ...")
+    subtype_data = parse_fasta_headers(ref_fasta_path)
+ 
+    if not subtype_data:
+        print("No valid headers found. Check that headers follow the format:")
+        print("  >Ref.SUBTYPE.COUNTRY.YEAR.SAMPLE.ACCESSION")
+        sys.exit(1)
+ 
+    total = sum(len(v) for v in subtype_data.values())
+    print(f"Found {total} sequences across {len(subtype_data)} subtypes:")
+    for s in sorted(subtype_data):
+        yrs = subtype_data[s]
+        print(f"  {s:12s}  n={len(yrs):4d}  [{min(yrs)} – {max(yrs)}]")
 
-    visualize_mutation_rates(
-        rate_arrays,
-        ata_to_hxb2,
+    save_path_ref_dist = f"{workspace_path}/figs/reference_subtype_distribution.html"
+
+    fig = plot_reference_distribution(subtype_data,
+                                      save_path=save_path_ref_dist) 
+
+
+    # ---- rate array for diversity ----------------------------------------
+    ata_to_hxb2, hxb2_to_ata = build_hxb2_ata_maps(hxb2_ata_seq)
+    subtypes_with_data = ['A', 'C', 'D', 'E', 'F', 'G']
+    names = subtypes_with_data + ['avg']
+    diversity_arrays = {}
+    for name in names:
+        rate_array_path = f"{workspace_path}/data/input/diversity/site_rates_{name}.npy"
+        diversity_array = np.load(rate_array_path)
+        diversity_arrays[name] = diversity_array
+
+    visualize_diversity(
+        diversity_arrays,
+        hxb2_to_ata,
         window_size=100, 
-        save_path=f"{workspace_path}/figs/empirical_mutation_rates.html"
+        save_path=f"{workspace_path}/figs/empirical_diversity.html"
     )
     
     save_path_loss = f"{workspace_path}/figs/loss_evolution.html"

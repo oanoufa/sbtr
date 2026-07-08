@@ -2,11 +2,13 @@ import numpy as np
 import torch
 import pandas as pd
 import os
+from Bio import SeqIO
 import sys
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
+from collections import defaultdict
 from tqdm import tqdm
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import config
@@ -22,16 +24,30 @@ WORKSPACE_PATH = config.WORKSPACE_PATH
 ST_TO_ID_DICT = config.ST_TO_ID_DICT
 NUM_SUBTYPES       = len(ST_TO_ID_DICT)
 MODEL_CONFIG       = config.MODEL_CONFIG
-MAX_LENGTH         = MODEL_CONFIG["sequence_length"]
-PAD_MULTIPLE_OF    = MODEL_CONFIG["pad_multiple_of"]
+MAX_LENGTH         = config.SEQ_LEN_AFTER_PAD
+PAD_MULTIPLE_OF    = config.PAD_LEN
+PURE_REF_PATH      = config.PURE_REF_PATH
 
-from figs import visualize_sample
-from hiv_dataset_class import HIVSequenceDataset, open_memmaps
-from hiv_nt_training_class import HFModelForHIVSubtyping, train_step, validation_step
-from hiv_nt_metrics_class import HIVSubtypingMetrics
+from figs import visualize_sample, visualize_confusion_matrix
+from dataset_class import HIVSequenceDataset, open_memmaps
+from model_class import HFModelForHIVSubtyping, train_step, validation_step
+from metrics_class import HIVSubtypingMetrics
+from utils import build_hxb2_ata_maps
 
 
 if __name__ == "__main__":
+
+    hxb2_ata_seq = None
+    for i, rec in enumerate(SeqIO.parse(PURE_REF_PATH, "fasta")):
+        if i == 0:
+            hxb2_ata_seq = str(rec.seq).upper()
+            print(f"  HXB2 record id : {rec.id}")
+            break
+    if hxb2_ata_seq is None:
+        sys.exit("ERROR: pure_ref FASTA is empty.")
+
+    ata_to_hxb2, hxb2_to_ata = build_hxb2_ata_maps(hxb2_ata_seq)
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_CONFIG["model_name"], trust_remote_code=True)
 
     device = torch.device(MODEL_CONFIG["device"])
@@ -118,15 +134,23 @@ if __name__ == "__main__":
             "attention_mask": test_batch["attention_mask"][0].cpu().detach(),
             "labels":         test_batch["labels"][0].cpu().detach(),
         }
-        if i < 5:
+        if i < 10:
             out_path = f"{sample_vis_dir}/test_sample_{i}_{sample_name}.png"
             visualize_sample(sample=sample_pred,
+                             hxb2_to_ata=hxb2_to_ata,
                              pure_st_to_id_dict=ST_TO_ID_DICT,
                              idx='test_' + str(i) + '_' + sample_name, path=out_path)
             visualize_sample(sample=sample_true,
+                             hxb2_to_ata=hxb2_to_ata,
                              pure_st_to_id_dict=ST_TO_ID_DICT,
                              idx='test_' + str(i) + '_' + sample_name, path=out_path.replace('.png', '_true.png'))
         if i >= MODEL_CONFIG["max_val_batches"] * MODEL_CONFIG["batch_size"]:
             break
     test_metrics.print_detailed()
     test_metrics.save_metrics()
+    conf_matrix_path = f"{WORKSPACE_PATH}/figs/confusion_matrix.html"
+    visualize_confusion_matrix(
+        metrics=test_metrics,
+        save_path = conf_matrix_path,
+    )
+

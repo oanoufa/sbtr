@@ -17,11 +17,12 @@ from torch.optim import AdamW
 from transformers import AutoConfig, AutoModelForMaskedLM, AutoTokenizer
 from tqdm import tqdm
 import re
-from sklearn.model_selection import train_test_split   # fixed typo
+from sklearn.model_selection import train_test_split
 from typing import Dict
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import get_linear_schedule_with_warmup
 from pathlib import Path
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 
 from huggingface_hub import login
@@ -35,22 +36,26 @@ WORKSPACE_PATH     = config.WORKSPACE_PATH
 ST_TO_ID_DICT      = config.ST_TO_ID_DICT
 NUM_SUBTYPES       = len(ST_TO_ID_DICT)
 MODEL_CONFIG       = config.MODEL_CONFIG
-MAX_LENGTH         = MODEL_CONFIG["sequence_length"]
-PAD_MULTIPLE_OF    = MODEL_CONFIG["pad_multiple_of"]
+MAX_LENGTH         = config.SEQ_LEN_AFTER_PAD
+PAD_MULTIPLE_OF    = config.PAD_LEN
 PURE_REF_PATH      = config.PURE_REF_PATH
+CRF_REF_PATH       = config.CRF_REF_PATH
+VERSION = config.VERSION
 
-from hiv_dataset_class import HIVSequenceDataset
-from hiv_nt_training_class import HFModelForHIVSubtyping, train_step, validation_step
-from hiv_nt_metrics_class import HIVSubtypingMetrics
+from dataset_class import HIVSequenceDataset
+from model_class import HFModelForHIVSubtyping, train_step, validation_step
+from metrics_class import HIVSubtypingMetrics
 from utils import build_hxb2_ata_maps
 from figs import visualize_sample
+from hmm_decoder_class import HIVDecoder
+from crf_decoder_class import CRFReferenceDecoder
 
 import argparse
 
 parser = argparse.ArgumentParser(
     description='Infer HIV-1 subtype per position for sequences aligned to the reference alignment.'
 )
-parser.add_argument('--sequences', type=str, required=True,
+parser.add_argument('--sequences_ata', type=str, required=True,
                     help='FASTA file of sequences aligned to the HIV1 subtype reference alignment.')
 parser.add_argument('--metadata', type=str, default=None,
                     help="Metadata TSV; if omitted one is generated with split='inference' for every sample.")
@@ -60,11 +65,10 @@ parser.add_argument("--out_dir", type=str, default=".",
                     help="Output directory.")
 args = parser.parse_args()
 
-sequences = Path(args.sequences)
+sequences_ata = Path(args.sequences_ata)
 tag       = args.tag
 out_dir   = Path(args.out_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
-
 
 # ---------------------------------------------------------------------------
 # Main
@@ -86,14 +90,12 @@ if __name__ == "__main__":
         sys.exit("ERROR: pure_ref FASTA is empty.")
 
     ata_len     = len(hxb2_ata_seq)
-    hxb2_to_ata = build_hxb2_ata_maps(hxb2_ata_seq)
-    max_hxb2    = len(hxb2_to_ata) - 1
-    print(f"  ATA length     : {ata_len}")
-    print(f"  HXB2 positions : 1 – {max_hxb2}")
+    ata_to_hxb2, hxb2_to_ata = build_hxb2_ata_maps(hxb2_ata_seq)
+    print(f"  ATA length, HXB2 length     : {ata_len, int(max(ata_to_hxb2))}")
 
     # ---- 2. Load query sequences ------------------------------------------
-    print(f"\nLoading query sequences from: {sequences}")
-    records = list(SeqIO.parse(str(sequences), "fasta"))
+    print(f"\nLoading query sequences from: {sequences_ata}")
+    records = list(SeqIO.parse(str(sequences_ata), "fasta"))
     N = len(records)
     if N == 0:
         sys.exit("ERROR: query FASTA is empty.")
@@ -110,9 +112,6 @@ if __name__ == "__main__":
         )
 
     # ---- 4. Build / load metadata -----------------------------------------
-    # If the user supplied a metadata file, load it.
-    # Otherwise generate one so that every sequence lands in the
-    # 'inference' split and the rest of the pipeline is unchanged.
     if args.metadata is not None:
         metadata = pd.read_csv(args.metadata, sep="\t")
         print(f"\nLoaded metadata from: {args.metadata}  ({len(metadata)} rows)")
@@ -144,20 +143,21 @@ if __name__ == "__main__":
     print(f"  loss_masks : {out_masks} shape={mask_mm.shape}")
 
     # ---- 6. Fill memmaps --------------------------------------------------
-    print("\nProcessing sequences …")
     zero_lbl_packed = np.zeros((ata_len, n_packed), dtype=np.uint8)
-    zero_mask       = np.ones(ata_len,             dtype=bool)
+    zero_mask = np.ones(ata_len,             dtype=bool)
+    gap_masks = {}
 
     for i, rec in enumerate(records):
         raw = str(rec.seq).upper()
+        
+        is_real = np.array([c != '-' for c in raw], dtype=bool)
+        gap_masks[rec.id.split()[0]] = is_real
+
         arr = np.frombuffer(raw.encode(), dtype=np.uint8).copy()
         arr[arr == ord("-")] = ord("N")
         seq_mm[i] = arr
         lbl_mm[i]  = zero_lbl_packed
         mask_mm[i] = zero_mask
-
-        if (i + 1) % max(1, N // 10) == 0 or i == N - 1:
-            print(f"  [{i+1}/{N}]")
 
     seq_mm.flush()
     lbl_mm.flush()
@@ -188,11 +188,7 @@ if __name__ == "__main__":
     )
     print(f"Inference samples: {len(inference_dataset)}")
 
-    # ---- 9. Metrics (only when labels are available) ---------------------
-    id_to_st   = {v: k for k, v in ST_TO_ID_DICT.items()}
-    n_token_id = tokenizer.encode("N", add_special_tokens=False)[0]
-
-    # ---- 10. Load checkpoint ---------------------------------------------
+    # ---- 9. Load checkpoint ---------------------------------------------
     print(f"\nLoading checkpoint …")
     checkpoint = torch.load(
         os.path.join(MODEL_CONFIG["checkpoint_dir"], MODEL_CONFIG["checkpoint_name"]),
@@ -206,21 +202,43 @@ if __name__ == "__main__":
     sample_vis_dir = Path(WORKSPACE_PATH) / "figs" / f"sample_vis_{tag}"
     sample_vis_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pre-allocate a memory-mapped file for all predictions so we never
-    # have to hold the full (N, ata_len, NUM_SUBTYPES) float array in RAM.
     out_preds_path = out_dir / f"predictions_{tag}.npy"
     pred_mm = np.lib.format.open_memmap(
         str(out_preds_path), mode="w+", dtype=np.float32,
-        shape=(N, MODEL_CONFIG["sequence_length"], NUM_SUBTYPES),
+        shape=(N, MAX_LENGTH, NUM_SUBTYPES),
     )
     print(f"Prediction memmap: {out_preds_path}  shape={pred_mm.shape}")
 
-    # We'll also collect per-sample metadata rows for a summary TSV.
     inference_rows = (
         metadata[metadata["split"] == "inference"]
         .reset_index(drop=True)
     )
 
+    ID_TO_ST_DICT = {v: k for k, v in ST_TO_ID_DICT.items()}
+    hmm_decoder = HIVDecoder(
+        id_to_subtype    = ID_TO_ST_DICT,
+        crf_labels_path  = f'{WORKSPACE_PATH}/data/output/lanl_crf_label_seqs.npz',
+        epsilon          = 1e-6,
+        purity_threshold = 0.95,
+    )
+
+    crf_decoder = CRFReferenceDecoder(
+        bank_path=f'{WORKSPACE_PATH}/data/model/reference_bank/crf_reference_bank_v{VERSION}.npz',
+        top_k=5,
+    )
+
+    sample_regions_dir = out_dir / f"sample_regions_{tag}"
+    sample_regions_dir.mkdir(parents=True, exist_ok=True)
+
+    result_csv_path = out_dir / f"inference_results_{tag}.csv"
+    with open(result_csv_path, 'w') as f:
+        f.write(
+            "sample_name,classification,composition,dominant_subtype,dominant_fraction,"
+            "hmm_best_crf,hmm_best_crf_score,hmm_top5,"
+            "ref_best_crf,ref_best_distance,ref_top5"
+            "\n"
+        )
+ 
     print("\nRunning inference …")
     with torch.no_grad():
         for i, batch in tqdm(
@@ -230,15 +248,41 @@ if __name__ == "__main__":
             desc="Inference",
         ):
             sample_name = inference_rows.iloc[i]["sequence_name"]
-
+ 
             # Forward pass
             logits     = model(batch["input_ids"].to(device))["subtype_logits"]
-            pred_probs = torch.sigmoid(logits).squeeze(0).cpu().numpy()  # (ata_len, NUM_SUBTYPES)
-
-            # ---- Save predictions to memmap (one row per sample) ----
+            pred_probs = torch.sigmoid(logits).squeeze(0).cpu().numpy()  # (MAX_LENGTH, NUM_SUBTYPES)
             pred_mm[i] = pred_probs.astype(np.float32)
-
-            # ---- Per-sample visualisations -----------------
+ 
+            # Trim to ATA length and decode
+            preds    = pred_probs[:ata_len]
+            is_real  = gap_masks[sample_name]
+ 
+            hmm_result = hmm_decoder.decode(
+                probs       = preds,
+                gap_mask    = is_real,
+                sample_name = sample_name,
+                ata_to_hxb2 = ata_to_hxb2,
+            )
+            # ---- Write region TSVs ----------------------------------------
+            dealigned_regions_path = sample_regions_dir / f"dealigned_regions_{sample_name}.tsv"
+            aligned_regions_path   = sample_regions_dir / f"aligned_regions_{sample_name}.tsv"
+            hxb2_aligned_path      = sample_regions_dir / f"hxb2_aligned_{sample_name}.tsv"
+ 
+            with open(dealigned_regions_path, 'w') as f_d, \
+                 open(aligned_regions_path,   'w') as f_a, \
+                 open(hxb2_aligned_path,      'w') as f_h:
+ 
+                for start, end, st in hmm_result.regions_dealigned:
+                    f_d.write(f"{start}\t{end}\t{st}\n")
+ 
+                for start, end, st in hmm_result.regions_aligned:
+                    f_a.write(f"{start}\t{end}\t{st}\n")
+                    hxb2_start = ata_to_hxb2[start]
+                    hxb2_end   = ata_to_hxb2[end - 1]
+                    f_h.write(f"{hxb2_start}\t{hxb2_end}\t{st}\n")
+ 
+            # ---- Visualisation -------------------------------------------
             sample_pred = {
                 "input_ids":      batch["input_ids"][0].cpu().detach(),
                 "loss_mask":      batch["loss_mask"][0].cpu().detach(),
@@ -247,9 +291,41 @@ if __name__ == "__main__":
             }
             out_path = str(sample_vis_dir / f"inference_sample_{i}_{sample_name}.png")
             visualize_sample(sample=sample_pred,
-                                pure_st_to_id_dict=ST_TO_ID_DICT,
-                                idx=f"inference_{i}_{sample_name}",
-                                path=out_path)
+                             hxb2_to_ata=hxb2_to_ata,
+                             pure_st_to_id_dict=ST_TO_ID_DICT,
+                             idx=f"inference_{i}_{sample_name}",
+                             path=out_path)
 
+            preds_normalized = preds / (preds.sum(axis=-1, keepdims=True) + 1e-9)
+            # Subtype/CRF/Novel recombinant prediction
+            crf_result = crf_decoder.query(
+                probs=preds_normalized,
+                query_mask=is_real,
+            )
+
+            # ---- Summary CSV row -----------------------------------------
+            top5_hmm = "  ".join(
+                f"{crf}:{score:.4f}"
+                for crf, score in list(hmm_result.top_crf_matches.items())[:5]
+            )
+
+            top5_ref = "  ".join(
+                f"{r['crf_type']}:{r['max_score']:.4f}"
+                for r in crf_result["top_crf_types"][:5]
+            )
+
+            best_ref_crf      = crf_result["top_sequences"][0]["name"]
+            best_ref_distance = crf_result["top_crf_types"][0]["max_score"]
+
+            with open(result_csv_path, 'a') as f:
+                f.write(
+                    f"{sample_name},{hmm_result.classification},{hmm_result.composition_str},"
+                    f"{hmm_result.dominant_subtype},{hmm_result.dominant_fraction:.4f},"
+                    f"{hmm_result.best_crf},{hmm_result.best_crf_score:.4f},{top5_hmm},"
+                    f"{best_ref_crf},{best_ref_distance:.4f},{top5_ref}"
+                    f"\n"
+                )
+ 
     pred_mm.flush()
-    print(f"\nPredictions saved  → {out_preds_path}")
+    print(f"\nPredictions saved → {out_preds_path}")
+    print(f"Results CSV      → {result_csv_path}")

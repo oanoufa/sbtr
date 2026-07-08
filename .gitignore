@@ -1,10 +1,13 @@
 # Large data
 data/model/checkpoints/
+data/model/reference_bank/
 data/output/
+data/archive/
 data/trash/
+data/input/HIV1_PURE_REF.fasta
 
 # Large figs
-figs/sample_vis_crf_test
+figs/sample_vis_*
 
 # shell_scripts
 shell_scripts/
