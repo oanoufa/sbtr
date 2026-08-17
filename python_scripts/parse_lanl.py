@@ -2,19 +2,16 @@ import re
 import pandas as pd
 import requests
 import urllib3
-import sys
 import os
 from bs4 import BeautifulSoup
-import config
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 import numpy as np
 from Bio import SeqIO
-from Bio.SeqRecord import SeqRecord
-from Bio.Seq import Seq
 import tempfile
-
-from utils import build_hxb2_ata_maps
 from argparse import ArgumentParser
+
+from src.utils import build_hxb2_ata_maps
+from src import config
 
 workspace_path = config.WORKSPACE_PATH
 
@@ -497,7 +494,7 @@ def _resolve_single_label(
             pure |= _pure_set_of(part.strip(), df_by_crf, seen, depth)
         return '/'.join(sorted(pure)) if pure else subtype
 
-    return subtype  # unresolvable single label
+    return 'U'
 
 
 def _build_hxb2_label_array(
@@ -521,7 +518,7 @@ def _build_hxb2_label_array(
     * CRF reference (CRF01_AE, CRF07_BC)  → per-position labels copied from
                                               the referenced CRF's own array
                                               (intersected with [start, end])
-    * 'mix' or unknown label               → kept as-is
+    * 'mix' or unknown label               → replace with 'U'
     """
     if crf in cache:
         return cache[crf]
@@ -563,7 +560,7 @@ def _build_hxb2_label_array(
                 labels[s : e + 1] = dst
             continue
 
-        # ── unresolvable ('mix', absent CRF) — keep as-is ────────────────
+        # ── unresolvable (absent CRF) — keep as-is ────────────────
         labels[s : e + 1] = subtype
 
     cache[crf] = labels
@@ -869,6 +866,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
     pure_result: Dict[str, str] = {}
     crf_result:  Dict[str, str] = {}
     accession_names_seen: Set[str] = set()
+    pure_subtype_count: Dict[str, int] = {st: 0 for st in _PURE_ST}
 
     for rec in original_records:
         subtype  = _extract_subtype(rec.id)
@@ -893,6 +891,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
                 print(f"Warning: Record ID '{rec.id}' does not match expected format. Skipping.")
                 continue
             pure_result[rec.id] = seq_str
+            pure_subtype_count[subtype] += 1
             accession_names_seen.add(accession_name)
             continue
 
@@ -901,10 +900,11 @@ def prepare_pure_alignment(lanl_alignment_path: str,
                 print(f"Warning: Record ID '{rec.id}' does not match expected format. Skipping.")
                 continue
             arr = np.frombuffer(seq_str.encode(), dtype=np.uint8).copy()
-            arr[~pure_e_cols] = ord("N")
+            # arr[~pure_e_cols] = ord("N") # In the end we decided to keep the full sequence for CRF01_AE and consider it a pure subtype, as the A parts of AE also diverged enough to be considered a subsubtype of A.
             masked_seq = arr.tobytes().decode()
-            new_id_e = str(rec.id).replace("01_AE", "E")
+            new_id_e = str(rec.id).replace("01_AE", "AE")
             pure_result[new_id_e] = masked_seq
+            pure_subtype_count['AE'] += 1
             accession_names_seen.add(accession_name)
 
         if _is_crf26_a5u(subtype):
@@ -916,6 +916,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
             masked_seq = arr.tobytes().decode()
             new_id_a = str(rec.id).replace("26_A5U", "A5").replace("26_A5", "A5")
             pure_result[new_id_a] = masked_seq
+            pure_subtype_count['A5'] += 1
             accession_names_seen.add(accession_name)
 
         if _is_crf(subtype):
@@ -950,9 +951,13 @@ def prepare_pure_alignment(lanl_alignment_path: str,
     _write_fasta(crf_alignment_path,      hxb2_id, pure_result[hxb2_id],     crf_result)
     _write_fasta(combined_alignment_path, hxb2_id, pure_result[hxb2_id],     combined_result)
 
+    # Alphabetically sort the pure_subtype_count dictionary for consistent output
+    pure_subtype_count = dict(sorted(pure_subtype_count.items()))
+
     print(f"Pure alignment written to     : {pure_alignment_path} ({len(pure_result)-1} sequences)")
     print(f"CRF  alignment written to     : {crf_alignment_path} ({len(crf_result)} sequences)")
     print(f"Combined alignment written to : {combined_alignment_path} ({len(combined_result)-1} sequences)")
+    print(f"Pure-subtype counts: {pure_subtype_count}")
 
     return hxb2_id, pure_result, crf_result, combined_result
 
@@ -990,7 +995,7 @@ if __name__ == "__main__":
     print("Building CRF label sequences …")
     label_seqs = build_all_crf_label_sequences(df_segments, hxb2_gapped)
     aln_len    = len(next(iter(label_seqs.values())))
-    print(f"  {len(label_seqs)} CRFs  |  alignment length = {aln_len}")
+    print(f"  {len(label_seqs)} CRFs + PURE subtypes  |  alignment length = {aln_len}")
 
     # Save the label arrays (intermediary, used by the matching script)
     seqs_path = f"{workspace_path}/data/output/lanl_crf_label_seqs.npz"

@@ -10,7 +10,7 @@ import argparse
 parser = argparse.ArgumentParser(description='Turn an alignment into a FASTA file of sequences unaligned and normalized.')
 parser.add_argument('--i', type=str,
                     help='Input alignment',
-                    default='/pasteur/helix/projects/mPath/oanoufa/sbtr/data/input/HIV1_CRF_REF_6.fasta',
+                    default='/pasteur/helix/projects/mPath/oanoufa/sbtr/data/input/HIV1_PURE_REF.fasta',
                     )
 parser.add_argument('--o', type=str,
                     help='Output file (default: same as input with _seq suffix)',

@@ -10,7 +10,7 @@ from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 from tqdm import tqdm
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-import config
+from src import config
 
 from huggingface_hub import login
 TOKEN_PATH = config.TOKEN_PATH
@@ -112,6 +112,18 @@ if __name__ == "__main__":
         num_training_steps=MODEL_CONFIG["num_steps_training"],
     )
 
+    id_to_st   = {v: k for k, v in ST_TO_ID_DICT.items()}
+    n_token_id = tokenizer.encode("N", add_special_tokens=False)[0]
+
+    train_metrics_dir = os.path.join(MODEL_CONFIG["metrics_dir"], f"train_metrics_v{MODEL_CONFIG['model_version']}.tsv")
+    train_metrics = HIVSubtypingMetrics(NUM_SUBTYPES, "train",
+        output_path=train_metrics_dir,
+        id_to_st=id_to_st, n_token_id=n_token_id)
+
+    val_metrics   = HIVSubtypingMetrics(NUM_SUBTYPES, "val",
+        output_path=os.path.join(MODEL_CONFIG["metrics_dir"], f"val_metrics_v{MODEL_CONFIG['model_version']}.tsv"),
+        id_to_st=id_to_st, n_token_id=n_token_id)
+
     # ------------------------------------------------------------------
     # Optional: load from checkpoint to resume training
     # ------------------------------------------------------------------
@@ -123,6 +135,12 @@ if __name__ == "__main__":
         )
         model.load_state_dict(checkpoint["model_state_dict"],
                             strict=False)
+        # Last step value
+        curr_train_df = pd.read_csv(train_metrics_dir)
+        steps = curr_train_df['step'].tolist()
+        last_step = max(steps)
+    else:
+        last_step = 0
 
     print(f"\nTraining configuration:")
     print(f"  Batch size              : {MODEL_CONFIG['batch_size']}")
@@ -133,17 +151,6 @@ if __name__ == "__main__":
     print(f"  Warmup steps            : {num_warmup_steps}")
     print(f"  Log every               : {MODEL_CONFIG['log_every_n_steps']} steps")
     print(f"  Validate every          : {MODEL_CONFIG['validate_every_n_steps']} steps")
-
-    id_to_st   = {v: k for k, v in ST_TO_ID_DICT.items()}
-    n_token_id = tokenizer.encode("N", add_special_tokens=False)[0]
-
-    train_metrics = HIVSubtypingMetrics(NUM_SUBTYPES, "train",
-        output_path=os.path.join(MODEL_CONFIG["metrics_dir"], f"train_metrics_v{MODEL_CONFIG['model_version']}.tsv"),
-        id_to_st=id_to_st, n_token_id=n_token_id)
-
-    val_metrics   = HIVSubtypingMetrics(NUM_SUBTYPES, "val",
-        output_path=os.path.join(MODEL_CONFIG["metrics_dir"], f"val_metrics_v{MODEL_CONFIG['model_version']}.tsv"),
-        id_to_st=id_to_st, n_token_id=n_token_id)
 
     # ------------------------------------------------------------------
     # Training loop
@@ -167,11 +174,11 @@ if __name__ == "__main__":
 
         if (step_idx + 1) % (MODEL_CONFIG["log_every_n_steps"] * MODEL_CONFIG["num_steps_training"]) == 0:
             train_metrics.print_metrics()
-            train_metrics.save_metrics(step=step_idx + 1)
+            train_metrics.save_metrics(step=last_step + step_idx + 1)
             train_metrics.reset()
 
         if (step_idx + 1) % (MODEL_CONFIG["validate_every_n_steps"] * MODEL_CONFIG["num_steps_training"]) == 0:
-            print(f"\nRunning validation at step {step_idx + 1}...")
+            print(f"\nRunning validation at step {last_step + step_idx + 1}...")
             model.eval()
 
             for i, val_batch in enumerate(val_loader):
@@ -185,7 +192,7 @@ if __name__ == "__main__":
             else:
                 val_metrics.print_metrics()
             val_result = val_metrics.compute()
-            val_metrics.save_metrics(step=step_idx + 1)
+            val_metrics.save_metrics(step=last_step + step_idx + 1)
             val_metrics.reset()
 
             if val_result["f1/micro"] > best_val_f1:

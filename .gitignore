@@ -6,6 +6,9 @@ data/archive/
 data/trash/
 data/input/HIV1_PURE_REF.fasta
 
+# Hugging face token
+hftoken.txt
+
 # Large figs
 figs/sample_vis_*
 
