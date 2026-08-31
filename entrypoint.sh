@@ -17,4 +17,4 @@ tar -xzf /tmp/repo.tar.gz -C "${APP_DIR}" --strip-components=1
 rm -f /tmp/repo.tar.gz
 
 cd "${APP_DIR}"
-exec python sbtr.py "$@"
+exec python python_scripts/sbtr.py "$@"

@@ -34,10 +34,10 @@ COPY --from=mafft-builder /usr/local/bin/mafft* /usr/local/bin/
 COPY --from=mafft-builder /usr/local/libexec/mafft/ /usr/local/libexec/mafft/
 
 WORKDIR /app
-COPY requirements-base.txt requirements-cpu.txt requirements-gpu.txt ./
-RUN pip install --no-cache-dir -r requirements-base.txt \
-    && pip install --no-cache-dir -r requirements-${TORCH_VARIANT}.txt \
-    && rm -f requirements-base.txt requirements-cpu.txt requirements-gpu.txt
+COPY requirements.txt requirements_cpu.txt requirements_gpu.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -r requirements_${TORCH_VARIANT}.txt \
+    && rm -f requirements.txt requirements_cpu.txt requirements_gpu.txt
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

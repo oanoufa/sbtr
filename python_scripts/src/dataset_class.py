@@ -11,7 +11,7 @@ from . import config
 
 workspace_path = config.WORKSPACE_PATH
 pure_st_to_id_dict = config.ST_TO_ID_DICT
-tokenizer  = AutoTokenizer.from_pretrained(config.MODEL_CONFIG["model_name"], trust_remote_code=True)
+tokenizer  = AutoTokenizer.from_pretrained("oanoufa/sbtr_ntv3_650M", trust_remote_code=True)
 max_length = config.SEQ_LEN_AFTER_PAD
 pad_multiple_of = config.PAD_LEN
 
