@@ -63,6 +63,8 @@ parser.add_argument("--gpu",  action="store_true",
                     help="If true, try to use CUDA gpu.")
 parser.add_argument("--num_cpu", type=int, default="1",
                     help="Number of CPUs to use for concurrent processing.")
+parser.add_argument("--batch_size", type=int, default="1",
+                    help="Batch size to run the forward pass. Default is 1, increase if possible.")
 parser.add_argument("--wto", type=str, default="",
                     help="What-to-output string to know what output the user needs. The letters can be concatenated in any order."
                     "The model will always output at least the results csv. "
@@ -79,6 +81,7 @@ tag           = args.tag
 out_dir       = Path(args.out_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
 num_workers   = args.num_cpu
+batch_size    = args.batch_size
 wto           = args.wto
 gpu           = args.gpu
 
@@ -469,7 +472,7 @@ if __name__ == "__main__":
         split="inference",
     )
     inference_loader = DataLoader(
-        inference_dataset, batch_size=MODEL_CONFIG["inference_batch_size"], # Batch size 1 is much faster
+        inference_dataset, batch_size=batch_size, # Batch size 1 is much faster
         shuffle=False, num_workers=num_workers, pin_memory=True
     )
     print(f"Inference samples: {len(inference_dataset)}", flush=True)
