@@ -5,7 +5,7 @@ Subtyping is done per position. This fine-grain scale allows for the detection o
 
 Usage:
 
-docker run --rm \
+docker run --rm --shm-size=2g \
   -e HF_TOKEN=hf_xxxxx \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   -v /users/mpath/oanoufa/HIV_PROJECT/data/cuban:/data/in \
