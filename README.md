@@ -11,7 +11,7 @@ docker run --rm \
   -v /users/mpath/oanoufa/HIV_PROJECT/data/cuban:/data/in \
   -v /users/mpath/oanoufa/HIV_PROJECT/output_sbtr:/data/out \
   sbtr:cpu \
-  --seq /data/in/aln.cu.fa \
+  --seq /data/in/HIV_POL_SEQ_2013-2018_AGG.txt \
   --mafft_bin mafft \
   --tag test1 \
   --out_dir /data/out \

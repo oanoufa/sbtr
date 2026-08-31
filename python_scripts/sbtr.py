@@ -465,7 +465,8 @@ if __name__ == "__main__":
     inference_dataset = HIVSequenceDataset(
         seq_mm=seq_mm, lbl_mm=lbl_mm, mask_mm=mask_mm, metadata=metadata,
         tokenizer=tokenizer, n_subtypes=NUM_SUBTYPES,
-        max_length=MAX_LENGTH, pad_multiple_of=PAD_MULTIPLE_OF, split="inference",
+        max_length=MAX_LENGTH, pad_multiple_of=PAD_MULTIPLE_OF, hxb2_to_ata=HXB2_TO_ATA,
+        split="inference",
     )
     inference_loader = DataLoader(
         inference_dataset, batch_size=MODEL_CONFIG["inference_batch_size"], # Batch size 1 is much faster

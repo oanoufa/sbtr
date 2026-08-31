@@ -3,6 +3,7 @@ import torch
 import pandas as pd
 import os
 import sys
+from Bio import SeqIO
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
@@ -14,6 +15,7 @@ from src import config
 from src.dataset_class import HIVSequenceDataset, open_memmaps
 from src.model_class import HFModelForHIVSubtyping, HIVSubtypingConfig
 from src.metrics_class import HIVSubtypingMetrics, train_step, validation_step
+from src.utils import build_hxb2_ata_maps
 
 from huggingface_hub import login, upload_folder
 TOKEN_PATH = config.TOKEN_PATH
@@ -27,12 +29,30 @@ NUM_SUBTYPES       = len(ST_TO_ID_DICT)
 MODEL_CONFIG       = config.MODEL_CONFIG
 MAX_LENGTH         = config.SEQ_LEN_AFTER_PAD
 PAD_MULTIPLE_OF    = config.PAD_LEN
+COMBINED_REF_PATH = config.COMBINED_REF_PATH
+ATA_LEN            = config.ATA_LEN
+
 
 os.makedirs(MODEL_CONFIG["data_cache_dir"], exist_ok=True)
 os.makedirs(MODEL_CONFIG["checkpoint_dir"], exist_ok=True)
 os.makedirs(MODEL_CONFIG["metrics_dir"], exist_ok=True)
 
 if __name__ == "__main__":
+
+    print(f"Loading combined reference from: {COMBINED_REF_PATH}", flush=True)
+    hxb2_ata_seq = None
+    for i, rec in enumerate(SeqIO.parse(str(COMBINED_REF_PATH), "fasta")):
+        if i == 0:
+            hxb2_ata_seq = str(rec.seq).upper()
+            print(f"  HXB2 record id : {rec.id}")
+            break
+    if hxb2_ata_seq is None:
+        sys.exit("ERROR: combined reference FASTA is empty.")
+
+    ATA_TO_HXB2, HXB2_TO_ATA = build_hxb2_ata_maps(hxb2_ata_seq)
+
+    print(f"  ATA length, HXB2 length     : {ATA_LEN, int(max(ATA_TO_HXB2))}", flush=True)
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_CONFIG["model_name"], trust_remote_code=True)
 
     print(f"CUDA available: {torch.cuda.is_available()}")
@@ -77,12 +97,14 @@ if __name__ == "__main__":
     train_dataset = HIVSequenceDataset(
         seq_mm=seq_mm, lbl_mm=lbl_mm, mask_mm=mask_mm, metadata=metadata,
         tokenizer=tokenizer, n_subtypes=NUM_SUBTYPES,
-        max_length=MAX_LENGTH, pad_multiple_of=PAD_MULTIPLE_OF, split="train",
+        max_length=MAX_LENGTH, pad_multiple_of=PAD_MULTIPLE_OF, hxb2_to_ata=HXB2_TO_ATA,
+        split="train",
     )
     val_dataset = HIVSequenceDataset(
         seq_mm=seq_mm, lbl_mm=lbl_mm, mask_mm=mask_mm, metadata=metadata,
         tokenizer=tokenizer, n_subtypes=NUM_SUBTYPES,
-        max_length=MAX_LENGTH, pad_multiple_of=PAD_MULTIPLE_OF, split="val",
+        max_length=MAX_LENGTH, pad_multiple_of=PAD_MULTIPLE_OF, hxb2_to_ata=HXB2_TO_ATA,
+        split="val",
     )
 
     # ------------------------------------------------------------------

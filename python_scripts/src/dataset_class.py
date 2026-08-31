@@ -52,6 +52,7 @@ class HIVSequenceDataset(Dataset):
         n_subtypes: int,
         max_length: int,
         pad_multiple_of: int,
+        hxb2_to_ata: dict,
         split: str = "train",
     ):
         super().__init__()
@@ -62,6 +63,7 @@ class HIVSequenceDataset(Dataset):
         self.n_subtypes      = n_subtypes
         self.max_length      = max_length
         self.pad_multiple_of = pad_multiple_of
+        self.hxb2_to_ata     = hxb2_to_ata
         self.pad_token_id    = tokenizer.pad_token_id
         self.n_token_id      = tokenizer.encode("N", add_special_tokens=False)[0]
         meta = metadata.reset_index(drop=True)
@@ -103,11 +105,9 @@ class HIVSequenceDataset(Dataset):
         bio_mask_tensor[:len(seq_str)] = torch.from_numpy(bio_mask.astype(np.int64))
         
         # Mask 5', 3' and DRMs
-        hxb2_ata_csv = f"{workspace_path}/data/output/hxb2_ata_mapping.csv"
-        mapping_df = pd.read_csv(hxb2_ata_csv) # df with col ata_pos, hxb2_pos
         drm_mask = torch.ones(self.max_length, dtype=torch.long)
         for hxb2_pos in config.MASKED_POSITIONS_HXB2:
-            ata_pos = mapping_df[mapping_df['hxb2_pos'] == hxb2_pos]['ata_pos'].iloc[0]
+            ata_pos = self.hxb2_to_ata[hxb2_pos]
             drm_mask[ata_pos] = 0
 
 
