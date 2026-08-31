@@ -23,13 +23,10 @@ class CRFReferenceDecoder:
 
     def __init__(
         self,
-        bank_path: str | Path,
+        bank,
     ) -> None:
-        bank_path = Path(bank_path)
-        if not bank_path.exists():
-            raise FileNotFoundError(f"Reference bank not found: {bank_path}")
 
-        data       = np.load(bank_path, allow_pickle=True)
+        data       = bank
         self.bank  = data["reference_bank"].astype(np.float32)   # (R, L, C)
         self.names = np.asarray(data["reference_names"])          # (R,)
         self.R, self.L, self.C = self.bank.shape

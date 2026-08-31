@@ -11,24 +11,26 @@ from tqdm import tqdm
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 from src import config
+from src.dataset_class import HIVSequenceDataset, open_memmaps
+from src.model_class import HFModelForHIVSubtyping, HIVSubtypingConfig
+from src.metrics_class import HIVSubtypingMetrics, train_step, validation_step
 
-from huggingface_hub import login
+from huggingface_hub import login, upload_folder
 TOKEN_PATH = config.TOKEN_PATH
 with open(TOKEN_PATH, 'r') as f:
     token = f.read().strip()
 login(token=token)
 
 WORKSPACE_PATH = config.WORKSPACE_PATH
-
 ST_TO_ID_DICT = config.ST_TO_ID_DICT
 NUM_SUBTYPES       = len(ST_TO_ID_DICT)
 MODEL_CONFIG       = config.MODEL_CONFIG
 MAX_LENGTH         = config.SEQ_LEN_AFTER_PAD
 PAD_MULTIPLE_OF    = config.PAD_LEN
 
-from dataset_class import HIVSequenceDataset, open_memmaps
-from model_class import HFModelForHIVSubtyping, train_step, validation_step
-from metrics_class import HIVSubtypingMetrics
+os.makedirs(MODEL_CONFIG["data_cache_dir"], exist_ok=True)
+os.makedirs(MODEL_CONFIG["checkpoint_dir"], exist_ok=True)
+os.makedirs(MODEL_CONFIG["metrics_dir"], exist_ok=True)
 
 if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(MODEL_CONFIG["model_name"], trust_remote_code=True)
@@ -42,7 +44,11 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     print(f"Torch CPU threads: {torch.get_num_threads()}")
 
-    model = HFModelForHIVSubtyping(model_name=MODEL_CONFIG["model_name"], num_subtypes=NUM_SUBTYPES)
+    model_param = HIVSubtypingConfig(
+        backbone_name = MODEL_CONFIG["model_name"],
+        num_subtypes = NUM_SUBTYPES,
+    )
+    model = HFModelForHIVSubtyping.from_pretrained_backbone(model_param)
     model = model.to(device)
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
@@ -136,9 +142,9 @@ if __name__ == "__main__":
         model.load_state_dict(checkpoint["model_state_dict"],
                             strict=False)
         # Last step value
-        curr_train_df = pd.read_csv(train_metrics_dir)
-        steps = curr_train_df['step'].tolist()
-        last_step = max(steps)
+        curr_train_df = pd.read_csv(train_metrics_dir, sep='\t')
+        last_step = curr_train_df['step'].max()
+        print(f"Loaded last checkpoint and starting training at step {last_step}", flush=True)
     else:
         last_step = 0
 
@@ -170,19 +176,19 @@ if __name__ == "__main__":
             train_iter = iter(train_loader)
             batch = next(train_iter)
 
-        train_step(model, optimizer, scheduler, batch, train_metrics)
+        train_step(model, optimizer, scheduler, batch, train_metrics, device=device)
 
-        if (step_idx + 1) % (MODEL_CONFIG["log_every_n_steps"] * MODEL_CONFIG["num_steps_training"]) == 0:
+        if (step_idx + 1) % (MODEL_CONFIG["log_every_n_steps"]) == 0:
             train_metrics.print_metrics()
             train_metrics.save_metrics(step=last_step + step_idx + 1)
             train_metrics.reset()
 
-        if (step_idx + 1) % (MODEL_CONFIG["validate_every_n_steps"] * MODEL_CONFIG["num_steps_training"]) == 0:
+        if (step_idx + 1) % (MODEL_CONFIG["validate_every_n_steps"]) == 0:
             print(f"\nRunning validation at step {last_step + step_idx + 1}...")
             model.eval()
 
             for i, val_batch in enumerate(val_loader):
-                validation_step(model, val_batch, val_metrics)
+                validation_step(model, val_batch, val_metrics, device=device)
                 if i >= MODEL_CONFIG["max_val_batches"]:
                     break
 
@@ -209,3 +215,16 @@ if __name__ == "__main__":
             model.train()
 
     print(f"\nTraining completed after {MODEL_CONFIG['num_steps_training']} steps.")
+
+print(f"\nPushing model to HuggingFace")
+
+# Save locally
+HIVSubtypingConfig.register_for_auto_class()
+HFModelForHIVSubtyping.register_for_auto_class("AutoModel")
+
+model.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
+tokenizer.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
+
+# Or push directly to your Hugging Face repository
+tokenizer.push_to_hub("oanoufa/sbtr_ntv3_650M")
+model.push_to_hub("oanoufa/sbtr_ntv3_650M")

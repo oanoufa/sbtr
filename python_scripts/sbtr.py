@@ -2,18 +2,23 @@
 import numpy as np
 import torch
 import pandas as pd
+import json
+import gzip
 from Bio import SeqIO
+from Bio.Seq import Seq
 import os
 import sys
+import subprocess
+import tempfile
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer
+from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 import re
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
-from huggingface_hub import login
 
 from src import config
 from src.dataset_class import HIVSequenceDataset
@@ -22,38 +27,42 @@ from src.utils import build_hxb2_ata_maps
 from src.figs import visualize_sample_probs
 from src.crf_decoder_class import CRFReferenceDecoder
 
-
-TOKEN_PATH = config.TOKEN_PATH
-with open(TOKEN_PATH, 'r') as f:
-    token = f.read().strip()
-login(token=token)
-
-WORKSPACE_PATH     = config.WORKSPACE_PATH
 ST_TO_ID_DICT      = config.ST_TO_ID_DICT
 NUM_SUBTYPES       = len(ST_TO_ID_DICT)
 MODEL_CONFIG       = config.MODEL_CONFIG
 ATA_LEN            = config.ATA_LEN
 MAX_LENGTH         = config.SEQ_LEN_AFTER_PAD
 PAD_MULTIPLE_OF    = config.PAD_LEN
-PURE_REF_PATH      = config.PURE_REF_PATH
-CRF_REF_PATH       = config.CRF_REF_PATH
 VERSION            = config.VERSION
+
+# Import reference FASTA file
+_combined_ref_gz = hf_hub_download(
+    repo_id="oanoufa/sbtr_necessary_data",
+    filename="HIV1_COMBINED_REF.fasta.gz",
+    repo_type="dataset",
+)
+COMBINED_REF_PATH = Path(_combined_ref_gz).with_suffix("")
+if not COMBINED_REF_PATH.exists():
+    with gzip.open(_combined_ref_gz, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
+        f_out.write(f_in.read())
 
 import argparse
 
 parser = argparse.ArgumentParser(
     description='Infer HIV-1 subtype per position for sequences aligned to the reference alignment.'
 )
-parser.add_argument('--alignment', type=str, required=True,
-                    help='FASTA file of sequences aligned to the HIV1 subtype reference alignment.')
-parser.add_argument('--mafft_map', type=str, required=True,
-                    help='MAFFT compactmapout output, used to map the aligned sequences back to the original sequences.')
-
+parser.add_argument('--seq', type=str, required=True,
+                    help='FASTA/txt file of query sequences, or an alignment thereof. '
+                    'Will be dealigned and aligned to the HIV1 reference internally.')
+parser.add_argument('--mafft_bin', type=str, default='mafft',
+                    help='Path to the mafft executable (default: "mafft", assumed to be on PATH).')
 parser.add_argument("--tag", type=str, default="inference",
                     help="Text appended to the end of all generated file names.")
 parser.add_argument("--out_dir", type=str, default=".",
                     help="Output directory.")
-parser.add_argument("--num_workers", type=int, default="1",
+parser.add_argument("--gpu",  action="store_true",
+                    help="If true, try to use CUDA gpu.")
+parser.add_argument("--num_cpu", type=int, default="1",
                     help="Number of CPUs to use for concurrent processing.")
 parser.add_argument("--wto", type=str, default="",
                     help="What-to-output string to know what output the user needs. The letters can be concatenated in any order."
@@ -65,13 +74,14 @@ parser.add_argument("--wto", type=str, default="",
                     "'a': output the attention masks")
 args = parser.parse_args()
 
-alignment     = Path(args.alignment)
-mafft_map     = Path(args.mafft_map)
+seq_path      = Path(args.seq)
+mafft_bin     = args.mafft_bin
 tag           = args.tag
 out_dir       = Path(args.out_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
-num_workers   = args.num_workers
+num_workers   = args.num_cpu
 wto           = args.wto
+gpu           = args.gpu
 
 if 'r' in wto:
     print("r in wto: saving subtype regions in a csv", flush=True)
@@ -84,6 +94,10 @@ if 'a' in wto:
 
 num_workers = min(os.cpu_count(), num_workers)
 print(f"Using {num_workers} CPUs", flush=True)
+
+device = "cuda" if torch.cuda.is_available() and gpu else "cpu"
+print(f"Using device: {device}", flush=True)
+device = torch.device(device) if isinstance(device, str) else device
 
 
 def parse_compactmapout(compactmapout_path: Path) -> Dict[str, List[int]]:
@@ -120,6 +134,64 @@ def parse_compactmapout(compactmapout_path: Path) -> Dict[str, List[int]]:
                 mapping[seq_name].append((int(ata_pos), int(start_pos), int(end_pos)))  # Store as a tuple of (ATA position, start, end)
 
     return mapping
+
+
+def dealign_to_records(input_path: Path) -> List:
+    """
+    Strip gaps from an alignment (or pass already-flat sequences through),
+    producing query records ready to be aligned to the reference with MAFFT.
+    Mirrors the previous standalone alignment_to_seq.py script.
+    """
+    records = []
+    for index, record in enumerate(SeqIO.parse(str(input_path), "fasta")):
+        if index == 0 and "HXB2" in record.id:
+            continue
+        record.description = ""
+        seq = str(record.seq).upper().replace('-', '').strip('N')
+        record.seq = Seq(seq)
+        record.id = record.id.replace("Ref.", "")
+        records.append(record)
+    return records
+
+
+def load_reference_ids(reference_path: Path) -> Set[str]:
+    """IDs present in the reference alignment, used to strip it back out post-MAFFT."""
+    return {rec.id for rec in SeqIO.parse(str(reference_path), "fasta")}
+
+
+def run_mafft_addfragments(
+    query_records: List,
+    reference_path: Path,
+    mafft_bin: str,
+    threads: int,
+    tmp_dir: Path,
+) -> Tuple[Path, Path]:
+    """
+    Align query_records onto reference_path with `mafft --addfragments`.
+    Returns (aligned_fasta_path, compactmapout_path).
+    """
+    query_fasta = tmp_dir / "query.fasta"
+    SeqIO.write(query_records, str(query_fasta), "fasta")
+
+    aligned_fasta = tmp_dir / "aligned.fasta"
+    map_file = Path(str(query_fasta) + ".map")  # mafft's --compactmapout naming convention
+
+    cmd = [
+        mafft_bin, "--auto", "--keeplength", "--compactmapout", "--quiet",
+        "--thread", str(threads), "--addfragments", str(query_fasta), str(reference_path),
+    ]
+    print(f"Running: {' '.join(cmd)}", flush=True)
+    with open(aligned_fasta, "w") as out_f:
+        result = subprocess.run(cmd, stdout=out_f, stderr=subprocess.PIPE, text=True)
+
+    if result.returncode != 0:
+        sys.exit(f"ERROR: mafft failed (exit {result.returncode}):\n{result.stderr}")
+    if not aligned_fasta.exists() or aligned_fasta.stat().st_size == 0:
+        sys.exit(f"ERROR: mafft produced an empty alignment.\nstderr:\n{result.stderr}")
+    if not map_file.exists():
+        sys.exit(f"ERROR: expected mafft compactmapout file not found at {map_file}")
+
+    return aligned_fasta, map_file
 
 
 # Worker function to run in parallel on CPU worker processes
@@ -181,38 +253,147 @@ def process_single_sample_worker(
 
     return result_line, region_lines
 
+
+def global_results(df, summary_json_path):
+
+    def parse_decision(d):
+        parts = d.split('.')
+        kind = parts[0]                                   # pure | recombinant
+        status = parts[3] if len(parts) > 3 else None      # like | assigned | unassigned
+        crf = parts[4] if len(parts) > 4 else None         # e.g. 24_BG, or 51_01B+179_12B+...
+        return kind, status, crf
+
+    df[['kind', 'status', 'crf_raw']] = df['final_decision'].apply(
+        lambda d: pd.Series(parse_decision(d))
+    )
+    # For assigned recombinants, crf_raw is a single CRF name; keep as-is.
+    # For pure "like" calls, crf_raw is a "+"-joined list of nearest refs — not a CRF assignment.
+    df['crf_assigned'] = df['crf_raw'].where(df['status'] == 'assigned')
+    df['crf_like']     = df['crf_raw'].where(df['status'] == 'like')
+
+    n = len(df)
+    composition_counts = df['composition'].value_counts()
+    dominant_counts = df['dominant_subtype'].value_counts()
+    kind_counts = df['kind'].value_counts()
+    status_counts = df.loc[df['kind'] == 'recombinant', 'status'].value_counts()
+    crf_assigned_counts = df['crf_assigned'].value_counts()
+    ref_best_counts = df['ref_best_crf'].value_counts()
+    crf_assigned_size = df['crf_assigned'].shape[0]
+    crf_like_size = df['crf_like'].shape[0]
+
+    # Combined: assigned CRF (single value) + "like" pure calls (may list several nearest refs)
+    like_mask = df['status'] == 'like'
+    like_exploded = (
+        df.loc[like_mask, 'crf_raw']
+        .str.split('+')
+        .explode()
+    )
+    combined_series = pd.concat([
+        df.loc[df['status'] == 'assigned', 'crf_raw'],
+        like_exploded,
+    ])
+
+    crf_combined_size = crf_assigned_size + crf_like_size
+    crf_counts_combined = combined_series.value_counts()
+
+    summary = {
+        "n_sequences": n,
+        "composition_prevalence": (composition_counts / n).round(4).to_dict(),
+        "dominant_subtype_prevalence": (dominant_counts / n).round(4).to_dict(),
+        "pure_vs_recombinant": (kind_counts / n).round(4).to_dict(),
+        "recombinant_assigned_vs_unassigned": (
+            (status_counts / status_counts.sum()).round(4).to_dict()
+            if status_counts.sum() > 0 else {}
+        ),
+        "crf_prevalence_among_assigned": (
+            (crf_assigned_counts / crf_assigned_size).round(4).to_dict()
+            if crf_assigned_size > 0 else {}
+        ),
+        "crf_prevalence_among_like_and_assigned": (
+            (crf_counts_combined / crf_combined_size).round(4).to_dict()
+            if crf_combined_size > 0 else {}
+        ),
+        "dominant_fraction_stats": df['dominant_fraction'].describe()[
+            ['mean', 'std', 'min', '50%', 'max']
+        ].round(4).to_dict(),
+        "low_confidence_fraction": round((df['dominant_fraction'] < 0.5).mean(), 4),
+        "repeated_best_ref": {
+            k: int(v) for k, v in ref_best_counts.items() if v > 1
+        },
+    }
+
+    print("\n=== Global summary ===")
+    print(f"N sequences:              {n}")
+    print(f"Pure / recombinant:       {summary['pure_vs_recombinant']}")
+    print(f"Top compositions:         {composition_counts.head(5).to_dict()}")
+    print(f"Top dominant subtypes:    {dominant_counts.head(5).to_dict()}")
+    print(f"CRF prevalence (assigned):{summary['crf_prevalence_among_assigned']}")
+    print(f"Recombinant assigned/unassigned: {summary['recombinant_assigned_vs_unassigned']}")
+    print(f"Low-confidence fraction (<0.5):  {summary['low_confidence_fraction']}")
+    if summary['repeated_best_ref']:
+        print(f"Repeated best_ref hits:   {summary['repeated_best_ref']}")
+
+    with open(summary_json_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+    print(f"Summary JSON      {summary_json_path}", flush=True)
+
+
+
+
+
 if __name__ == "__main__":
 
     n_packed = int(np.ceil(NUM_SUBTYPES / 8))
     torch.set_float32_matmul_precision('high')
 
-    # ---- 1. Load HXB2 reference -------------------------------------------
-    print(f"Loading HXB2 reference from: {PURE_REF_PATH}", flush=True)
+    # ---- 1. Load combined reference (HXB2 coords + mafft target + ID filter) ----
+    print(f"Loading combined reference from: {COMBINED_REF_PATH}", flush=True)
     hxb2_ata_seq = None
-    for i, rec in enumerate(SeqIO.parse(PURE_REF_PATH, "fasta")):
+    for i, rec in enumerate(SeqIO.parse(str(COMBINED_REF_PATH), "fasta")):
         if i == 0:
             hxb2_ata_seq = str(rec.seq).upper()
             print(f"  HXB2 record id : {rec.id}")
             break
     if hxb2_ata_seq is None:
-        sys.exit("ERROR: pure_ref FASTA is empty.")
+        sys.exit("ERROR: combined reference FASTA is empty.")
 
     ATA_TO_HXB2, HXB2_TO_ATA = build_hxb2_ata_maps(hxb2_ata_seq)
     print(f"  ATA length, HXB2 length     : {ATA_LEN, int(max(ATA_TO_HXB2))}", flush=True)
 
-    # ---- 2. Load MAFFT compactmapout ---------------------------------------
-    print(f"\nLoading MAFFT compactmapout from: {mafft_map}", flush=True)
-    mafft_mapping = parse_compactmapout(mafft_map)
+    reference_ids = load_reference_ids(COMBINED_REF_PATH)
 
-    # ---- 3. Load query sequences ------------------------------------------
-    print(f"\nLoading query sequences from: {alignment}", flush=True)
-    records_ali = list(SeqIO.parse(str(alignment), "fasta"))
+    # ---- 2. Dealign input, align to reference with MAFFT, drop reference seqs ----
+    print(f"\nDealigning input sequences from: {seq_path}", flush=True)
+    query_records = dealign_to_records(seq_path)
+    if len(query_records) == 0:
+        sys.exit("ERROR: no query sequences found after dealigning input.")
+    print(f"  Query sequences: {len(query_records)}", flush=True)
+
+    with tempfile.TemporaryDirectory(prefix=f"sbtr_{tag}_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+
+        print(f"\nRunning MAFFT alignment to reference ({num_workers} threads)...", flush=True)
+        aligned_fasta, map_file = run_mafft_addfragments(
+            query_records=query_records,
+            reference_path=COMBINED_REF_PATH,
+            mafft_bin=mafft_bin,
+            threads=num_workers,
+            tmp_dir=tmp_dir,
+        )
+
+        mafft_mapping = parse_compactmapout(map_file)
+
+        records_ali = [
+            rec for rec in SeqIO.parse(str(aligned_fasta), "fasta")
+            if rec.id not in reference_ids
+        ]
+
     # Clean the potential info added at the beginning of the rec id (r_B+K+A3_2015 became 4ins:5192g-5197a,etc|r_B+K+A3_2015) but stay robust to the eventual presence of other |
     for rec in records_ali:
         rec.id = ''.join(rec.id.split('|')[1:]) if 'ins:' in rec.id else rec.id
     N = len(records_ali)
     if N == 0:
-        sys.exit("ERROR: query FASTA is empty.")
+        sys.exit("ERROR: no query sequences remain after removing reference sequences.")
     print(f"  Sequences found: {N}", flush=True)
 
     seq_lens = [len(r.seq) for r in records_ali]
@@ -273,16 +454,12 @@ if __name__ == "__main__":
     del records_ali
 
     # ---- 7. Model + tokenizer --------------------------------------------
-    tokenizer = AutoTokenizer.from_pretrained(
-        MODEL_CONFIG["model_name"], trust_remote_code=True
-    )
-    device = torch.device(MODEL_CONFIG["device"])
-    print(f"\nUsing device: {device}", flush=True)
+    model_used = "oanoufa/sbtr_ntv3_650M"
+    tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True)
+    model = HFModelForHIVSubtyping.from_pretrained(model_used)
 
-    model = HFModelForHIVSubtyping(
-        model_name=MODEL_CONFIG["model_name"], num_subtypes=NUM_SUBTYPES
-    )
     model = model.to(device)
+    model.eval()
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
     # ---- 8. Dataset + loader ---------------------------------------------
@@ -296,16 +473,6 @@ if __name__ == "__main__":
         shuffle=False, num_workers=num_workers, pin_memory=True
     )
     print(f"Inference samples: {len(inference_dataset)}", flush=True)
-
-    # ---- 9. Load checkpoint ---------------------------------------------
-    print(f"\nLoading checkpoint …", flush=True)
-    checkpoint = torch.load(
-        os.path.join(MODEL_CONFIG["checkpoint_dir"], MODEL_CONFIG["checkpoint_name"]),
-        map_location=device,
-        weights_only=True,
-    )
-    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-    model.eval()
 
     # ---- 11. Inference loop ----------------------------------------------
 
@@ -332,10 +499,13 @@ if __name__ == "__main__":
         .reset_index(drop=True)
     )
 
-    crf_decoder = CRFReferenceDecoder(
-        bank_path=f'{WORKSPACE_PATH}/data/model/reference_bank/crf_reference_bank.npz',
+    bank_path = hf_hub_download(
+        repo_id="oanoufa/sbtr_necessary_data",
+        filename="crf_reference_bank.npz",
+        repo_type="dataset",
     )
 
+    crf_decoder = CRFReferenceDecoder(bank_path=bank_path)
     # ------------------------------------------------------------------
     # Phase 1: Pure GPU Model Forward Pass & Memmap Writing
     # ------------------------------------------------------------------
@@ -421,6 +591,12 @@ if __name__ == "__main__":
             f.writelines(regions_buffer)
 
     print(f"Results CSV      {result_csv_path}", flush=True)
+
+
+    # Global result on the set of sequences given
+    df = pd.read_csv(result_csv_path)
+    summary_json_path = out_dir / f"summary_{tag}.json"
+    global_results(df, summary_json_path)
 
     # Remove memmaps files
     os.remove(out_seqs)

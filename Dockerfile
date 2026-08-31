@@ -1,38 +1,49 @@
-# Use Python 3.11 slim image as base
-FROM python:3.11-slim
+# syntax=docker/dockerfile:1
 
-# Set working directory
+# ---- Stage 1: build mafft from source -------------------------------------
+FROM python:3.11 AS mafft-builder
+LABEL maintainer=olivier.anoufa@pasteur.fr
+
+ENV MAFFT_VERSION=7.526
+RUN apt-get update --fix-missing \
+    && apt-get install -y --no-install-recommends wget gcc make \
+    && cd /usr/local/ \
+    && wget -O mafft-src.tgz https://gitlab.com/sysimm/mafft/-/archive/v${MAFFT_VERSION}/mafft-v${MAFFT_VERSION}.tar.gz \
+    && tar -xzf mafft-src.tgz \
+    && rm -f mafft-src.tgz \
+    && cd mafft-v${MAFFT_VERSION}/core \
+    && make \
+    && make install \
+    && rm -rf /usr/local/mafft-v${MAFFT_VERSION} \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# ---- Stage 2: runtime -------------------------------------------------------
+FROM python:3.11-slim AS runtime
+
+# TORCH_VARIANT selects which requirements file (and torch wheel index) to install.
+# docker build --build-arg TORCH_VARIANT=cpu -t sbtr:cpu .
+# docker build --build-arg TORCH_VARIANT=gpu -t sbtr:gpu .
+ARG TORCH_VARIANT=gpu
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# mafft binaries + support scripts from the builder stage
+COPY --from=mafft-builder /usr/local/bin/mafft* /usr/local/bin/
+COPY --from=mafft-builder /usr/local/libexec/mafft/ /usr/local/libexec/mafft/
+
 WORKDIR /app
+COPY requirements-base.txt requirements-cpu.txt requirements-gpu.txt ./
+RUN pip install --no-cache-dir -r requirements-base.txt \
+    && pip install --no-cache-dir -r requirements-${TORCH_VARIANT}.txt \
+    && rm -f requirements-base.txt requirements-cpu.txt requirements-gpu.txt
 
-# Install system dependencies required for scientific packages
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Create Python 3.11 virtual environment
-RUN python3.11 -m venv /app/venv
-ENV PATH="/app/venv/bin:$PATH"
-ENV VIRTUAL_ENV="/app/venv"
+# Persisted via a mounted volume at run time so repeat runs reuse cached
+# model / reference-bank downloads instead of re-fetching from HF Hub.
+ENV HF_HOME=/root/.cache/huggingface
 
-# Upgrade pip in venv
-RUN pip install --upgrade pip setuptools wheel
-
-# Copy requirements.txt and install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the entire project code
-COPY . .
-
-# Make docker-entrypoint.sh executable
-RUN chmod +x /app/docker-entrypoint.sh
-
-# Create a non-root user for running the application (optional but recommended)
-RUN useradd -m -u 1000 sbtruser && chown -R sbtruser:sbtruser /app
-USER sbtruser
-
-# Set entrypoint script for proper environment setup
-CMD ["python", "--version"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

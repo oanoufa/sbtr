@@ -1,5 +1,6 @@
 import gzip
 import numpy as np
+import io
 import random
 import torch
 import pandas as pd
@@ -15,7 +16,7 @@ from collections import defaultdict
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqIO.FastaIO import FastaWriter
-from huggingface_hub import login
+from huggingface_hub import login, HfApi
 
 from src.mutator_class import SequenceMutator
 from src import config
@@ -226,27 +227,13 @@ if __name__ == "__main__":
     print(f"  ATA length, HXB2 length     : {ATA_LEN, int(max(ata_to_hxb2))}")
 
     # ---- Model + tokenizer --------------------------------------------
-    tokenizer = AutoTokenizer.from_pretrained(
-        MODEL_CONFIG["model_name"], trust_remote_code=True
-    )
+    model_used = "oanoufa/sbtr_ntv3_650M"
+    tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True)
+    model = HFModelForHIVSubtyping.from_pretrained(model_used)
     device = torch.device(MODEL_CONFIG["device"])
-    print(f"\nUsing device: {device}")
-
-    model = HFModelForHIVSubtyping(
-        model_name=MODEL_CONFIG["model_name"], num_subtypes=NUM_SUBTYPES
-    )
     model = model.to(device)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # ---- Load checkpoint ---------------------------------------------
-    print(f"\nLoading checkpoint …")
-    checkpoint = torch.load(
-        os.path.join(MODEL_CONFIG["checkpoint_dir"], MODEL_CONFIG["checkpoint_name"]),
-        map_location=device,
-        weights_only=True,
-    )
-    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
     model.eval()
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
     # ---- CRF reference bank ------------------------------------------
     # Tokenize each CRF reference sequence directly (no HIVSequenceDataset wrapper needed).  We construct the attention mask ourselves from pad_token_id so we never rely on the tokenizer returning it.
@@ -267,7 +254,7 @@ if __name__ == "__main__":
         "sequence_name": seq_names,
         "split":         "crf_bank",
     })
-    generated_meta_path = out_dir / f"metadata_v{VERSION}.tsv"
+    generated_meta_path = out_dir / f"metadata.tsv"
     metadata_df = (
         metadata[metadata["split"] == "crf_bank"]
         .reset_index(drop=True)
@@ -349,25 +336,22 @@ if __name__ == "__main__":
             crf_names.append(sample_name)
             crf_profiles.append(probs.astype(np.float32))
 
-    reference_bank  = np.stack(crf_profiles,    axis=0)  # (R, ATA_LEN, NUM_SUBTYPES)
+    reference_bank = np.stack(crf_profiles, axis=0).astype(np.float16)  # (R, ATA_LEN, NUM_SUBTYPES)
     reference_names = np.array(crf_names)
-
     print(f"  Reference bank  : {reference_bank.shape}  "
           f"dtype={reference_bank.dtype}")
 
-    # Save the reference bank to a compressed npz for later use in inference.
-    out_path = out_dir / f"crf_reference_bank.npz"
-    if Path(out_path).exists():
+    # Save the reference bank to a compressed file for later use in inference.
+    out_path = out_dir / "crf_reference_bank.npz"
+    if out_path.exists():
         os.remove(out_path)
 
-    np.savez_compressed(
-        out_path,
-        reference_bank=reference_bank,
-        reference_names=reference_names,
-    )
+    np.savez_compressed(out_path, reference_bank=reference_bank, reference_names=reference_names)
+
     print(f"\nSaved CRF reference bank to: {out_path} with shape {reference_bank.shape}")
 
     test_dir = Path(WORKSPACE_PATH) / "data" / "output" / "test" /f"crf_v{VERSION}"
+    test_dir.mkdir(parents=True, exist_ok=True)
     out_path_test = test_dir / f"crf_test_set_v{VERSION}.fasta"
     with open(out_path_test, "w") as output_f:
         writer = FastaWriter(output_f, wrap=100000)
@@ -379,8 +363,31 @@ if __name__ == "__main__":
             record.seq = seq
             record.id = str(record.id).replace("Ref.", "")
             writer.write_record(record)
+    print(f"\nSaved test set to: {out_path_test}")
 
 
     os.remove(out_seqs)
     os.remove(out_lbls)
     os.remove(out_masks)
+
+    print(f"Uploading crf_ref_bank to HF")
+    api = HfApi()
+
+    # Upload a single file
+    api.upload_file(
+        path_or_fileobj=out_path,
+        path_in_repo="crf_reference_bank.npz",
+        repo_id="oanoufa/sbtr_necessary_data",
+        repo_type="dataset",
+    )
+
+    HIV1_COMBINED_REF = config.COMBINED_REF_PATH
+    with open(HIV1_COMBINED_REF, "rb") as f_in:
+        compressed_buffer = io.BytesIO(gzip.compress(f_in.read()))
+
+    api.upload_file(
+        path_or_fileobj=compressed_buffer,
+        path_in_repo="HIV1_COMBINED_REF.fasta.gz",  # Use .gz extension
+        repo_id="oanoufa/sbtr_necessary_data",
+        repo_type="dataset",
+    )

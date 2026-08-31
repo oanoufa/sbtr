@@ -1,12 +1,13 @@
-
-
 from torchmetrics.classification import MultilabelF1Score, MultilabelPrecision, MultilabelRecall
 import numpy as np
 import torch
+import torch.nn as nn
 import pandas as pd
 import os
 import sys
 from . import config
+from typing import Dict, Union
+import math
 
 workspace_path = config.WORKSPACE_PATH
 pure_st_to_id_dict = config.ST_TO_ID_DICT
@@ -15,6 +16,7 @@ MODEL_CONFIG = config.MODEL_CONFIG
 max_length = config.SEQ_LEN_AFTER_PAD
 device = torch.device(MODEL_CONFIG["device"])
 load_checkpoint = MODEL_CONFIG["load_checkpoint"]
+tv_weight = MODEL_CONFIG['tv_weight']
 
 # High-level clade groups to calculate true biological performance
 CLADE_GROUPS = {
@@ -191,3 +193,91 @@ class HIVSubtypingMetrics:
 
         df.to_csv(self.output_path, mode='a', index=False, sep='\t',
                   header=not file_exists)
+
+
+def tv_penalty(logits: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
+    probs = torch.sigmoid(logits)
+    diff = (probs[:, 1:, :] - probs[:, :-1, :]).abs()
+    pair_mask = loss_mask[:, 1:, :] * loss_mask[:, :-1, :]  # skip pairs touching padding/ambiguous zones
+    return (diff * pair_mask).sum() / pair_mask.sum().clamp(min=1)
+
+def train_step(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LambdaLR,
+    batch: Dict[str, torch.Tensor],
+    train_metrics: HIVSubtypingMetrics,
+    device: Union[str, torch.device],
+):
+
+    device = torch.device(device) if isinstance(device, str) else device
+    tokens = batch["input_ids"].to(device)
+    labels = batch["labels"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+    
+    # Extract the combined ambiguity + attention mask
+    loss_mask = batch["loss_mask"].to(device).unsqueeze(-1)
+
+    outputs = model(tokens=tokens, attention_mask=attention_mask)
+    logits = outputs["subtype_logits"]
+
+    loss_fn = torch.nn.BCEWithLogitsLoss(reduction="none")
+    
+    # Multiply unreduced loss by loss_mask. Ignored ambiguous zones evaluate to 0.
+    loss_unreduced = loss_fn(logits, labels) * loss_mask
+    bce = loss_unreduced.sum() / loss_mask.sum().clamp(min=1)
+    tv = tv_penalty(logits, loss_mask)
+    loss = bce + tv_weight * tv
+
+    optimizer.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    optimizer.step()
+    scheduler.step()
+
+    with torch.no_grad():
+        train_metrics.update(
+            preds=torch.sigmoid(logits), # previously (torch.sigmoid(logits) > 0.5).float()
+            targets=labels,
+            loss_mask=loss_mask,
+            loss=loss.item(),
+            input_ids=tokens,
+            loss_unreduced=loss_unreduced.detach(),
+        )
+
+    return loss.item()
+
+def validation_step(
+    model: nn.Module,
+    batch: dict,
+    metrics: HIVSubtypingMetrics,
+    device: Union[str, torch.device],
+):
+    model.eval()
+    loss_fn = torch.nn.BCEWithLogitsLoss(reduction="none")
+    device = torch.device(device) if isinstance(device, str) else device
+    tokens = batch["input_ids"].to(device)
+    labels = batch["labels"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+    loss_mask = batch["loss_mask"].to(device).unsqueeze(-1)
+
+    with torch.no_grad():
+        outputs = model(tokens=tokens, attention_mask=attention_mask)
+        logits = outputs["subtype_logits"]
+
+        loss_unreduced = loss_fn(logits, labels) * loss_mask
+        bce = loss_unreduced.sum() / loss_mask.sum().clamp(min=1)
+        tv = tv_penalty(logits, loss_mask)
+        loss = bce + tv_weight * tv
+
+        preds = torch.sigmoid(logits)
+        # preds = (preds > 0.5).float()
+
+        metrics.update(
+            preds=preds,
+            targets=labels,
+            loss_mask=loss_mask,
+            loss=loss.item(),
+        )
+
+    return loss.item()

@@ -45,7 +45,7 @@ TOKEN_PATH = f"{WORKSPACE_PATH}/hftoken.txt"
 MODEL_CONFIG = {
     # Model
     "model_name": "InstaDeepAI/NTv3_650M_pre", # zhihan1996/DNABERT-2-117M
-    "checkpoint_name": f"model_v{VERSION}.pt",
+    "checkpoint_name": f"sbtr_v{VERSION}.pt",
     "load_checkpoint": True, # Whether to load from checkpoint to resume training or start fresh training
     "model_version": VERSION,
 
@@ -59,10 +59,10 @@ MODEL_CONFIG = {
     "metrics_dir": f"{WORKSPACE_PATH}/data/model/metrics",
 
     # Training
-    "batch_size": 8,
-    "num_steps_training": 200000,
+    "batch_size": 4,
+    "num_steps_training": 1,
     # Only batch_size * num_steps_training samples will be used for training (randomly sampled from the training split)
-    "log_every_n_steps": 0.01,
+    "log_every_n_steps": 1500,
     "learning_rate": 1e-5,
     "weight_decay": 0.01,
     "warmup_proportion": 0.05,  # 5% of training steps for warmup
@@ -71,11 +71,11 @@ MODEL_CONFIG = {
     "tv_weight": 0.03,
 
     # Validation
-    "validate_every_n_steps": 0.1,
+    "validate_every_n_steps": 15000,
     "max_val_batches": 500,
 
     # Inference
-    "inference_batch_size": 8, # 1 is much faster than everything else for inference
+    "inference_batch_size": 8, # 1 is faster if on cpu
 
     # General
     "seed": 42,
@@ -83,9 +83,6 @@ MODEL_CONFIG = {
     "num_workers": 4,
 }
 
-os.makedirs(MODEL_CONFIG["data_cache_dir"], exist_ok=True)
-os.makedirs(MODEL_CONFIG["checkpoint_dir"], exist_ok=True)
-os.makedirs(MODEL_CONFIG["metrics_dir"], exist_ok=True)
 torch.manual_seed(MODEL_CONFIG["seed"])
 np.random.seed(MODEL_CONFIG["seed"])
 
