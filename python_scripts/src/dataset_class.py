@@ -110,7 +110,6 @@ class HIVSequenceDataset(Dataset):
             ata_pos = mapping_df[mapping_df['hxb2_pos'] == hxb2_pos]['ata_pos'].iloc[0]
             drm_mask[ata_pos] = 0
 
-        # print(f"DRM mask applied to {len(config.MASKED_POSITIONS_HXB2)} positions") # 1069 positions
 
         # Mask N tokens
         valid_nucleotide_mask = (input_ids != self.n_token_id).long()

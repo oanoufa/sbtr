@@ -16,8 +16,6 @@ from itertools import groupby
 import plotly.io as pio
 import matplotlib.patches as mpatches
 pio.defaults.default_format = "png"
-print(pio.kaleido.scope, flush=True)
-
 from . import config
 from .utils import build_hxb2_ata_maps
 

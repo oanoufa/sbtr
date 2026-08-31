@@ -38,28 +38,28 @@ def build_hxb2_ata_maps(hxb2_ata_seq: str) -> Tuple[np.ndarray, np.ndarray]:
     ata_len  = len(hxb2_ata_seq)
     hxb2_len = ata_pos.size
 
-    # ── forward: alignment column → HXB2 position (gap-filled) ──────────
+    #  forward: alignment column → HXB2 position (gap-filled) 
     ata_to_hxb2          = np.zeros(ata_len, dtype=np.int32)
     ata_to_hxb2[ata_pos] = np.arange(1, hxb2_len + 1)
     for i in range(1, ata_len):
         if ata_to_hxb2[i] == 0:
             ata_to_hxb2[i] = ata_to_hxb2[i - 1]
 
-    # ── reverse: HXB2 position → alignment column (exact) ───────────────
+    #  reverse: HXB2 position → alignment column (exact) 
     hxb2_to_ata     = np.zeros(hxb2_len + 1, dtype=np.int32)  # index 0 unused
     hxb2_to_ata[1:] = ata_pos
     
-    # ── print the mapping as a csv with columns: ata_pos, hxb2_pos ──────
-    mapping_path = Path(f"{WORKSPACE_PATH}/data/output/hxb2_ata_mapping.csv")
-    if mapping_path.is_file():
-        mapping_df = pd.read_csv(mapping_path)
-        if len(mapping_df) == ata_len:
-            return ata_to_hxb2, hxb2_to_ata
+    # #  print the mapping as a csv with columns: ata_pos, hxb2_pos 
+    # mapping_path = Path(f"{WORKSPACE_PATH}/data/output/hxb2_ata_mapping.csv")
+    # if mapping_path.is_file():
+    #     mapping_df = pd.read_csv(mapping_path)
+    #     if len(mapping_df) == ata_len:
+    #         return ata_to_hxb2, hxb2_to_ata
     
-    with open(mapping_path, "w") as f:
-        f.write("ata_pos,hxb2_pos\n")
-        for ata_pos in range(ata_len):
-            hxb2_pos = ata_to_hxb2[ata_pos]
-            f.write(f"{ata_pos},{hxb2_pos}\n")
+    # with open(mapping_path, "w") as f:
+    #     f.write("ata_pos,hxb2_pos\n")
+    #     for ata_pos in range(ata_len):
+    #         hxb2_pos = ata_to_hxb2[ata_pos]
+    #         f.write(f"{ata_pos},{hxb2_pos}\n")
 
     return ata_to_hxb2, hxb2_to_ata

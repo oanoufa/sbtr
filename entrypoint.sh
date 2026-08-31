@@ -1,9 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# TODO: replace with the real org/repo
 REPO="oanoufa/sbtr"
-REPO_REF="${REPO_REF:-main}"           # override with `-e REPO_REF=v1.2.0` for a pinned/reproducible run
+REPO_REF="${REPO_REF:-main}"
 APP_DIR="/app"
 
 echo "Fetching ${REPO}@${REPO_REF} ..."
