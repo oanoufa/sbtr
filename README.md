@@ -5,6 +5,9 @@ Subtyping is done per position. This fine-grain scale allows for the detection o
 
 Usage:
 
+docker build --build-arg TORCH_VARIANT=cpu -t sbtr:cpu .
+
+
 docker run --rm --shm-size=2g \
   -e HF_TOKEN=hf_xxxxx \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
@@ -18,3 +21,15 @@ docker run --rm --shm-size=2g \
   --wto r \
   --num_cpu 4
 
+apptainer run \
+  --env HF_TOKEN=hf_xxxxx \
+  --bind ~/.cache/huggingface:/root/.cache/huggingface \
+  --bind /users/mpath/oanoufa/HIV_PROJECT/data/cuban:/data/in \
+  --bind /users/mpath/oanoufa/HIV_PROJECT/output_sbtr:/data/out \
+  sbtr.sif \
+  --seq /data/in/HIV_POL_SEQ_2013-2018_AGG.txt \
+  --mafft_bin mafft \
+  --tag test1 \
+  --out_dir /data/out \
+  --wto r \
+  --num_cpu 4

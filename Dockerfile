@@ -33,6 +33,11 @@ RUN apt-get update \
 COPY --from=mafft-builder /usr/local/bin/mafft* /usr/local/bin/
 COPY --from=mafft-builder /usr/local/libexec/mafft/ /usr/local/libexec/mafft/
 
+# Download github repository
+RUN mkdir -p /app && \
+    curl -fsSL https://github.com/oanoufa/sbtr/archive/refs/heads/main.tar.gz | \
+    tar -xzf - -C /app --strip-components=1
+
 WORKDIR /app
 COPY requirements.txt requirements_cpu.txt requirements_gpu.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
