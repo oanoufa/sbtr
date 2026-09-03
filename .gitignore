@@ -8,6 +8,7 @@ data/input/HIV1_PURE_REF.fasta
 
 # docker/apptainer
 sbtr.sif
+tmp/
 
 # Hugging face token
 hftoken.txt
