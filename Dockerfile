@@ -20,7 +20,8 @@ RUN apt-get update --fix-missing \
 # runtime
 FROM python:3.11-slim AS runtime
 
-# TORCH_VARIANT selects which requirements file (and torch wheel index) to install.
+# TORCH_VARIANT selects which requirements file (and torch wheel index) to install. default to cpu.
+ARG TORCH_VARIANT=cpu
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 \
