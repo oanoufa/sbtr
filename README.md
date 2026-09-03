@@ -6,7 +6,7 @@ Subtyping is done per position. This fine-grain scale allows for the detection o
 Usage:
 
 docker build --build-arg TORCH_VARIANT=cpu -t sbtr:cpu .
-
+docker build --build-arg TORCH_VARIANT=gpu -t sbtr:gpu .
 
 docker run --rm --shm-size=2g \
   -e HF_TOKEN=hf_xxxxx \
