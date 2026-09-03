@@ -34,7 +34,7 @@ MAX_LENGTH         = config.SEQ_LEN_AFTER_PAD
 PAD_MULTIPLE_OF    = config.PAD_LEN
 VERSION            = config.VERSION
 
-# Import reference FASTA file
+# Import reference FASTA file from hf dataset
 _combined_ref_gz = hf_hub_download(
     repo_id="oanoufa/sbtr_necessary_data",
     filename="HIV1_COMBINED_REF.fasta.gz",
@@ -48,31 +48,68 @@ if not COMBINED_REF_PATH.exists():
 import argparse
 
 parser = argparse.ArgumentParser(
-    description='Infer HIV-1 subtype per position for sequences aligned to the reference alignment.'
+    description="sbtr: A novel HIV-1 fine-grain subtyping tool leveraging genomic language models.\n\n"
+    "Infers HIV-1 subtype per position from a set of sequences by dealigning, aligning\n"
+    "to the HIV-1 reference via MAFFT, running through the language model, and comparing\n"
+    "against a bank of CRF reference sequences.\n\n"
+    "Outputs generated:\n"
+    "  • results_tag.csv (always)\n"
+    "  • summary_tag.json (always)\n"
+    "  • Optional outputs via --wto: regions CSV, prediction figures, raw predictions, or attention masks.",
+    formatter_class=argparse.RawTextHelpFormatter,
 )
-parser.add_argument('--seq', type=str, required=True,
-                    help='FASTA/txt file of query sequences, or an alignment thereof. '
-                    'Will be dealigned and aligned to the HIV1 reference internally.')
-parser.add_argument('--mafft_bin', type=str, default='mafft',
-                    help='Path to the mafft executable (default: "mafft", assumed to be on PATH).')
-parser.add_argument("--tag", type=str, default="inference",
-                    help="Text appended to the end of all generated file names.")
-parser.add_argument("--out_dir", type=str, default=".",
-                    help="Output directory.")
-parser.add_argument("--gpu",  action="store_true",
-                    help="If true, try to use CUDA gpu.")
-parser.add_argument("--num_cpu", type=int, default="1",
-                    help="Number of CPUs to use for concurrent processing.")
-parser.add_argument("--batch_size", type=int, default="1",
-                    help="Batch size to run the forward pass. Default is 1, increase if possible.")
-parser.add_argument("--wto", type=str, default="",
-                    help="What-to-output string to know what output the user needs. The letters can be concatenated in any order."
-                    "The model will always output at least the results csv. "
-                    "Options: "
-                    "'f': output figures showing the prediction of the model for each sequence "
-                    "'r': output regions csv with col (start, end, subtype) "
-                    "'p': output the raw npy file of predictions "
-                    "'a': output the attention masks")
+
+parser.add_argument(
+    "--seq",
+    type=str,
+    required=True,
+    help="FASTA file of query sequences or an alignment.\n"
+    "Will be dealigned and re-aligned internally.",
+)
+parser.add_argument(
+    "--mafft_bin",
+    type=str,
+    default="mafft",
+    help='Path to the MAFFT executable (default: "mafft", assumes on PATH).',
+)
+parser.add_argument(
+    "--tag",
+    type=str,
+    default="inference",
+    help="Text appended to all output file names (default: 'inference').",
+)
+parser.add_argument(
+    "--out_dir",
+    type=str,
+    default=".",
+    help="Output directory path (default: current directory).",
+)
+parser.add_argument(
+    "--gpu", action="store_true", help="Enable CUDA GPU acceleration if available."
+)
+parser.add_argument(
+    "--num_cpu",
+    type=int,
+    default=1,
+    help="Number of CPUs for concurrent processing (default: 1).",
+)
+parser.add_argument(
+    "--batch_size",
+    type=int,
+    default=1,
+    help="Batch size for forward pass (default: 1, increase for GPU).",
+)
+parser.add_argument(
+    "--wto",
+    type=str,
+    default="",
+    help="""Flags determining extra output files. Combine letters in any order:
+  f : Output prediction figures per sequence (increases runtime)
+  r : Output regions CSV with (start, end, subtype)
+  p : Output raw .npy file of predictions
+  a : Output attention masks""",
+)
+
 args = parser.parse_args()
 
 seq_path      = Path(args.seq)
@@ -102,7 +139,9 @@ print(f"Using device: {device}", flush=True)
 device = torch.device(device) if isinstance(device, str) else device
 
 
-def parse_compactmapout(compactmapout_path: Path) -> Dict[str, List[int]]:
+def parse_compactmapout(
+    compactmapout_path: Path,
+    ) -> Dict[str, List[int]]:
     """
     Parse the MAFFT compactmapout file to get the mapping from aligned positions to original positions.
     Returns a dictionary where keys are sequence names and values are lists of original positions.
@@ -138,7 +177,9 @@ def parse_compactmapout(compactmapout_path: Path) -> Dict[str, List[int]]:
     return mapping
 
 
-def dealign_to_records(input_path: Path) -> List:
+def dealign_to_records(
+    input_path: Path,
+    ) -> List:
     """
     Strip gaps from an alignment (or pass already-flat sequences through),
     producing query records ready to be aligned to the reference with MAFFT.
@@ -156,7 +197,9 @@ def dealign_to_records(input_path: Path) -> List:
     return records
 
 
-def load_reference_ids(reference_path: Path) -> Set[str]:
+def load_reference_ids(
+    reference_path: Path,
+    ) -> Set[str]:
     """IDs present in the reference alignment, used to strip it back out post-MAFFT."""
     return {rec.id for rec in SeqIO.parse(str(reference_path), "fasta")}
 
@@ -167,7 +210,7 @@ def run_mafft_addfragments(
     mafft_bin: str,
     threads: int,
     tmp_dir: Path,
-) -> Tuple[Path, Path]:
+    ) -> Tuple[Path, Path]:
     """
     Align query_records onto reference_path with `mafft --addfragments`.
     Returns (aligned_fasta_path, compactmapout_path).
@@ -206,7 +249,7 @@ def process_single_sample_worker(
     is_real: np.ndarray,          # (L,)
     crf_decoder: CRFReferenceDecoder,
     wto: str,
-) -> tuple[str, list[str], dict]:
+    ) -> tuple[str, list[str], dict]:
     """Runs CRF decoding on CPU thread/process and prepares data for figure rendering."""
     preds_normalized = preds_slice / (preds_slice.sum(axis=-1, keepdims=True) + 1e-9)
 
@@ -256,7 +299,10 @@ def process_single_sample_worker(
     return result_line, region_lines
 
 
-def global_results(df, summary_json_path):
+def global_results(
+    df, 
+    summary_json_path,
+    ) -> None:
 
     def parse_decision(d):
         parts = d.split('.')
@@ -269,7 +315,7 @@ def global_results(df, summary_json_path):
         lambda d: pd.Series(parse_decision(d))
     )
     # For assigned recombinants, crf_raw is a single CRF name; keep as-is.
-    # For pure "like" calls, crf_raw is a "+"-joined list of nearest refs — not a CRF assignment.
+    # For pure "like" calls, crf_raw is a "+"-joined list of nearest refs, not a CRF assignment.
     df['crf_assigned'] = df['crf_raw'].where(df['status'] == 'assigned')
     df['crf_like']     = df['crf_raw'].where(df['status'] == 'like')
 
@@ -341,14 +387,12 @@ def global_results(df, summary_json_path):
 
 
 
-
-
 if __name__ == "__main__":
 
     n_packed = int(np.ceil(NUM_SUBTYPES / 8))
     torch.set_float32_matmul_precision('high')
 
-    # ---- 1. Load combined reference (HXB2 coords + mafft target + ID filter) ----
+    # Load combined reference (HXB2 coords + mafft target + ID filter)
     print(f"Loading combined reference from: {COMBINED_REF_PATH}", flush=True)
     hxb2_ata_seq = None
     for i, rec in enumerate(SeqIO.parse(str(COMBINED_REF_PATH), "fasta")):
@@ -364,7 +408,7 @@ if __name__ == "__main__":
 
     reference_ids = load_reference_ids(COMBINED_REF_PATH)
 
-    # ---- 2. Dealign input, align to reference with MAFFT, drop reference seqs ----
+    # Dealign input, align to reference with MAFFT, drop reference seqs
     print(f"\nDealigning input sequences from: {seq_path}", flush=True)
     query_records = dealign_to_records(seq_path)
     if len(query_records) == 0:
@@ -374,7 +418,7 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix=f"sbtr_{tag}_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
 
-        print(f"\nRunning MAFFT alignment to reference ({num_workers} threads)...", flush=True)
+        print(f"\nAligning input sequences to reference using MAFFT ({num_workers} threads)...", flush=True)
         aligned_fasta, map_file = run_mafft_addfragments(
             query_records=query_records,
             reference_path=COMBINED_REF_PATH,
@@ -396,7 +440,6 @@ if __name__ == "__main__":
     N = len(records_ali)
     if N == 0:
         sys.exit("ERROR: no query sequences remain after removing reference sequences.")
-    print(f"  Sequences found: {N}", flush=True)
 
     seq_lens = [len(r.seq) for r in records_ali]
     if len(set(seq_lens)) != 1:
@@ -408,14 +451,13 @@ if __name__ == "__main__":
             f"but ATA alignment has length {ATA_LEN}."
         )
 
-    # ---- 4. Build / load metadata -----------------------------------------
     seq_names = [rec.id.split()[0] for rec in records_ali]
     metadata  = pd.DataFrame({
         "sequence_name": seq_names,
         "split":         "inference",
     })
 
-    # ---- 5. Allocate memmaps ----------------------------------------------
+    # Allocate memmaps
     out_seqs         = out_dir / f"sequences_{tag}.npy"
     out_lbls         = out_dir / f"labels_{tag}.npy"
     out_masks        = out_dir / f"loss_masks_{tag}.npy"
@@ -433,7 +475,7 @@ if __name__ == "__main__":
     print(f"  labels     : {out_lbls}  shape={lbl_mm.shape}", flush=True)
     print(f"  loss_masks : {out_masks} shape={mask_mm.shape}", flush=True)
 
-    # ---- 6. Fill memmaps --------------------------------------------------
+    # Fill memmaps
     zero_lbl_packed = np.zeros((ATA_LEN, n_packed), dtype=np.uint8)
     zero_mask = np.ones(ATA_LEN,             dtype=bool)
     gap_masks = {}
@@ -455,7 +497,7 @@ if __name__ == "__main__":
     mask_mm.flush()
     del records_ali
 
-    # ---- 7. Model + tokenizer --------------------------------------------
+    # load model + tokenizer
     model_used = "oanoufa/sbtr_ntv3_650M"
     tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True)
     model = HFModelForHIVSubtyping.from_pretrained(model_used)
@@ -464,7 +506,7 @@ if __name__ == "__main__":
     model.eval()
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
-    # ---- 8. Dataset + loader ---------------------------------------------
+    # Dataset + loader
     inference_dataset = HIVSequenceDataset(
         seq_mm=seq_mm, lbl_mm=lbl_mm, mask_mm=mask_mm, metadata=metadata,
         tokenizer=tokenizer, n_subtypes=NUM_SUBTYPES,
@@ -475,9 +517,6 @@ if __name__ == "__main__":
         inference_dataset, batch_size=batch_size, # Batch size 1 is much faster
         shuffle=False, num_workers=num_workers, pin_memory=True
     )
-    print(f"Inference samples: {len(inference_dataset)}", flush=True)
-
-    # ---- 11. Inference loop ----------------------------------------------
 
     out_preds_path = out_dir / f"predictions_{tag}.npy"
     pred_mm = np.lib.format.open_memmap(
@@ -509,14 +548,12 @@ if __name__ == "__main__":
     )
 
     crf_decoder = CRFReferenceDecoder(bank_path=bank_path)
-    # ------------------------------------------------------------------
-    # Phase 1: Pure GPU Model Forward Pass & Memmap Writing
-    # ------------------------------------------------------------------
-    print("\nRunning Model Inference (GPU Phase)...", flush=True)
+    # Model forward pass
+    print("\nRunning model inference...", flush=True)
 
     global_idx = 0
     with torch.no_grad(), torch.amp.autocast('cuda'): # Mixed precision speeds up inference
-        for batch in tqdm(inference_loader, desc="Forward Pass", mininterval=30):
+        for batch in tqdm(inference_loader, desc="Forward pass...", mininterval=30):
             B = batch["input_ids"].shape[0]
 
             input_ids = batch["input_ids"].to(device, non_blocking=True)
@@ -537,10 +574,8 @@ if __name__ == "__main__":
     ploss_mm.flush()
     del inference_loader
 
-    # ------------------------------------------------------------------
-    # Phase 2: Multiprocessed CPU Post-Processing & Figure Generation
-    # ------------------------------------------------------------------
-    print(f"\nRunning Parallel CRF Decoding across available CPUs...", flush=True)
+    # CRF decoding and figures
+    print(f"\nRunning CRF decoding across available CPUs...", flush=True)
     sample_vis_dir = out_dir / "figs"
     if 'f' in wto: 
         sample_vis_dir.mkdir(parents=True, exist_ok=True)
