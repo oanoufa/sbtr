@@ -1,51 +1,62 @@
 # syntax=docker/dockerfile:1
 
-# build mafft from source
-FROM python:3.11 AS mafft-builder
-LABEL maintainer=olivier.anoufa@pasteur.fr
+# Build MAFFT from source
+FROM python:3.11-slim AS mafft-builder
+LABEL maintainer="olivier.anoufa@pasteur.fr"
 
 ENV MAFFT_VERSION=7.526
-RUN apt-get update --fix-missing \
-    && apt-get install -y --no-install-recommends wget gcc make \
-    && cd /usr/local/ \
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget gcc make libc6-dev \
+    && cd /tmp \
     && wget -O mafft-src.tgz https://gitlab.com/sysimm/mafft/-/archive/v${MAFFT_VERSION}/mafft-v${MAFFT_VERSION}.tar.gz \
     && tar -xzf mafft-src.tgz \
-    && rm -f mafft-src.tgz \
     && cd mafft-v${MAFFT_VERSION}/core \
     && make \
     && make install \
-    && rm -rf /usr/local/mafft-v${MAFFT_VERSION} \
+    && rm -rf /tmp/* \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# runtime
+# Runtime Image
 FROM python:3.11-slim AS runtime
 
-# TORCH_VARIANT selects which requirements file (and torch wheel index) to install. default to cpu.
 ARG TORCH_VARIANT=cpu
+ARG CUSTOM_TMP=/sbtr_tmp
 
+# Installed awk and grep/sed to support MAFFT scripts in slim environments
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 \
+    && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 gawk \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# mafft binaries + support scripts from the builder stage
-COPY --from=mafft-builder /usr/local/bin/mafft* /usr/local/bin/
+# Copy MAFFT binaries and binaries dependencies from builder
+COPY --from=mafft-builder /usr/local/bin/ /usr/local/bin/
 COPY --from=mafft-builder /usr/local/libexec/mafft/ /usr/local/libexec/mafft/
 
-# Download github repository
-RUN mkdir -p /app && \
-    curl -fsSL https://github.com/oanoufa/sbtr/archive/refs/heads/main.tar.gz | \
+WORKDIR /app
+
+# Download repository
+RUN curl -fsSL https://github.com/oanoufa/sbtr/archive/refs/heads/main.tar.gz | \
     tar -xzf - -C /app --strip-components=1
 
-# pip install libraries
-WORKDIR /app
-COPY requirements.txt requirements_cpu.txt requirements_gpu.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir -r requirements_${TORCH_VARIANT}.txt \
-    && rm -f requirements.txt requirements_cpu.txt requirements_gpu.txt
+# Install Python requirements safely
+RUN pip install --no-cache-dir --upgrade pip \
+    && if [ -f "requirements.txt" ]; then pip install --no-cache-dir -r requirements.txt; fi \
+    && if [ -f "requirements_${TORCH_VARIANT}.txt" ]; then pip install --no-cache-dir -r "requirements_${TORCH_VARIANT}.txt"; fi \
+    && rm -f requirements*.txt
 
-# Persisted via a mounted volume at run time so repeat runs reuse cached
-# model / reference-bank downloads instead of re-fetching from HF Hub.
-ENV HF_HOME=/root/.cache/huggingface
+# Setup writeable temporary directories (Apptainer/Singularity compatible)
+ENV TMP_DIR=${CUSTOM_TMP} \
+    HOME=${CUSTOM_TMP} \
+    TMPDIR=${CUSTOM_TMP} \
+    TEMP=${CUSTOM_TMP} \
+    TMP=${CUSTOM_TMP} \
+    MAFFT_TMPDIR=${CUSTOM_TMP}/mafft \
+    MPLCONFIGDIR=${CUSTOM_TMP}/mpl_config \
+    HF_HOME=${CUSTOM_TMP}/huggingface \
+    TRANSFORMERS_CACHE=${CUSTOM_TMP}/huggingface
+
+RUN mkdir -p ${TMP_DIR}/mpl_config ${TMP_DIR}/huggingface ${TMP_DIR}/mafft ${TMP_DIR}/cache \
+    && chmod -R 777 ${TMP_DIR}
 
 ENTRYPOINT ["python", "python_scripts/sbtr.py"]
 CMD ["--help"]
