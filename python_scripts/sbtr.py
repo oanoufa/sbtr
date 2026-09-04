@@ -20,10 +20,10 @@ from typing import Dict, List, Set, Tuple
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 
+from figs import visualize_sample_probs
 from src import config
 from src.dataset_class import HIVSequenceDataset
 from src.model_class import HFModelForHIVSubtyping
-from src.figs import visualize_sample_probs
 from src.crf_decoder_class import CRFReferenceDecoder
 
 ST_TO_ID_DICT      = config.ST_TO_ID_DICT

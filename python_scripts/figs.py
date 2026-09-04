@@ -18,7 +18,7 @@ from itertools import groupby
 import plotly.io as pio
 import matplotlib.patches as mpatches
 pio.defaults.default_format = "png"
-from . import config
+from src import config
 
 workspace_path = config.WORKSPACE_PATH
 

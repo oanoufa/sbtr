@@ -5,7 +5,7 @@ import numpy as np
 from pathlib import Path
 import argparse
 from typing import List, Tuple, Dict
-from src.figs import visualize_region_comparison
+from figs import visualize_region_comparison
 
 parser = argparse.ArgumentParser(
     description='Compare results from various methods.'
