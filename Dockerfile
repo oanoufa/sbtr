@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
 
+FROM ghcr.io/astral-sh/uv:latest AS uv
 # Build MAFFT from source
 FROM python:3.11-slim AS mafft-builder
 LABEL maintainer="olivier.anoufa@pasteur.fr"
@@ -20,8 +21,6 @@ RUN apt-get update \
 # Runtime Image
 FROM python:3.11-slim AS runtime
 
-ARG TORCH_VARIANT=cpu
-
 # Installed awk and grep/sed to support MAFFT scripts in slim environments
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 gawk \
@@ -37,11 +36,10 @@ WORKDIR /app
 RUN curl -fsSL https://github.com/oanoufa/sbtr/archive/refs/heads/main.tar.gz | \
     tar -xzf - -C /app --strip-components=1
 
-# Install Python requirements safely
-RUN pip install --no-cache-dir --upgrade pip \
-    && if [ -f "requirements.txt" ]; then pip install --no-cache-dir -r requirements.txt; fi \
-    && if [ -f "requirements_${TORCH_VARIANT}.txt" ]; then pip install --no-cache-dir -r "requirements_${TORCH_VARIANT}.txt"; fi \
-    && rm -f requirements*.txt
+# Install dependencies from the project metadata.
+
+COPY --from=uv /uv /usr/local/bin/uv
+RUN uv pip install --system --no-cache -r pyproject.toml
 
 # Setup writable temporary directories in standard /tmp
 ENV TMPDIR=/tmp \
@@ -53,7 +51,7 @@ ENV TMPDIR=/tmp \
     TRANSFORMERS_CACHE=/tmp/huggingface
 
 RUN mkdir -p /tmp/mpl_config /tmp/huggingface /tmp/mafft /tmp/cache \
-    && chmod -R 777 /tmp
+    && chmod -R 1777 /tmp
 
 ENTRYPOINT ["python", "python_scripts/sbtr.py"]
 CMD ["--help"]

@@ -9,11 +9,10 @@ import os
 import sys
 import subprocess
 import tempfile
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from huggingface_hub import hf_hub_download
 from tqdm import tqdm
-import re
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 import concurrent.futures
@@ -75,14 +74,14 @@ parser.add_argument(
 parser.add_argument(
     "--tag",
     type=str,
-    default="inference",
-    help="Text appended to all output file names (default: 'inference').",
+    default="sbtr",
+    help="Text appended to all output file names (default: 'sbtr').",
 )
 parser.add_argument(
     "--out_dir",
     type=str,
-    default=".",
-    help="Output directory path (default: current directory).",
+    default="./sbtr_output",
+    help="Output directory path (default: ./sbtr_output).",
 )
 parser.add_argument(
     "--gpu", action="store_true", help="Enable CUDA GPU acceleration if available."

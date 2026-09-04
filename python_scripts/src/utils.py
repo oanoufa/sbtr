@@ -4,8 +4,6 @@ Auxiliary functions used in several scripts
 
 from typing import Tuple
 import numpy as np
-from pathlib import Path
-import pandas as pd
 
 from . import config
 

@@ -9,7 +9,7 @@
 sbtr processes input sequences through an automated end-to-end pipeline:
 1. **Dealign & Align**: Input FASTA sequences or existing alignments are dealigned and aligned against an internal HIV-1 reference using MAFFT.
 2. **Language Model Inference**: Aligned sequences pass through a pre-trained genomic language model.
-3. **Subtype Classification**: Predictions are compared against model outputs from a reference bank of Circulating Recombinant Forms (CRFs) to generate final per-position subtype assignments.
+3. **Subtype Classification**: Predictions are compared against model outputs from a reference bank of Circulating Recombinant Forms (CRFs) to generate final per-position and global subtype assignments.
 
 ---
 
@@ -19,18 +19,14 @@ sbtr runs inside isolated container environments (Docker or Apptainer/Singularit
 
 ### 1. Build the Container
 
-**Docker (CPU or GPU):**
+**Docker:**
 ```bash
-# CPU build
-docker build --build-arg TORCH_VARIANT=cpu CUSTOM_TMP=/tmp -t sbtr:cpu .
-
-# GPU build
-docker build --build-arg TORCH_VARIANT=gpu CUSTOM_TMP=/tmp -t sbtr:gpu .
+docker build -t sbtr:latest .
 ```
 
 **Apptainer:**
 ```bash
-apptainer build sbtr.sif docker://oanoufa/sbtr:cpu_latest
+apptainer build sbtr.sif docker://oanoufa/sbtr:latest
 ```
 
 ---
@@ -47,7 +43,7 @@ docker run --rm --shm-size=2g \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   -v /path/to/data/input:/data/in \
   -v /path/to/data/output:/data/out \
-  sbtr:cpu \
+  sbtr \
   --seq /data/in/sequences.fasta \
   --out_dir /data/out \
   --tag my_run \
@@ -78,8 +74,8 @@ apptainer run \
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `--seq` | `str` | *Required* | Path to input FASTA file or alignment. |
-| `--out_dir` | `str` | `"."` | Output directory destination. |
-| `--tag` | `str` | `"inference"` | Text appended to generated output file names. |
+| `--out_dir` | `str` | `"./sbtr_output"` | Output directory destination. |
+| `--tag` | `str` | `"sbtr"` | Text appended to generated output file names. |
 | `--mafft_bin` | `str` | `"mafft"` | Path to MAFFT executable (assumed on `PATH`). |
 | `--gpu` | `flag` | `False` | Enable CUDA GPU acceleration. |
 | `--num_cpu` | `int` | `1` | Number of CPUs for concurrent processing. |

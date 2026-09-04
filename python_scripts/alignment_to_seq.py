@@ -1,8 +1,6 @@
 from Bio import SeqIO
 from pathlib import Path
-import pandas as pd
 from Bio.SeqIO.FastaIO import FastaWriter
-import numpy as np
 from tqdm import tqdm
 import argparse
 

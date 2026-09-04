@@ -1,10 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig, PreTrainedModel, AutoModelForMaskedLM, AutoConfig
-from tqdm import tqdm
-import math
-import re
-from typing import Dict, Union
+from typing import Dict
 
 class HIVSubtypingConfig(PretrainedConfig):
     model_type = "hiv_subtyping"

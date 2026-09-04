@@ -6,12 +6,12 @@ import torch
 import pandas as pd
 import os
 import sys
-from torch.utils.data import Dataset, DataLoader
-from transformers import AutoConfig, AutoModelForMaskedLM, AutoTokenizer
+from torch.utils.data import DataLoader
+from transformers import AutoTokenizer
 from tqdm import tqdm
 import re
 from pathlib import Path
-from typing import Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import List, Optional
 from collections import defaultdict
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord

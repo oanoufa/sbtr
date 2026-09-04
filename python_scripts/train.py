@@ -1,10 +1,8 @@
-import numpy as np
 import torch
 import pandas as pd
 import os
 import sys
 from Bio import SeqIO
-import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
