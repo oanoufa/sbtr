@@ -1,3 +1,5 @@
+"""Convert HIV FASTA sequences into a jpHMM reference file."""
+
 import argparse
 import random
 from collections import defaultdict

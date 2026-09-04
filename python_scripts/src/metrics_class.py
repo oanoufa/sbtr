@@ -1,3 +1,5 @@
+"""Training and evaluation metrics classes for subtype predictions."""
+
 from torchmetrics.classification import MultilabelF1Score, MultilabelPrecision, MultilabelRecall
 import numpy as np
 import torch

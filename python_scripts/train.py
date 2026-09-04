@@ -1,3 +1,5 @@
+"""Train the SBTR model and upload completed checkpoints."""
+
 import torch
 import pandas as pd
 import os
@@ -77,9 +79,7 @@ if __name__ == "__main__":
     print(f"Number of subtypes: {NUM_SUBTYPES}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # ------------------------------------------------------------------
-    # Data loading — open memmaps (no RAM allocation for the full dataset)
-    # ------------------------------------------------------------------
+    # Data loading - open memmaps (no RAM allocation for the full dataset)
     seq_mm, lbl_mm, mask_mm = open_memmaps(MODEL_CONFIG["sequences_path"], MODEL_CONFIG["labels_path"], MODEL_CONFIG["loss_masks_path"])
     metadata = pd.read_csv(MODEL_CONFIG["metadata_path"], sep='\t')
 
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     print(f"Loss masks memmap: {mask_mm.shape}  dtype={mask_mm.dtype}")
 
     # ------------------------------------------------------------------
-    # Datasets — each split views its subset of rows via stored indices
+    # Datasets - each split views its subset of rows via stored indices
     # ------------------------------------------------------------------
     train_dataset = HIVSequenceDataset(
         seq_mm=seq_mm, lbl_mm=lbl_mm, mask_mm=mask_mm, metadata=metadata,

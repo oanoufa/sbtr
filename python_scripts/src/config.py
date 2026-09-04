@@ -1,3 +1,5 @@
+"""Store paths and settings shared by the sbtr scripts."""
+
 import torch
 import numpy as np
 from typing import Tuple
@@ -118,7 +120,7 @@ ST_TO_ID_DICT = {
     }
 
 ST_COLORS = {
-    # A family — blues
+    # A family - blues
     'A':   '#378ADD',
     'A1':  '#185FA5',
     'A2':  '#85B7EB',
@@ -128,37 +130,37 @@ ST_COLORS = {
     'A6':  '#042C53',
     'A7':  '#5B9FD4',
     'A8':  '#2A76C4',
-    # B — coral
+    # B - coral
     'B':   '#D85A30',
-    # C — teal
+    # C - teal
     'C':   '#1D9E75',
-    # D — amber
+    # D - amber
     'D':   '#BA7517',
-    # AE — coral/pink blend
+    # AE - coral/pink blend
     'AE':  '#F0997B',
-    # F family — purple
+    # F family - purple
     'F':   '#7F77DD',
     'F1':  '#534AB7',
     'F2':  '#AFA9EC',
-    # G — green
+    # G - green
     'G':   '#639922',
-    # H — red
+    # H - red
     'H':   '#E24B4A',
-    # J — amber/warm
+    # J - amber/warm
     'J':   '#EF9F27',
-    # K — teal (lighter)
+    # K - teal (lighter)
     'K':   '#5DCAA5',
-    # L — pink
+    # L - pink
     'L':   '#D4537E',
-    # N — golden yellow
+    # N - golden yellow
     'N':   '#E2B93B',
-    # O — indigo / violet
+    # O - indigo / violet
     'O':   '#4A2E80',
-    # P — mint / sage
+    # P - mint / sage
     'P':   '#2EA885',
-    # U — neutral gray
+    # U - neutral gray
     'U':   '#788496',
-    # LTR sequence features & insertions — white / off-white
+    # LTR sequence features & insertions - white / off-white
     "5'LTR":         '#E8E8E8',  # Pure white
     "5'-Insertion":  '#E8E8E8',  # Pure white
     "3'LTR":         '#E8E8E8',  # Light off-white / light gray

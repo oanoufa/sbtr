@@ -1,9 +1,12 @@
+"""Clean and split LANL HIV reference sequences by subtype."""
+
 import re
 import pandas as pd
 import requests
 import urllib3
 import os
 from bs4 import BeautifulSoup
+from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 import numpy as np
 from Bio import SeqIO
@@ -12,20 +15,21 @@ from argparse import ArgumentParser
 
 from src import config
 
-workspace_path = config.WORKSPACE_PATH
+WORKSPACE_PATH = config.WORKSPACE_PATH
+ATA_LEN = config.ATA_LEN
 
 parser = ArgumentParser()
 parser.add_argument("--input",    type=str,
-                    default=f"{workspace_path}/data/output/LANL_COMBINED.fasta",
+                    default=f"{WORKSPACE_PATH}/data/output/LANL_COMBINED.fasta",
                     help="Input combined LANL alignment (FASTA)")
 parser.add_argument("--pure_out", type=str,
-                    default=f"{workspace_path}/data/output/HIV1_PURE_REF.fasta",
+                    default=f"{WORKSPACE_PATH}/data/output/HIV1_PURE_REF.fasta",
                     help="Output pure-subtype reference alignment (FASTA)")
 parser.add_argument("--crf_out",  type=str,
-                    default=f"{workspace_path}/data/output/HIV1_CRF_REF.fasta",
+                    default=f"{WORKSPACE_PATH}/data/output/HIV1_CRF_REF.fasta",
                     help="Output CRF reference alignment (FASTA)")
 parser.add_argument("--combined_out", type=str,
-                    default=f"{workspace_path}/data/output/HIV1_COMBINED_REF.fasta",
+                    default=f"{WORKSPACE_PATH}/data/output/HIV1_COMBINED_REF.fasta",
                     help="Output combined reference alignment (FASTA)")
 
 args = parser.parse_args()
@@ -426,8 +430,8 @@ def _is_crf26_a5u(subtype: Optional[str]) -> bool:
 def _crf_df_key(label: str, df_by_crf: Dict[str, pd.DataFrame]) -> Optional[str]:
     """Return the df_by_crf dict key for a CRF subtype label, or None.
 
-    'CRF01_AE' → 'CRF01'   'CRF07_BC' → 'CRF07'
-    'CRF109_0107' → 'CRF109'
+    'CRF01_AE' -> 'CRF01'   'CRF07_BC' -> 'CRF07'
+    'CRF109_0107' -> 'CRF109'
     """
     m = re.match(r'^CRF(\d+)', label, re.IGNORECASE)
     if m:
@@ -445,7 +449,7 @@ def _pure_set_of(
     """Flatten *label* to its constituent pure-subtype strings.
 
     Used to resolve compound labels that contain a CRF reference,
-    e.g. 'B/CRF01_AE' → {'A', 'B', 'E'}.
+    e.g. 'B/CRF01_AE' -> {'A', 'B', 'E'}.
     """
     if depth > 6:
         return frozenset({label}) if label in _PURE_ST else frozenset()
@@ -479,10 +483,10 @@ def _resolve_single_label(
 
     Examples
     --------
-    'A1'          → 'A'
-    'E/A1'        → 'A/E'       (sorted)
-    'B/CRF01_AE'  → 'A/B/E'
-    'CRF02_AG/B'  → 'A/B/G'
+    'A1'          -> 'A'
+    'E/A1'        -> 'A/E'       (sorted)
+    'B/CRF01_AE'  -> 'A/B/E'
+    'CRF02_AG/B'  -> 'A/B/G'
     """
     if subtype in _PURE_ST:
         return subtype
@@ -511,13 +515,13 @@ def _build_hxb2_label_array(
 
     Expansion rules
     ---------------
-    * Pure-subtype terminal (A1, B, E, …)  → unified string, e.g. A1 → 'A'
-    * Compound label (B/C, E/A1, …)        → sorted pure-subtype string per
-                                              position, e.g. 'E/A1' → 'A/E'
+    * Pure-subtype terminal (A1, B, E, ...)  -> unified string, e.g. A1 -> 'A'
+    * Compound label (B/C, E/A1, ...)        -> sorted pure-subtype string per
+                                              position, e.g. 'E/A1' -> 'A/E'
     * CRF reference (CRF01_AE, CRF07_BC)  → per-position labels copied from
                                               the referenced CRF's own array
                                               (intersected with [start, end])
-    * 'mix' or unknown label               → replace with 'U'
+    * 'mix' or unknown label               -> replace with 'U'
     """
     if crf in cache:
         return cache[crf]
@@ -559,7 +563,7 @@ def _build_hxb2_label_array(
                 labels[s : e + 1] = dst
             continue
 
-        # ── unresolvable (absent CRF) — keep as-is ────────────────
+        # Unresolvable (absent CRF) - keep as-is.
         labels[s : e + 1] = subtype
 
     cache[crf] = labels
@@ -593,7 +597,7 @@ def build_all_crf_label_sequences(
     """
     hxb2_arr = np.frombuffer(hxb2_gapped.encode(), dtype=np.uint8)
 
-    # Alignment columns that carry an actual HXB2 base (col i → HXB2 pos i+1)
+    # Alignment columns that carry an actual HXB2 base (col i -> HXB2 pos i+1)
     hxb2_base_cols = np.where(hxb2_arr != ord('-'))[0]
     hxb2_len       = len(hxb2_base_cols)   # = 9719 for the standard alignment
     aln_len        = len(hxb2_gapped)
@@ -669,11 +673,11 @@ def _merge_same_subtype_segments(df: pd.DataFrame) -> pd.DataFrame:
         for seg in segs[1:]:
             prev = merged[-1]
             if seg['subtype'] == prev['subtype']:
-                # Same subtype — extend the open segment
+                # Same subtype - extend the open segment
                 prev['end']    = seg['end']
                 prev['length'] = prev['end'] - prev['start'] + 1
             else:
-                # Different subtype — start a new segment
+                # Different subtype - start a new segment
                 merged.append(seg.copy())
         rows.extend(merged)
     return pd.DataFrame(rows, columns=['crf', 'start', 'end', 'subtype', 'length'])
@@ -788,7 +792,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
 
     # ── 2. Parse trimAl kept-column indices ───────────────────────────────
     colnumbering_path = os.path.join(
-        config.WORKSPACE_PATH, "data", "output", "trimal_kept_columns.txt"
+        WORKSPACE_PATH, "data", "output", "trimal_kept_columns.txt"
     )
     with open(colnumbering_path) as fh:
         line = fh.read().strip()
@@ -855,12 +859,12 @@ def prepare_pure_alignment(lanl_alignment_path: str,
     mapping_path = Path(f"{WORKSPACE_PATH}/data/output/hxb2_ata_mapping.csv")
     if mapping_path.is_file():
         mapping_df = pd.read_csv(mapping_path)
-        if len(mapping_df) == ata_len:
+        if len(mapping_df) == ATA_LEN:
             return ata_to_hxb2, hxb2_to_ata
     
     with open(mapping_path, "w") as f:
         f.write("ata_pos,hxb2_pos\n")
-        for ata_pos in range(ata_len):
+        for ata_pos in range(ATA_LEN):
             hxb2_pos = ata_to_hxb2[ata_pos]
             f.write(f"{ata_pos},{hxb2_pos}\n")
     print(f"  New ATA length              : {len(hxb2_ata)}")
@@ -979,7 +983,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
 if __name__ == "__main__":
 
     # ── 1. Scrape and parse LANL breakpoints ─────────────────────────────
-    bp_path = f"{workspace_path}/data/output/LANL_scrapped_bp.breakpoints"
+    bp_path = f"{WORKSPACE_PATH}/data/output/LANL_scrapped_bp.breakpoints"
     scrape_and_parse_lanl_breakpoints(bp_path)
 
     df_segments, df_breakpoints = parse_breakpoints_file(bp_path)
@@ -989,9 +993,9 @@ if __name__ == "__main__":
     print(f"Total breakpoints : {len(df_breakpoints)}")
 
     df_segments.to_csv(
-        f"{workspace_path}/data/output/lanl_crf_segments.csv",    index=False)
+        f"{WORKSPACE_PATH}/data/output/lanl_crf_segments.csv",    index=False)
     df_breakpoints.to_csv(
-        f"{workspace_path}/data/output/lanl_crf_breakpoints.csv", index=False)
+        f"{WORKSPACE_PATH}/data/output/lanl_crf_breakpoints.csv", index=False)
     print("Saved lanl_crf_segments.csv and lanl_crf_breakpoints.csv\n")
 
     # ── 2. Prepare pure / CRF reference alignments ───────────────────────
@@ -1000,7 +1004,7 @@ if __name__ == "__main__":
         lanl_subtype_ref_path, pure_ref_path, crf_ref_path, combined_ref_path,
     )
 
-    # ── 3. Build per-position label sequences (HXB2 → alignment) ─────────
+    # 3. Build per-position label sequences (HXB2 -> alignment)
     hxb2_gapped = pure_result[hxb2_id]
 
     print("Building CRF label sequences …")
@@ -1009,12 +1013,12 @@ if __name__ == "__main__":
     print(f"  {len(label_seqs)} CRFs + PURE subtypes  |  alignment length = {aln_len}")
 
     # Save the label arrays (intermediary, used by the matching script)
-    seqs_path = f"{workspace_path}/data/output/lanl_crf_label_seqs.npz"
+    seqs_path = f"{WORKSPACE_PATH}/data/output/lanl_crf_label_seqs.npz"
     np.savez_compressed(seqs_path, **label_seqs)
     print(f"  Label-sequence archive : {seqs_path}")
 
     # ── 4. Derive alignment-coord segment CSV from the label sequences ────
-    csv_path = f"{workspace_path}/data/output/lanl_crf_segments_aln.csv"
+    csv_path = f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_aln.csv"
     df_aln   = label_sequences_to_segments_csv(label_seqs, csv_path)
     print(f"\nAlignment-coord segments : {csv_path}  ({len(df_aln)} rows)")
     print(df_aln.head(20).to_string(index=False))

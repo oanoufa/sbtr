@@ -1,1 +1,1 @@
-# Init file 
+"""Shared SBTR model and data utilities."""

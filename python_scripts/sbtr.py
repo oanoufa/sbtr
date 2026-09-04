@@ -1,13 +1,4 @@
-"""
-sbtr: A novel HIV-1 fine-grain subtyping tool leveraging genomic language models.
-    Infers HIV-1 subtype per position from a set of sequences by dealigning, aligning
-    to the HIV-1 reference via MAFFT, running through the language model, and comparing
-    against a bank of CRF reference sequences.
-    Outputs generated:
-      • results_tag.csv (always)
-      • summary_tag.json (always)
-      • Optional outputs via --wto: regions CSV, prediction figures, raw predictions, or attention masks.
-"""
+"""Run SBTR to predict HIV-1 subtypes across input sequences."""
 
 import numpy as np
 import torch

@@ -1,3 +1,5 @@
+"""Define the sbtr model configuration and classification layers."""
+
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig, PreTrainedModel, AutoModelForMaskedLM, AutoConfig

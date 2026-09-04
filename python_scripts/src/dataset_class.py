@@ -1,3 +1,5 @@
+"""Provide the dataset class used to train and run the sbtr model."""
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -32,7 +34,7 @@ class HIVSequenceDataset(Dataset):
 
     Neither the sequence array nor the label array is loaded into RAM at init.
     Each __getitem__ call pages in exactly two rows (one sequence, one label
-    matrix) from disk via the OS page cache — making this suitable for
+    matrix) from disk via the OS page cache - making this suitable for
     datasets that don't fit in memory.
 
     NTv3 tokenizer notes
@@ -40,7 +42,7 @@ class HIVSequenceDataset(Dataset):
     - Single-base tokenization: 1 token == 1 nucleotide.
     - Sequences must be padded to a multiple of `pad_multiple_of` (128 for the
       7-downsample variant, 32 for the 5-downsample variant).
-    - `add_special_tokens=False` — NTv3 is used without CLS/EOS.
+    - `add_special_tokens=False` - NTv3 is used without CLS/EOS.
     """
     def __init__(
         self,

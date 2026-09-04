@@ -1,3 +1,5 @@
+"""Turn an aligned FASTA file into an unaligned FASTA file."""
+
 from Bio import SeqIO
 from pathlib import Path
 from Bio.SeqIO.FastaIO import FastaWriter

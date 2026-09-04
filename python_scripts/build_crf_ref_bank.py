@@ -1,3 +1,5 @@
+"""Build a reference bank of HIV sequences for CRF comparisons."""
+
 import gzip
 import numpy as np
 import io
@@ -89,8 +91,8 @@ def build_crf_reference_bank(
     Steps
     1. Parse all sequences from *crf_ref_path*.
     2. Extract (CRF type, accession) from each sequence ID, handling two formats:
-         • ``Ref.01_AE.CN.05.FJ051.DQ859178``    (with ``Ref.`` prefix)
-         • ``01_AE.TH.2007.AA028a_wg7.JX447031``  (without prefix)
+         - ``Ref.01_AE.CN.05.FJ051.DQ859178``    (with ``Ref.`` prefix)
+         - ``01_AE.TH.2007.AA028a_wg7.JX447031``  (without prefix)
     3. Group by CRF type; deduplicate on accession (first occurrence kept).
     4. Retain round(pct_per_crf * n_unique) sequences per CRF (floored at
        min_per_crf), computed on the unaugmented unique count, by random
@@ -131,8 +133,8 @@ def build_crf_reference_bank(
 
         Examples
         --------
-        ``'Ref.01_AE.CN.05.FJ051.DQ859178'``    → ``('01_AE', 'DQ859178')``
-        ``'01_AE.TH.2007.AA028a_wg7.JX447031'`` → ``('01_AE', 'JX447031')``
+        ``'Ref.01_AE.CN.05.FJ051.DQ859178'``    -> ``('01_AE', 'DQ859178')``
+        ``'01_AE.TH.2007.AA028a_wg7.JX447031'`` -> ``('01_AE', 'JX447031')``
         """
         clean = _REF_PREFIX.sub("", record_id)
         parts = clean.split(".")
@@ -155,7 +157,7 @@ def build_crf_reference_bank(
     for crf, acc_map in crf_groups.items():
         print(f"    {crf:<12s}: {len(acc_map):3d} unique sequence(s)")
 
-    #  4. Random sampling – dynamic count per CRF (pct_per_crf, min_per_crf)
+    #  4. Random sampling - dynamic count per CRF (pct_per_crf, min_per_crf)
     bank:     list[SeqRecord] = []
     test_set: list[SeqRecord] = []
 

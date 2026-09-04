@@ -1,16 +1,12 @@
-"""
-Parse jpHMM output (recombination breakpoint report) into a flat regions CSV.
+"""Parse jpHMM output into a flat regions CSV.
 
-Input format (jpHMM):
+The input contains a sequence header followed by breakpoint rows:
 
     >seq_name (bw=1e-20)
     start_position    end_position    predicted_subtype
     ...
 
-Output CSV columns: sample_name, start, end, subtype, length
-
-Usage:
-    python parse_jphmm_output.py jphmm_output.txt regions.csv
+The output contains sample_name, start, end, subtype, and length columns.
 """
 
 import argparse
@@ -82,7 +78,7 @@ if __name__ == "__main__":
         rows = list(parse_jphmm(f))
 
     if not rows:
-        print("Warning: no regions parsed — output CSV will be empty.", file=sys.stderr)
+        print("Warning: no regions parsed - output CSV will be empty.", file=sys.stderr)
 
     with open(args.output, "w", newline="") as f:
         writer = csv.writer(f)

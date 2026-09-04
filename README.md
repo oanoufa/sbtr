@@ -17,11 +17,15 @@ sbtr processes input sequences through an automated end-to-end pipeline:
 
 sbtr runs inside isolated container environments (Docker or Apptainer/Singularity) to manage CUDA and MAFFT dependencies.
 
-### 1. Build the Container
+### 1. Build or pull the Container
 
 **Docker:**
 ```bash
 docker build -t sbtr:latest .
+```
+
+```bash
+docker pull oanoufa/sbtr:latest .
 ```
 
 **Apptainer:**

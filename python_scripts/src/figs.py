@@ -1,3 +1,5 @@
+"""Create figures for sbtr predictions and evaluation results."""
+
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px

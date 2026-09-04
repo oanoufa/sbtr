@@ -1,18 +1,10 @@
-"""
-mutator.py
-----------
-GTR-based HIV sequence mutation utilities.
+"""Provide GTR-based HIV sequence mutation utilities.
 
-Provides:
-  - Module-level functions (safe to call from parallel workers):
-        parse_iqtree_rates, parse_iqtree_Q, build_substitution_probs,
-        compute_n_muts, mutate_sequence_gtr
+The module provides functions that can run in parallel workers, plus a
+SequenceMutator class for callers that want a simpler interface.
 
-  - SequenceMutator class (for single-threaded / high-level use):
-        Loads IQ-TREE files once, caches normalized rate arrays, and
-        exposes site_rates_dict / sub_probs_dict for direct use in
-        parallel workers, plus mutate() / augment_to_target() for
-        callers that want a simpler interface.
+The class loads IQ-TREE files once, caches normalized rate arrays, and
+exposes site rates and substitution probabilities for parallel workers.
 """
 
 import re
@@ -29,9 +21,7 @@ from . import config
 CLOCK_RATES = config.CLOCK_RATES
 MAX_YEAR    = config.MAX_YEAR
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 _ACGT_BYTES = np.array([ord("A"), ord("C"), ord("G"), ord("T")], dtype=np.uint8)
 _BASE_TO_ACGT_IDX = np.full(256, -1, dtype=np.int8)
 for _i, _b in enumerate(_ACGT_BYTES):
@@ -58,7 +48,7 @@ def parse_iqtree_rates(rate_path: str, ata_len: int) -> np.ndarray:
             parts = line.split()
             if len(parts) < 2:
                 continue
-            site_idx = int(parts[0]) - 1          # 1-based → 0-based
+            site_idx = int(parts[0]) - 1          # 1-based -> 0-based
             if 0 <= site_idx < ata_len:
                 rates[site_idx] = float(parts[1])
     total = rates.sum()
@@ -167,7 +157,7 @@ def mutate_sequence_gtr(
     rate_arr  : per-site rates normalized to sum to 1.
     rng       : caller-owned numpy Generator.
     n_muts    : number of substitution events.
-    sub_probs : (4, 4) ACGT-order matrix; sub_probs[i,j] = P(i→j | subst.).
+    sub_probs : (4, 4) ACGT-order matrix; sub_probs[i,j] = P(i->j | subst.).
 
     Returns
     -------
@@ -212,7 +202,7 @@ class SequenceMutator:
     """
     High-level GTR mutator.
 
-    Loads IQ-TREE per-site rates and Q matrices for subtypes A–G;
+    Loads IQ-TREE per-site rates and Q matrices for subtypes A-G;
     computes averages for all others.  The public attributes
     ``site_rates_dict`` and ``sub_probs_dict`` can be passed directly
     to parallel workers (e.g. in seq_gen.py) so that workers call the
@@ -226,7 +216,7 @@ class SequenceMutator:
     ----------
     iqtree_dir : str
         Directory that contains ``HIV1_{st}_ALIGNED.fasta.rate`` and
-        ``HIV1_{st}_ALIGNED.fasta.iqtree`` for st in A–G.
+        ``HIV1_{st}_ALIGNED.fasta.iqtree`` for st in A-G.
     ata_len : int
         Length of the ATA alignment (number of sites).
     seed : int
@@ -295,7 +285,7 @@ class SequenceMutator:
         self.sub_probs_dict['avg'] = build_substitution_probs(avg_Q)
 
         print(
-            f"  [SequenceMutator] Ready — "
+            f"  [SequenceMutator] Ready - "
             f"{len(self.site_rates_dict)} rate arrays, "
             f"{len(self.sub_probs_dict)} Q matrices."
         )
@@ -310,7 +300,7 @@ class SequenceMutator:
         Extract the sampling year from a sequence ID of the form
         ``[Ref.]TYPE.COUNTRY.YEAR.NAME.ACCESSION``.
 
-        Two-digit rule: year < 40 → 2000 + year, year >= 40 → 1900 + year.
+        Two-digit rule: year < 40 -> 2000 + year, year >= 40 -> 1900 + year.
         Falls back to 2000 with a warning on any parsing failure.
         """
         clean = _REF_PREFIX.sub("", record_id)
@@ -334,7 +324,7 @@ class SequenceMutator:
 
         Priority order:
           1. Direct match (e.g. 'avg', 'A', 'B').
-          2. First character of a multi-character name (e.g. 'A1' → 'A').
+          2. First character of a multi-character name (e.g. 'A1' -> 'A').
           3. 'avg' as final fallback.
         """
         if subtype_key in self.site_rates_dict:

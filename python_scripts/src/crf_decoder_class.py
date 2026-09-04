@@ -1,3 +1,5 @@
+"""Decode subtype predictions against a bank of CRF references."""
+
 from __future__ import annotations
 
 from pathlib import Path
