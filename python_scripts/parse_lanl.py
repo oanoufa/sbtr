@@ -750,7 +750,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
                            pure_alignment_path: str,
                            crf_alignment_path: str,
                            combined_alignment_path: str,
-                           ) -> Tuple[Dict[str, str], Dict[str, str]]:
+                           ):
     """
     Read LANL subtype reference alignment, separate pure subtypes from CRFs.
     Applies trimAl column filtering while preserving all HXB2-nucleotide columns.

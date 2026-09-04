@@ -674,7 +674,6 @@ def visualize_metrics(save_path_loss,
 
     train_metrics_df = pd.read_csv(os.path.join(METRICS_DIR, f"train_metrics_v{VERSION}.tsv"), sep='\t')
     val_metrics_df = pd.read_csv(os.path.join(METRICS_DIR, f"val_metrics_v{VERSION}.tsv"), sep='\t')
-    test_metrics_df = pd.read_csv(os.path.join(METRICS_DIR, f"test_metrics_v{VERSION}.tsv"), sep='\t')
 
     # f1/micro	precision/micro	recall/micro	loss	step
     # 0.07481227070093155	0.05566808208823204	0.11402550339698792	5.273273804485798	2000
@@ -708,15 +707,6 @@ def visualize_metrics(save_path_loss,
         template="plotly_white"
     )
 
-    # Add Test Loss as a specific marker
-    fig_loss.add_trace(go.Scatter(
-        x=[final_step], 
-        y=[test_metrics_df['loss'].iloc[0]],
-        mode='markers', 
-        name='Test Loss',
-        marker=dict(size=12, symbol='star', color='gold', line=dict(width=2, color='black')),
-        hovertemplate="Test Loss: %{y}<extra></extra>"
-    ))
 
     fig_loss.update_layout(hovermode="x unified")
     fig_loss.update_layout(width=1200, height=600)
@@ -754,17 +744,6 @@ def visualize_metrics(save_path_loss,
         },
         template="plotly_white"
     )
-
-    # Add Test performance metrics as diamond markers
-    for metric in performance_metrics:
-        fig_perf.add_trace(go.Scatter(
-            x=[final_step], 
-            y=[test_metrics_df[metric].iloc[0]],
-            mode='markers', 
-            name=f"Test {metric}",
-            marker=dict(size=10, symbol='diamond'),
-            showlegend=True
-        ))
 
     fig_perf.update_yaxes(range=[0, 1.05]) # Since metrics are usually [0, 1]
     fig_perf.update_layout(hovermode="x unified")
@@ -1067,7 +1046,7 @@ if __name__ == "__main__":
                           save_path=f"{workspace_path}/figs/breakpoint_distribution_with_genes.html")
     
     st_to_seq_dict = defaultdict(list)
-    ref_fasta_path = (f"{workspace_path}/data/input/HIV1_PURE_REF.fasta")
+    ref_fasta_path = (f"{workspace_path}/data/output/HIV1_PURE_REF.fasta")
     hxb2_ata_seq = ""
     for i, rec in enumerate(SeqIO.parse(ref_fasta_path, "fasta")):
         if i == 0:
