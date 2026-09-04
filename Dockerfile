@@ -21,14 +21,13 @@ RUN apt-get update \
 FROM python:3.11-slim AS runtime
 
 ARG TORCH_VARIANT=cpu
-ARG CUSTOM_TMP=/sbtr_tmp
 
 # Installed awk and grep/sed to support MAFFT scripts in slim environments
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 gawk \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy MAFFT binaries and binaries dependencies from builder
+# Copy MAFFT binaries and binary dependencies from builder
 COPY --from=mafft-builder /usr/local/bin/ /usr/local/bin/
 COPY --from=mafft-builder /usr/local/libexec/mafft/ /usr/local/libexec/mafft/
 
@@ -44,19 +43,17 @@ RUN pip install --no-cache-dir --upgrade pip \
     && if [ -f "requirements_${TORCH_VARIANT}.txt" ]; then pip install --no-cache-dir -r "requirements_${TORCH_VARIANT}.txt"; fi \
     && rm -f requirements*.txt
 
-# Setup writeable temporary directories (Apptainer/Singularity compatible)
-ENV TMP_DIR=${CUSTOM_TMP} \
-    HOME=${CUSTOM_TMP} \
-    TMPDIR=${CUSTOM_TMP} \
-    TEMP=${CUSTOM_TMP} \
-    TMP=${CUSTOM_TMP} \
-    MAFFT_TMPDIR=${CUSTOM_TMP}/mafft \
-    MPLCONFIGDIR=${CUSTOM_TMP}/mpl_config \
-    HF_HOME=${CUSTOM_TMP}/huggingface \
-    TRANSFORMERS_CACHE=${CUSTOM_TMP}/huggingface
+# Setup writable temporary directories in standard /tmp
+ENV TMPDIR=/tmp \
+    TEMP=/tmp \
+    TMP=/tmp \
+    MAFFT_TMPDIR=/tmp/mafft \
+    MPLCONFIGDIR=/tmp/mpl_config \
+    HF_HOME=/tmp/huggingface \
+    TRANSFORMERS_CACHE=/tmp/huggingface
 
-RUN mkdir -p ${TMP_DIR}/mpl_config ${TMP_DIR}/huggingface ${TMP_DIR}/mafft ${TMP_DIR}/cache \
-    && chmod -R 777 ${TMP_DIR}
+RUN mkdir -p /tmp/mpl_config /tmp/huggingface /tmp/mafft /tmp/cache \
+    && chmod -R 777 /tmp
 
 ENTRYPOINT ["python", "python_scripts/sbtr.py"]
 CMD ["--help"]
