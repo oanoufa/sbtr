@@ -10,7 +10,6 @@ from Bio import SeqIO
 import tempfile
 from argparse import ArgumentParser
 
-from src.utils import build_hxb2_ata_maps
 from src import config
 
 workspace_path = config.WORKSPACE_PATH
@@ -851,7 +850,19 @@ def prepare_pure_alignment(lanl_alignment_path: str,
         raise ValueError("HXB2 not found after column slicing.")
 
     # ── 6. Build coordinate maps from the final HXB2 row ─────────────────
-    ata_to_hxb2, hxb2_to_ata = build_hxb2_ata_maps(hxb2_ata)
+    ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata)
+    #  print the mapping as a csv with columns: ata_pos, hxb2_pos 
+    mapping_path = Path(f"{WORKSPACE_PATH}/data/output/hxb2_ata_mapping.csv")
+    if mapping_path.is_file():
+        mapping_df = pd.read_csv(mapping_path)
+        if len(mapping_df) == ata_len:
+            return ata_to_hxb2, hxb2_to_ata
+    
+    with open(mapping_path, "w") as f:
+        f.write("ata_pos,hxb2_pos\n")
+        for ata_pos in range(ata_len):
+            hxb2_pos = ata_to_hxb2[ata_pos]
+            f.write(f"{ata_pos},{hxb2_pos}\n")
     print(f"  New ATA length              : {len(hxb2_ata)}")
     print(f"  HXB2 positions covered      : {int(hxb2_nongap.sum())}")
 

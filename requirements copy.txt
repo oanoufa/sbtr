@@ -1,9 +1,0 @@
-biopython==1.87
-matplotlib==3.10.8
-numpy==2.4.3
-pandas==3.0.2
-plotly==6.7.0
-scipy==1.17.1
-huggingface-hub==1.11.0
-transformers==5.6.1
-tqdm==4.67.3

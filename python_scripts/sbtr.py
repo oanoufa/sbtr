@@ -1,3 +1,14 @@
+"""
+sbtr: A novel HIV-1 fine-grain subtyping tool leveraging genomic language models.
+    Infers HIV-1 subtype per position from a set of sequences by dealigning, aligning
+    to the HIV-1 reference via MAFFT, running through the language model, and comparing
+    against a bank of CRF reference sequences.
+    Outputs generated:
+      • results_tag.csv (always)
+      • summary_tag.json (always)
+      • Optional outputs via --wto: regions CSV, prediction figures, raw predictions, or attention masks.
+"""
+
 import numpy as np
 import torch
 import pandas as pd
@@ -21,7 +32,6 @@ from concurrent.futures import ThreadPoolExecutor
 from src import config
 from src.dataset_class import HIVSequenceDataset
 from src.model_class import HFModelForHIVSubtyping
-from src.utils import build_hxb2_ata_maps
 from src.figs import visualize_sample_probs
 from src.crf_decoder_class import CRFReferenceDecoder
 
@@ -32,17 +42,6 @@ ATA_LEN            = config.ATA_LEN
 MAX_LENGTH         = config.SEQ_LEN_AFTER_PAD
 PAD_MULTIPLE_OF    = config.PAD_LEN
 VERSION            = config.VERSION
-
-# Import reference FASTA file from hf dataset
-_combined_ref_gz = hf_hub_download(
-    repo_id="oanoufa/sbtr_necessary_data",
-    filename="HIV1_COMBINED_REF.fasta.gz",
-    repo_type="dataset",
-)
-COMBINED_REF_PATH = Path(_combined_ref_gz).with_suffix("")
-if not COMBINED_REF_PATH.exists():
-    with gzip.open(_combined_ref_gz, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
-        f_out.write(f_in.read())
 
 import argparse
 
@@ -136,6 +135,17 @@ print(f"Using {num_workers} CPUs", flush=True)
 device = "cuda" if torch.cuda.is_available() and gpu else "cpu"
 print(f"Using device: {device}", flush=True)
 device = torch.device(device) if isinstance(device, str) else device
+
+# Import reference FASTA file from hf dataset
+_combined_ref_gz = hf_hub_download(
+    repo_id="oanoufa/sbtr_necessary_data",
+    filename="HIV1_COMBINED_REF.fasta.gz",
+    repo_type="dataset",
+)
+COMBINED_REF_PATH = Path(_combined_ref_gz).with_suffix("")
+if not COMBINED_REF_PATH.exists():
+    with gzip.open(_combined_ref_gz, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
+        f_out.write(f_in.read())
 
 
 def parse_compactmapout(
@@ -402,7 +412,7 @@ if __name__ == "__main__":
     if hxb2_ata_seq is None:
         sys.exit("ERROR: combined reference FASTA is empty.")
 
-    ATA_TO_HXB2, HXB2_TO_ATA = build_hxb2_ata_maps(hxb2_ata_seq)
+    ATA_TO_HXB2, HXB2_TO_ATA = config.build_hxb2_ata_maps(hxb2_ata_seq)
     print(f"  ATA length, HXB2 length     : {ATA_LEN, int(max(ATA_TO_HXB2))}", flush=True)
 
     reference_ids = load_reference_ids(COMBINED_REF_PATH)
@@ -414,7 +424,7 @@ if __name__ == "__main__":
         sys.exit("ERROR: no query sequences found after dealigning input.")
     print(f"  Query sequences: {len(query_records)}", flush=True)
 
-    with tempfile.TemporaryDirectory(prefix=f"sbtr_{tag}_") as tmp_dir_str:
+    with tempfile.TemporaryDirectory(prefix=f"sbtr_{tag}_", ignore_cleanup_errors=True) as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
 
         print(f"\nAligning input sequences to reference using MAFFT ({num_workers} threads)...", flush=True)
@@ -498,8 +508,8 @@ if __name__ == "__main__":
 
     # load model + tokenizer
     model_used = "oanoufa/sbtr_ntv3_650M"
-    tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True)
-    model = HFModelForHIVSubtyping.from_pretrained(model_used)
+    tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True, revision="main")
+    model = HFModelForHIVSubtyping.from_pretrained(model_used, trust_remote_code=True, revision="main")
 
     model = model.to(device)
     model.eval()

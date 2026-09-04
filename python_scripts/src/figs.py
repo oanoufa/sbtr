@@ -17,8 +17,6 @@ import plotly.io as pio
 import matplotlib.patches as mpatches
 pio.defaults.default_format = "png"
 from . import config
-from .utils import build_hxb2_ata_maps
-
 
 workspace_path = config.WORKSPACE_PATH
 
@@ -1324,7 +1322,7 @@ if __name__ == "__main__":
 
 
     # ---- rate array for diversity ----------------------------------------
-    ata_to_hxb2, hxb2_to_ata = build_hxb2_ata_maps(hxb2_ata_seq)
+    ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)
     subtypes_with_data = ['A', 'C', 'D', 'E', 'F', 'G']
     names = subtypes_with_data + ['avg']
     diversity_arrays = {}

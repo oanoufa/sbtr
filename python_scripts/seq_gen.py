@@ -26,7 +26,6 @@ import math
 import uuid
 
 from src import config
-from src.utils import build_hxb2_ata_maps
 from src.mutator_class import (
     SequenceMutator,
     compute_n_muts,
@@ -933,7 +932,7 @@ if __name__ == "__main__":
     params = infer_params(df_seg, ata_len)
 
     # ---- rate arrays and GTR substitution probabilities ----------------
-    ata_to_hxb2, hxb2_to_ata = build_hxb2_ata_maps(hxb2_ata_seq)
+    ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)
 
     mutator = SequenceMutator(
         iqtree_dir=f"{WORKSPACE_PATH}/data/output/rates/",

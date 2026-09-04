@@ -40,31 +40,36 @@ apptainer build sbtr.sif docker://oanoufa/sbtr:latest
 ```bash
 docker run --rm --shm-size=2g \
   -e HF_TOKEN=hf_xxxxxx \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
   -v /path/to/data/input:/data/in \
   -v /path/to/data/output:/data/out \
   sbtr \
   --seq /data/in/sequences.fasta \
+  --mafft_bin mafft \
+  --tag cuban \
   --out_dir /data/out \
-  --tag my_run \
-  --wto fr \
-  --num_cpu 4
+  --wto r \
+  --num_cpu ${N_WORKERS} \
+  --gpu \
+  --batch_size 8
 ```
 
 ### Running with Apptainer
 
 ```bash
-apptainer run \
+apptainer run --nv \
   --env HF_TOKEN=hf_xxxxxx \
-  --bind ~/.cache/huggingface:/root/.cache/huggingface \
+  --bind /tmp:/tmp \
   --bind /path/to/data/input:/data/in \
   --bind /path/to/data/output:/data/out \
-  sbtr.sif \
+  /pasteur/helix/projects/mPath/oanoufa/sbtr/sbtr.sif \
   --seq /data/in/sequences.fasta \
+  --mafft_bin mafft \
+  --tag cuban \
   --out_dir /data/out \
-  --tag my_run \
-  --wto fr \
-  --num_cpu 4
+  --wto r \
+  --num_cpu ${N_WORKERS} \
+  --gpu \
+  --batch_size 8
 ```
 
 ---

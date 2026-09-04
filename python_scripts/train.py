@@ -13,7 +13,6 @@ from src import config
 from src.dataset_class import HIVSequenceDataset, open_memmaps
 from src.model_class import HFModelForHIVSubtyping, HIVSubtypingConfig
 from src.metrics_class import HIVSubtypingMetrics, train_step, validation_step
-from src.utils import build_hxb2_ata_maps
 
 from huggingface_hub import login, upload_folder
 TOKEN_PATH = config.TOKEN_PATH
@@ -47,7 +46,7 @@ if __name__ == "__main__":
     if hxb2_ata_seq is None:
         sys.exit("ERROR: combined reference FASTA is empty.")
 
-    ATA_TO_HXB2, HXB2_TO_ATA = build_hxb2_ata_maps(hxb2_ata_seq)
+    ATA_TO_HXB2, HXB2_TO_ATA = config.build_hxb2_ata_maps(hxb2_ata_seq)
 
     print(f"  ATA length, HXB2 length     : {ATA_LEN, int(max(ATA_TO_HXB2))}", flush=True)
 

@@ -22,7 +22,6 @@ from src.mutator_class import SequenceMutator
 from src import config
 from src.dataset_class import HIVSequenceDataset
 from src.model_class import HFModelForHIVSubtyping
-from src.utils import build_hxb2_ata_maps
 
 TOKEN_PATH = config.TOKEN_PATH
 with open(TOKEN_PATH, 'r') as f:
@@ -55,8 +54,6 @@ args = parser.parse_args()
 CRF_FILE_PATH = Path(args.crf_file_path)
 out_dir = Path(WORKSPACE_PATH) / "data" / "model" / "reference_bank"
 out_dir.mkdir(parents=True, exist_ok=True)
-
-
 
 
 mutator = SequenceMutator(
@@ -223,7 +220,7 @@ if __name__ == "__main__":
     if hxb2_ata_seq is None:
         sys.exit("ERROR: pure_ref FASTA is empty.")
 
-    ata_to_hxb2, hxb2_to_ata = build_hxb2_ata_maps(hxb2_ata_seq)
+    ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)
     print(f"  ATA length, HXB2 length     : {ATA_LEN, int(max(ata_to_hxb2))}")
 
     # ---- Model + tokenizer --------------------------------------------
