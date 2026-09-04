@@ -170,7 +170,6 @@ def retrieve_LTR(
     for sample_name, regions in jphmm_regions_dict.items():
         ltr_regions = []
         for start, end, subtype in regions:
-            length = end - start + 1
             if subtype in LTR_LABELS:
                 ltr_regions.append((start, end, subtype))
         if ltr_regions:

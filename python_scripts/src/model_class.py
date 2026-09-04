@@ -51,7 +51,6 @@ class HFModelForHIVSubtyping(PreTrainedModel):
         backbone_config = AutoConfig.from_pretrained(
             config.backbone_name, 
             trust_remote_code=True,
-            revision="main",
         )
         self.backbone = AutoModelForMaskedLM.from_config(
             backbone_config, 

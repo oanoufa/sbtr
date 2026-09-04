@@ -121,7 +121,10 @@ if 'a' in wto:
     print("a in wto: saving attention masks in a npy file", flush=True)
 
 num_workers = min(os.cpu_count(), num_workers)
-print(f"Using {num_workers} CPUs", flush=True)
+if num_workers == 1:
+    print(f"Using {num_workers} CPU", flush=True)
+else:
+    print(f"Using {num_workers} CPUs", flush=True)
 
 device = "cuda" if torch.cuda.is_available() and gpu else "cpu"
 print(f"Using device: {device}", flush=True)
@@ -241,7 +244,6 @@ def run_mafft_addfragments(
 
 # Worker function to run in parallel on CPU worker processes
 def process_single_sample_worker(
-    idx: int,
     sample_name: str,
     preds_slice: np.ndarray,      # (L, C)
     ploss_slice: np.ndarray,
@@ -288,7 +290,6 @@ def process_single_sample_worker(
         visualize_sample_probs(
             preds_slice=preds_slice,
             ploss_slice=ploss_slice,
-            sample_idx=idx,
             sample_name=sample_name,
             regions_aligned=crf_result["regions_aligned"],
             pure_st_to_id_dict=ST_TO_ID_DICT,
@@ -587,7 +588,6 @@ if __name__ == "__main__":
         for idx in range(N):
             sample_name = metadata.iloc[idx]["sequence_name"]
             yield (
-                idx,
                 sample_name,
                 pred_mm[idx, :ATA_LEN],
                 ploss_mm[idx, :ATA_LEN],

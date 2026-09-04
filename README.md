@@ -17,27 +17,25 @@ sbtr processes input sequences through an automated end-to-end pipeline:
 
 sbtr runs inside isolated container environments (Docker or Apptainer/Singularity) to manage CUDA and MAFFT dependencies.
 
-### 1. Build or pull the Container
+### 1. Retrieve the Container
 
 **Docker:**
-```bash
-docker build -t sbtr:latest .
-```
 
 ```bash
-docker pull oanoufa/sbtr:latest .
+docker pull ghcr.io/oanoufa/sbtr:latest
 ```
 
 **Apptainer:**
+
 ```bash
-apptainer build sbtr.sif docker://oanoufa/sbtr:latest
+apptainer pull sbtr.sif docker://ghcr.io/oanoufa/sbtr:latest
 ```
 
 ---
 
 ## Usage
 
-> **Note:** sbtr requires a Hugging Face token (`HF_TOKEN`) to download model weights on the first run.
+> **Note:** A Hugging Face token can be specified (`HF_TOKEN`) to download model weights and tokenizer files faster.
 
 ### Running with Docker
 
@@ -56,6 +54,7 @@ docker run --rm --shm-size=2g \
   --gpu \
   --batch_size 8
 ```
+
 
 ### Running with Apptainer
 

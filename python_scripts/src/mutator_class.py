@@ -30,10 +30,7 @@ for _i, _b in enumerate(_ACGT_BYTES):
 _REF_PREFIX            = re.compile(r"^Ref\.")
 _SUBTYPES_WITH_FILES   = ['A', 'B', 'C', 'D', 'AE', 'F', 'G']
 
-# ---------------------------------------------------------------------------
 # Module-level functions  (import these in parallel workers)
-# ---------------------------------------------------------------------------
-
 def parse_iqtree_rates(rate_path: str, ata_len: int) -> np.ndarray:
     """
     Parse per-site posterior mean rates from an IQ-TREE .rate file.
@@ -85,7 +82,7 @@ def parse_iqtree_Q(iqtree_path: str) -> np.ndarray:
                 if rows_found == 4:
                     break
             elif rows_found > 0:
-                break                              # past the Q block
+                break # past the Q block
 
     if rows_found != 4:
         raise ValueError(
@@ -194,10 +191,6 @@ def mutate_sequence_gtr(
     return seg_arr, n_muts
 
 
-# ---------------------------------------------------------------------------
-# SequenceMutator
-# ---------------------------------------------------------------------------
-
 class SequenceMutator:
     """
     High-level GTR mutator.
@@ -245,7 +238,7 @@ class SequenceMutator:
         self.sub_probs_dict:  Dict[str, np.ndarray] = {}
         _Q_matrices:          Dict[str, np.ndarray] = {}
 
-        # ---- per-subtype loading ------------------------------------
+        # per-subtype loading
         for st in _SUBTYPES_WITH_FILES:
             rate_file   = self.iqtree_dir / f"HIV1_{st}_ALIGNED.fasta.rate"
             iqtree_file = self.iqtree_dir / f"HIV1_{st}_ALIGNED.fasta.iqtree"
@@ -265,7 +258,7 @@ class SequenceMutator:
             _Q_matrices[st]         = Q
             self.sub_probs_dict[st] = build_substitution_probs(Q)
 
-        # ---- average over A-G ---------------------------------------
+        # average over A-G
         avg_cache = _cache / "site_rates_avg.npy"
         if avg_cache.exists():
             avg_rates = np.load(avg_cache)
@@ -290,9 +283,7 @@ class SequenceMutator:
             f"{len(self.sub_probs_dict)} Q matrices."
         )
 
-    # ------------------------------------------------------------------
     # Internal helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _extract_year(record_id: str) -> int:
@@ -334,9 +325,6 @@ class SequenceMutator:
             return first
         return 'avg'
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def mutate(
         self,

@@ -5,9 +5,6 @@ import torch
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 import pandas as pd
-from Bio import SeqIO
-import os
-import sys
 
 from . import config
 
@@ -77,8 +74,8 @@ class HIVSequenceDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         row = self.indices[idx]
 
-        seq_uint8 = self.seq_mm[row]                          
-        packed    = self.lbl_mm[row]                          
+        seq_uint8 = self.seq_mm[row]
+        packed    = self.lbl_mm[row]
         bio_mask  = self.mask_mm[row]
         
         per_site = np.unpackbits(packed, axis=-1, count=self.n_subtypes)
@@ -97,7 +94,7 @@ class HIVSequenceDataset(Dataset):
             add_special_tokens=False,
             return_tensors="pt",
         )
-        input_ids = enc["input_ids"][0]                       
+        input_ids = enc["input_ids"][0]
 
         # Mask pad tokens
         attention_mask = (input_ids != self.pad_token_id).long()

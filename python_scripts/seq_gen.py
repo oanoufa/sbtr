@@ -1,7 +1,7 @@
 """
 HIV recombinant sequence generator.
 
-Flow per recombinant:
+For each recombinant:
   1. Sample n_subtypes, n_breakpoints from distributions inferred from real CRFs
   2. Pick subtypes (divergence-group-aware weighting)
   3. Pick one parent sequence per subtype

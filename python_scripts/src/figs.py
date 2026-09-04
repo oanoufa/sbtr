@@ -180,9 +180,7 @@ def visualize_diversity(
             xanchor="right",
         )
 
-    # =========================================================================
     # ONE RAW + SMOOTHED TRACE PAIR PER RATE ARRAY
-    # =========================================================================
     # Plotly default color cycle
     trace_colors = [
         "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
@@ -235,215 +233,9 @@ def visualize_diversity(
             fig.write_image(save_path + '.png', scale=2)
         print(f"Diversity visualization saved to: {save_path}", flush=True)
 
-# def old_visualize_sample_probs(
-#     sample: dict,
-#     regions_aligned: list,
-#     pure_st_to_id_dict: dict,
-#     hxb2_to_ata: np.ndarray,
-#     idx: int = 0,
-#     path: str = None,
-#     ) -> None:
-
-#     # ── Unpack sample ─────────────────────────────────────────────────────
-#     attention_mask = sample["attention_mask"].numpy()
-#     loss_mask      = sample["loss_mask"].numpy()
-#     labels         = sample["labels"].numpy()
-#     if hasattr(attention_mask, 'ndim') and attention_mask.ndim > 1:
-#         attention_mask = attention_mask[0]
-#         loss_mask      = loss_mask[0]
-#         labels         = labels[0]
-
-#     real_loss_mask = loss_mask.astype(bool)
-#     n_real         = real_loss_mask.sum()
-#     n_total        = len(real_loss_mask)
-
-#     id_to_st      = {v: k for k, v in pure_st_to_id_dict.items()}
-#     subtype_names = [id_to_st[i] for i in range(len(pure_st_to_id_dict))]
-#     n_subtypes    = len(subtype_names)
-#     full_labels   = labels.T                                   # (n_subtypes, n_total)
-
-#     # ── Layout: 4 rows × 2 cols ───────────────────────────────────────────
-#     # row 0 → loss mask
-#     # row 1 → gene track          (3 frame-lanes, coloured by gene)
-#     # row 2 → subtype heatmap     (probability matrix)
-#     # row 3 → subtype region track (3 frame-lanes, coloured by subtype)  ← NEW
-#     gene_track_h = 2.4
-#     fig = plt.figure(figsize=(14, 2 + 2 * gene_track_h + 0.3 * n_subtypes))
-#     gs  = fig.add_gridspec(
-#         4, 2,
-#         height_ratios=[1, gene_track_h, n_subtypes, gene_track_h],
-#         width_ratios=[40, 1],
-#         hspace=0.10,
-#         wspace=0.03,
-#     )
-
-#     ax_mask = fig.add_subplot(gs[0, 0])
-#     ax_gene = fig.add_subplot(gs[1, 0], sharex=ax_mask)
-#     ax_lab  = fig.add_subplot(gs[2, 0], sharex=ax_mask)
-#     ax_st   = fig.add_subplot(gs[3, 0], sharex=ax_mask)
-#     ax_cb   = fig.add_subplot(gs[2, 1])           # colorbar aligned to heatmap only
-
-#     # Shared 3-frame lane definitions (y in data/axes units [0, 1])
-#     frame_lanes = {3: (0.67, 1.0), 2: (0.33, 0.66), 1: (0.0, 0.33)}
-
-#     # ── Row 0: loss mask ──────────────────────────────────────────────────
-#     ax_mask.imshow(
-#         real_loss_mask[np.newaxis, :], aspect="auto",
-#         cmap="Blues", vmin=0, vmax=1, interpolation="nearest",
-#     )
-#     ax_mask.set_yticks([0])
-#     ax_mask.set_yticklabels(["loss\nmask"], fontsize=8)
-#     ax_mask.xaxis.set_major_locator(ticker.MultipleLocator(max(1, n_total // 10)))
-#     ax_mask.set_title(
-#         f"Sample {idx}  —  {n_real} real tokens / {n_total} total  "
-#         f"({n_total - n_real} padding)",
-#         fontsize=10,
-#     )
-#     plt.setp(ax_mask.get_xticklabels(), visible=False)
-
-#     # ── Row 1: gene track ─────────────────────────────────────────────────
-#     ax_gene.set_xlim(0, n_total)
-#     ax_gene.set_ylim(0, 1)
-#     ax_gene.axis("off")
-
-#     for gene, (start_hxb2, end_hxb2, frame) in GENES_RAW.items():
-#         start_ata = hxb2_to_ata[start_hxb2]
-#         end_ata   = hxb2_to_ata[end_hxb2]
-#         y0, y1    = frame_lanes[frame]
-#         color     = GENE_COLORS.get(gene, "grey")
-#         width     = max(end_ata - start_ata, 1)
-
-#         ax_gene.add_patch(plt.Rectangle(
-#             (start_ata, y0 + 0.02), width, (y1 - y0) - 0.04,
-#             color=color, alpha=0.40, linewidth=0,
-#         ))
-#         if width > n_total * 0.025:
-#             ax_gene.text(
-#                 start_ata + width / 2, (y0 + y1) / 2,
-#                 gene, ha="center", va="center",
-#                 fontsize=6.5, color="black",
-#                 bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.6),
-#             )
-
-#     for frame, (y0, y1) in frame_lanes.items():
-#         ax_gene.text(
-#             -n_total * 0.005, (y0 + y1) / 2, f"F{frame}",
-#             ha="right", va="center", fontsize=7,
-#             color="grey", transform=ax_gene.transData,
-#         )
-#     plt.setp(ax_gene.get_xticklabels(), visible=False)
-
-#     # ── Row 2: subtype probability heatmap ────────────────────────────────
-#     cmap = plt.cm.viridis.copy()
-#     cmap.set_bad(color="#cccccc")
-
-#     im = ax_lab.imshow(
-#         full_labels, aspect="auto",
-#         cmap=cmap, vmin=0, vmax=1, interpolation="nearest",
-#     )
-#     ax_lab.set_yticks(range(n_subtypes))
-#     ax_lab.set_yticklabels(subtype_names, fontsize=7)
-#     ax_lab.xaxis.set_major_locator(ticker.MultipleLocator(max(1, n_total // 10)))
-#     ax_lab.tick_params(axis='x', labelsize=8)
-#     ax_lab.tick_params(axis='y', labelsize=7)
-#     plt.setp(ax_lab.get_xticklabels(), visible=False)   # x labels live on ax_st
-
-#     # ── Row 3: subtype region track ───────────────────────────────────────
-#     # Mirrors the gene track's 3-frame-lane structure but colours each
-#     # position by its subtype (ST_COLORS) drawn only inside gene-covered
-#     # regions.  Positions without region info are left blank.
-#     ax_st.set_xlim(0, n_total)
-#     ax_st.set_ylim(0, 1)
-
-#     # Minimal frame: show only bottom spine + x-axis ticks
-#     for spine in ("top", "right", "left"):
-#         ax_st.spines[spine].set_visible(False)
-#     ax_st.set_yticks([])
-#     ax_st.xaxis.set_major_locator(ticker.MultipleLocator(max(1, n_total // 10)))
-#     ax_st.tick_params(axis='x', labelsize=8)
-#     ax_st.set_xlabel("ATA alignment position (bp)", fontsize=9)
-
-#     # 1 · Build a flat position → subtype label array (ATA coords, "" = no info)
-#     subtype_arr = np.full(n_total, fill_value="", dtype=object)
-#     for r_start, r_end, subtype in regions_aligned:
-#         s = max(0, int(r_start))
-#         e = min(n_total, int(r_end))
-#         if s < e:
-#             subtype_arr[s:e] = str(subtype)
-
-#     # 2 · Collect ATA gene ranges per reading frame
-#     frame_to_ranges = defaultdict(list)
-#     for gene, (start_hxb2, end_hxb2, frame) in GENES_RAW.items():
-#         s_ata = int(hxb2_to_ata[start_hxb2])
-#         e_ata = int(hxb2_to_ata[end_hxb2])
-#         frame_to_ranges[frame].append((s_ata, e_ata))
-
-#     # 3 · Draw: for each frame lane, for each gene range, RLE → one rect per run
-#     pad = 0.015
-#     for frame, gene_ranges in frame_to_ranges.items():
-#         y0, y1  = frame_lanes[frame]
-#         rect_h  = (y1 - y0) - 2 * pad
-
-#         for g_s, g_e in gene_ranges:
-#             g_s = max(0, g_s)
-#             g_e = min(n_total, g_e)
-#             if g_s >= g_e:
-#                 continue
-
-#             pos = g_s
-#             for val, grp in groupby(subtype_arr[g_s:g_e]):
-#                 run_len = sum(1 for _ in grp)
-#                 if val:                              # non-empty → has subtype info
-#                     ax_st.add_patch(plt.Rectangle(
-#                         (pos, y0 + pad), run_len, rect_h,
-#                         fc=ST_COLORS.get(val, "#CCCCCC"),
-#                         ec="none", linewidth=0, alpha=0.88,
-#                     ))
-#                 pos += run_len
-
-#         # Frame label (same style as gene track)
-#         ax_st.text(
-#             -n_total * 0.005, (y0 + y1) / 2, f"F{frame}",
-#             ha="right", va="center", fontsize=7,
-#             color="grey", transform=ax_st.transData,
-#         )
-    
-#     # ── Legend for subtype track ──────────────────────────────────────────
-#     present_subtypes = sorted(                                                
-#         st for st in set(subtype_arr) if st != ""                            
-#     )                                                                         
-#     if present_subtypes:                                                      
-#         legend_handles = [                                                    
-#             mpatches.Patch(                                                   
-#                 fc=ST_COLORS.get(st, "#CCCCCC"),                             
-#                 ec="#555555", lw=0.4,                                        
-#                 label=st,                                                     
-#             )                                                                 
-#             for st in present_subtypes                                        
-#         ]                                                                     
-#         ax_st.legend(
-#             handles=legend_handles,
-#             title="Subtype",
-#             title_fontsize=8,
-#             fontsize=7,
-#             ncol=min(len(legend_handles), 6),
-#             loc="upper left",
-#             frameon=True,
-#             framealpha=0.85,
-#             borderpad=0.6,
-#             handlelength=1.2,
-#         )                                                                     
-
-#     # ── Colorbar (for heatmap only) ───────────────────────────────────────
-#     fig.colorbar(im, cax=ax_cb, label="score")
-
-#     plt.savefig(path, dpi=150, bbox_inches="tight")
-#     plt.close(fig)
-
 def visualize_sample_probs(
     preds_slice: np.ndarray,
     ploss_slice: np.ndarray,
-    sample_idx: int,
     sample_name: str,
     regions_aligned: list,
     pure_st_to_id_dict: dict,
@@ -460,8 +252,6 @@ def visualize_sample_probs(
     ploss_slice
         Slice of the post_loss_masks_*.npy memmap.
         Shape: (N, ata_len)
-    sample_idx
-        Integer row/index of the sample in the memmaps.
     sample_name
         Name used in the figure title/output identifier.
     regions_aligned
@@ -474,8 +264,6 @@ def visualize_sample_probs(
         Output PNG path.
     """
 
-    # ------------------------------------------------------------------
-
     # Only load this one sample from disk.
     loss_mask = np.asarray(ploss_slice)
     labels = np.asarray(preds_slice)
@@ -484,9 +272,6 @@ def visualize_sample_probs(
     n_real = int(real_loss_mask.sum())
     n_total = len(real_loss_mask)
 
-    # ------------------------------------------------------------------
-    # Subtype metadata
-    # ------------------------------------------------------------------
     id_to_st = {v: k for k, v in pure_st_to_id_dict.items()}
     subtype_names = [
         id_to_st[i]
@@ -497,9 +282,7 @@ def visualize_sample_probs(
     # (n_subtypes, n_total)
     full_labels = labels.T
 
-    # ------------------------------------------------------------------
     # Figure setup
-    # ------------------------------------------------------------------
     gene_track_h = 2.4
 
     fig = plt.figure(
@@ -527,9 +310,7 @@ def visualize_sample_probs(
         1: (0.0, 0.33),
     }
 
-    # ------------------------------------------------------------------
     # Row 0: loss mask
-    # ------------------------------------------------------------------
     ax_mask.imshow(
         real_loss_mask[np.newaxis, :],
         aspect="auto",
@@ -551,9 +332,7 @@ def visualize_sample_probs(
 
     plt.setp(ax_mask.get_xticklabels(), visible=False)
 
-    # ------------------------------------------------------------------
     # Row 1: Gene track
-    # ------------------------------------------------------------------
     ax_gene.set_xlim(0, n_total)
     ax_gene.set_ylim(0, 1)
     ax_gene.axis("off")
@@ -609,9 +388,7 @@ def visualize_sample_probs(
             color="grey",
         )
 
-    # ------------------------------------------------------------------
     # Row 2: Subtype probability heatmap
-    # ------------------------------------------------------------------
     im = ax_lab.imshow(
         full_labels,
         aspect="auto",
@@ -626,9 +403,7 @@ def visualize_sample_probs(
 
     plt.setp(ax_lab.get_xticklabels(), visible=False)
 
-    # ------------------------------------------------------------------
     # Row 3: Subtype region track
-    # ------------------------------------------------------------------
     ax_st.set_xlim(0, n_total)
     ax_st.set_ylim(0, 1)
 
@@ -755,9 +530,6 @@ def visualize_sample_probs(
         label="score",
     )
 
-    # ------------------------------------------------------------------
-    # Save
-    # ------------------------------------------------------------------
     fig.savefig(
         path,
         dpi=100,
@@ -797,7 +569,7 @@ def visualize_region_comparison(
     def subtype_color(st):
         return ST_COLORS.get(st, FALLBACK_COLOR)
 
-    # ── Layout: N rows, dynamic height ─────────────────────────────────
+    # Layout: N rows, dynamic height
     track_h = 1.0
     fig = plt.figure(figsize=(14, n_tracks * track_h + 1.2))
     gs = fig.add_gridspec(
@@ -853,7 +625,7 @@ def visualize_region_comparison(
     axes[-1].set_xlabel("Sequence position (bp)", fontsize=9)
     axes[0].set_title(f"Sequence {seq_id}  —  length {seq_length} bp", fontsize=10)
 
-    # ── Shared legend across all N tracks ──────────────────────────────
+    # Shared legend across all N tracks
     present_subtypes = set()
     for regions in regions_list:
         for r in regions:
@@ -906,7 +678,7 @@ def visualize_metrics(save_path_loss,
 
     # f1/micro	precision/micro	recall/micro	loss	step
     # 0.07481227070093155	0.05566808208823204	0.11402550339698792	5.273273804485798	2000
-    # --- 1. Data Preparation ---
+    # 1. Data Preparation
     # Add a split column to distinguish data sources
     train_metrics_df['split'] = 'Train'
     val_metrics_df['split'] = 'Validation'
@@ -921,7 +693,7 @@ def visualize_metrics(save_path_loss,
     # Get the final step for test marker placement
     final_step = df_combined['step'].max()
 
-    # --- 2. Visualize Loss Evolution ---
+    # 2. Visualize Loss Evolution
     fig_loss = px.line(
         df_combined, 
         x="step", 
@@ -958,7 +730,7 @@ def visualize_metrics(save_path_loss,
         print(f"Loss visualization saved to: {save_path_loss}", flush=True)
 
 
-    # --- 3. Visualize Performance Metrics (F1, Precision, Recall) ---
+    # 3. Visualize Performance Metrics (F1, Precision, Recall)
     # Melt the dataframe to long format for metric-based coloring
     df_melted = df_combined.melt(
         id_vars=["step", "split"], 
@@ -1020,7 +792,7 @@ def visualize_confusion_matrix( # Not used here but imported in test
     st_names   = [metrics.id_to_st[i] for i in range(metrics.num_subtypes)]
     n          = metrics.num_subtypes
 
-    # ── FP matrix (n x n), zero diagonal ──────────────────────────────────
+    # FP matrix (n x n), zero diagonal
     fp_raw = m["fp_confusion"].numpy().copy()        # (n_pred, n_true)
     np.fill_diagonal(fp_raw, 0)
 
@@ -1050,7 +822,7 @@ def visualize_confusion_matrix( # Not used here but imported in test
                 f"Count: {int(full_raw[i, j]):,}"
             )
 
-    # ── Per-subtype bar data ───────────────────────────────────────────────
+    # Per-subtype bar data
     per_st  = m["per_subtype"]                       # dict subtype -> {f1, precision, recall}
     f1_vals = [per_st[s]["f1"]        for s in st_names]
     p_vals  = [per_st[s]["precision"] for s in st_names]
@@ -1063,7 +835,7 @@ def visualize_confusion_matrix( # Not used here but imported in test
     p_ord    = [p_vals[i]   for i in order]
     r_ord    = [r_vals[i]   for i in order]
 
-    # ── Figure ─────────────────────────────────────────────────────────────
+    # Figure
     fig = make_subplots(
         rows=1, cols=2,
         column_widths=[0.60, 0.40],
@@ -1074,7 +846,7 @@ def visualize_confusion_matrix( # Not used here but imported in test
         horizontal_spacing=0.12,
     )
 
-    # ── Left: heatmap ──────────────────────────────────────────────────────
+    # Left: heatmap
     # Mask diagonal separately so it gets a different colorscale feel
     # We use a diverging-ish blue scale; diagonal TPs are visually distinct
     fig.add_trace(
@@ -1107,7 +879,7 @@ def visualize_confusion_matrix( # Not used here but imported in test
             row=1, col=1,
         )
 
-    # ── Right: horizontal grouped bar ─────────────────────────────────────
+    # Right: horizontal grouped bar
     bar_colors = {"F1": "#072C4B", "Precision": "#F28089", "Recall": "#71cddd"}
 
     for metric, vals in [("F1", f1_ord), ("Precision", p_ord), ("Recall", r_ord)]:
@@ -1124,7 +896,7 @@ def visualize_confusion_matrix( # Not used here but imported in test
             row=1, col=2,
         )
 
-    # ── Layout ─────────────────────────────────────────────────────────────
+    # Layout
     fig.update_layout(
         template="plotly_white",
         width=1400,
@@ -1274,8 +1046,8 @@ def plot_reference_distribution(subtype_data,
     # Subtle grid lines only on y
     fig.update_xaxes(showgrid=False, linecolor="rgba(0,0,0,0.15)", linewidth=1)
     fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.07)", type="log")
-    fig.write_html(save_path_ref_dist, include_plotlyjs="cdn")
-    print(f"\nPlot saved at {save_path_ref_dist}")
+    fig.write_html(save_path, include_plotlyjs="cdn")
+    print(f"\nPlot saved at {save_path}")
 
     return fig
 
@@ -1323,9 +1095,9 @@ if __name__ == "__main__":
                                       save_path=save_path_ref_dist) 
 
 
-    # ---- rate array for diversity ----------------------------------------
+    # rate array for diversity
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)
-    subtypes_with_data = ['A', 'C', 'D', 'E', 'F', 'G']
+    subtypes_with_data = ['A', 'B', 'C', 'D', 'AE', 'F', 'G']
     names = subtypes_with_data + ['avg']
     diversity_arrays = {}
     for name in names:

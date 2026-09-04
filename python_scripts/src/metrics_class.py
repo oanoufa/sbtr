@@ -38,12 +38,12 @@ class HIVSubtypingMetrics:
         if output_path is not None and os.path.isfile(output_path) and not load_checkpoint:
             os.remove(output_path)
 
-        # --- Micro metrics ---
+        # Micro metrics
         self.f1_micro = MultilabelF1Score(num_labels=num_subtypes, average="micro").to(device)
         self.precision_micro = MultilabelPrecision(num_labels=num_subtypes, average="micro").to(device)
         self.recall_micro = MultilabelRecall(num_labels=num_subtypes, average="micro").to(device)
 
-        # --- Clade-Level Metrics Setup ---
+        # Clade-Level Metrics Setup
         clade_names = []
         st_to_clade_idx = {}
         
@@ -103,7 +103,7 @@ class HIVSubtypingMetrics:
         self.precision_micro.update(preds_flat, targets_flat)
         self.recall_micro.update(preds_flat, targets_flat)
         
-        # --- Clade Projection ---
+        # Clade Projection
         preds_binary = (preds_flat > 0.5).float()
         preds_clade = (preds_binary @ self.clade_proj > 0).float()
         targets_clade = (targets_flat @ self.clade_proj > 0).float()

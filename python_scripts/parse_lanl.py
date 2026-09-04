@@ -42,7 +42,7 @@ combined_ref_path = args.combined_out
 urllib3.disable_warnings()
 
 ST_TO_ID_DICT = config.ST_TO_ID_DICT
-# ── Harmonising dict for breakpoints taken from LANL ──────────────────────────
+# Harmonising dict for breakpoints taken from LANL
 CRF_CANONICAL = {
     '01':        'CRF01_AE',
     '01_AE':     'CRF01_AE',
@@ -77,9 +77,7 @@ CRF_CANONICAL = {
 
 U_ALIASES = {'U', 'U1', 'Undetermined', 'Unsequenced', 'unknown', 'Undefined'}
 
-# ──────────────────────────────────────────────────────────────────────────────
 # CRF01_AE mosaic structure (HXB2 coordinates, 1-based)
-# ──────────────────────────────────────────────────────────────────────────────
 _CRF01_BREAKPOINTS: List[Tuple[int, str, str]] = [
     (5097, "A1",   "E"   ),
     (5321, "E",    "A1"  ),
@@ -113,10 +111,7 @@ _CRF26_A5U_RE= re.compile(r"^(CRF)?26[_-]?A5U?$", re.IGNORECASE)
 _HXB2_ID     = "HXB2_LAI_IIIB_BRU.K03455"
 _PURE_ST: FrozenSet[str] = frozenset(ST_TO_ID_DICT.keys()) # | {'A', 'F'}
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Subtype normalisation helpers (breakpoint file parsing)
-# ──────────────────────────────────────────────────────────────────────────────
-
 def normalize_subtype(raw: str) -> str:
     if '/' in raw:
         parts = raw.split('/')
@@ -356,10 +351,7 @@ def scrape_and_parse_lanl_breakpoints(output_path):
     print(f"Written {blocks_written} CRF blocks to {output_path}")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # HXB2 position masks
-# ──────────────────────────────────────────────────────────────────────────────
-
 def _build_pure_e_hxb2_mask() -> np.ndarray:
     boundaries = (
         [1]
@@ -385,10 +377,7 @@ def _build_crf26_a5u_a_mask() -> np.ndarray:
     return mask
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Record classification helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
 def _extract_subtype(record_id: str) -> Optional[str]:
     parts = record_id.split(".")
     if len(parts) >= 2 and parts[0].lower() == "ref":
@@ -422,11 +411,7 @@ def _is_crf26_a5u(subtype: Optional[str]) -> bool:
     return bool(subtype and _CRF26_A5U_RE.match(subtype))
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # CRF label-sequence construction
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 def _crf_df_key(label: str, df_by_crf: Dict[str, pd.DataFrame]) -> Optional[str]:
     """Return the df_by_crf dict key for a CRF subtype label, or None.
 
@@ -542,14 +527,14 @@ def _build_hxb2_label_array(
         if s > e:
             continue
 
-        # ── terminal or compound (may contain CRF refs inside compound) ──
+        # terminal or compound (may contain CRF refs inside compound)
         if subtype in _PURE_ST or '/' in subtype:
             labels[s : e + 1] = _resolve_single_label(
                 subtype, df_by_crf, new_seen, depth
             )
             continue
 
-        # ── CRF reference: expand position-by-position ───────────────────
+        # CRF reference: expand position-by-position
         key = _crf_df_key(subtype, df_by_crf)
         if key and key not in new_seen:
             ref = _build_hxb2_label_array(
@@ -665,7 +650,7 @@ def _merge_same_subtype_segments(df: pd.DataFrame) -> pd.DataFrame:
     DataFrame with the same columns; *length* = end − start + 1.
     """
     rows: List[Dict] = []
-    for crf, grp in df.groupby('crf', sort=False):
+    for _, grp in df.groupby('crf', sort=False):
         segs = grp.sort_values('start').to_dict('records')
         if not segs:
             continue
@@ -725,16 +710,13 @@ def label_sequences_to_segments_csv(
 
     df = pd.DataFrame(rows, columns=['crf', 'start', 'end', 'subtype', 'length'])
 
-    # ── Merge same-subtype segments that are only gap-separated ──────────
+    # Merge same-subtype segments that are only gap-separated
     # df = _merge_same_subtype_segments(df)
 
     df.to_csv(output_path, index=False)
     return df
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Alignment preparation
-# ──────────────────────────────────────────────────────────────────────────────
-
 def validate_record_id(record_id: str) -> bool:
     """Check if a LANL record ID is in the expected format.
     Expected format: 'Ref.SUBTYPE.COUNTRY.YY.NAME.ACCESSION',
@@ -773,7 +755,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
     Read LANL subtype reference alignment, separate pure subtypes from CRFs.
     Applies trimAl column filtering while preserving all HXB2-nucleotide columns.
     """
-    # ── 1. Load original alignment (for HXB2 row only) ───────────────────
+    # Load original alignment (for HXB2 row only)
     original_records = list(SeqIO.parse(lanl_alignment_path, "fasta"))
     if not original_records:
         raise ValueError(f"No sequences found in '{lanl_alignment_path}'.")
@@ -790,7 +772,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
         )
     original_aln_len = len(hxb2_original_seq)
 
-    # ── 2. Parse trimAl kept-column indices ───────────────────────────────
+    # Parse trimAl kept-column indices
     colnumbering_path = os.path.join(
         WORKSPACE_PATH, "data", "output", "trimal_kept_columns.txt"
     )
@@ -803,7 +785,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
         dtype=np.int64,
     )
 
-    # ── 3. Build final column mask ────────────────────────────────────────
+    # Build final column mask
     # Start with columns kept by trimAl
     final_mask = np.zeros(original_aln_len, dtype=bool)
     final_mask[trimal_kept] = True
@@ -822,7 +804,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
     print(f"  Final columns (union)       : {len(final_cols)}")
     print(f"  Columns removed             : {original_aln_len - len(final_cols)}")
 
-    # ── 4. Load trimmed alignment and apply final column mask ─────────────
+    # Load trimmed alignment and apply final column mask
     trimmed_path = lanl_alignment_path + ".trimaled"
     trimmed_records = list(SeqIO.parse(trimmed_path, "fasta"))
     if not trimmed_records:
@@ -841,7 +823,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
         arr = np.frombuffer(seq.encode(), dtype=np.uint8)
         return arr[final_cols].tobytes().decode()
 
-    # ── 5. Locate HXB2 in the sliced alignment ────────────────────────────
+    # Locate HXB2 in the sliced alignment
     hxb2_ata: Optional[str] = None
     hxb2_id:  Optional[str] = None
     for rec in original_records:
@@ -853,7 +835,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
     if hxb2_ata is None:
         raise ValueError("HXB2 not found after column slicing.")
 
-    # ── 6. Build coordinate maps from the final HXB2 row ─────────────────
+    # Build coordinate maps from the final HXB2 row
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata)
     #  print the mapping as a csv with columns: ata_pos, hxb2_pos 
     mapping_path = Path(f"{WORKSPACE_PATH}/data/output/hxb2_ata_mapping.csv")
@@ -870,14 +852,15 @@ def prepare_pure_alignment(lanl_alignment_path: str,
     print(f"  New ATA length              : {len(hxb2_ata)}")
     print(f"  HXB2 positions covered      : {int(hxb2_nongap.sum())}")
 
-    # ── 7. Project per-HXB2-position masks onto new alignment columns ─────
-    _PURE_E_HXB2:  np.ndarray = _build_pure_e_hxb2_mask()
-    pure_e_cols:   np.ndarray = _PURE_E_HXB2[ata_to_hxb2]
+    # Project per-HXB2-position masks onto new alignment columns
+    # _PURE_E_HXB2:  np.ndarray = _build_pure_e_hxb2_mask()
+    # pure_e_cols:   np.ndarray = _PURE_E_HXB2[ata_to_hxb2]
+    # Now considering AE as a pure subtype, we don't need to mask the A parts of AE anymore.
 
     _CRF26_A_HXB2: np.ndarray = _build_crf26_a5u_a_mask()
     crf26_a_cols:  np.ndarray = _CRF26_A_HXB2[ata_to_hxb2]
 
-    # ── 8. Classify and collect ───────────────────────────────────────────
+    # Classify and collect
     pure_result: Dict[str, str] = {}
     crf_result:  Dict[str, str] = {}
     accession_names_seen: Set[str] = set()
@@ -915,7 +898,8 @@ def prepare_pure_alignment(lanl_alignment_path: str,
                 print(f"Warning: Record ID '{rec.id}' does not match expected format. Skipping.")
                 continue
             arr = np.frombuffer(seq_str.encode(), dtype=np.uint8).copy()
-            # arr[~pure_e_cols] = ord("N") # In the end we decided to keep the full sequence for CRF01_AE and consider it a pure subtype, as the A parts of AE also diverged enough to be considered a subsubtype of A.
+            # arr[~pure_e_cols] = ord("N")
+            # In the end we decided to keep the full sequence for CRF01_AE and consider it a pure subtype, as the A parts of AE also diverged enough to be considered a subsubtype of A.
             masked_seq = arr.tobytes().decode()
             new_id_e = str(rec.id).replace("01_AE", "AE")
             pure_result[new_id_e] = masked_seq
@@ -938,7 +922,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
             crf_result[rec.id] = seq_str
             accession_names_seen.add(accession_name)
 
-    # ── 9. Sort and write ─────────────────────────────────────────────────
+    # Sort and write
     def _write_fasta(path: str, primary_id: str, primary_seq: str,
                      sequences: Dict[str, str]) -> None:
         tmp_fd, tmp_path = tempfile.mkstemp(
@@ -976,13 +960,9 @@ def prepare_pure_alignment(lanl_alignment_path: str,
 
     return hxb2_id, pure_result, crf_result, combined_result
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
 
-    # ── 1. Scrape and parse LANL breakpoints ─────────────────────────────
+    # Scrape and parse LANL breakpoints
     bp_path = f"{WORKSPACE_PATH}/data/output/LANL_scrapped_bp.breakpoints"
     scrape_and_parse_lanl_breakpoints(bp_path)
 
@@ -998,13 +978,13 @@ if __name__ == "__main__":
         f"{WORKSPACE_PATH}/data/output/lanl_crf_breakpoints.csv", index=False)
     print("Saved lanl_crf_segments.csv and lanl_crf_breakpoints.csv\n")
 
-    # ── 2. Prepare pure / CRF reference alignments ───────────────────────
+    # Prepare pure / CRF reference alignments
 
     hxb2_id, pure_result, crf_result, combined_result = prepare_pure_alignment(
         lanl_subtype_ref_path, pure_ref_path, crf_ref_path, combined_ref_path,
     )
 
-    # 3. Build per-position label sequences (HXB2 -> alignment)
+    # Build per-position label sequences (HXB2 -> alignment)
     hxb2_gapped = pure_result[hxb2_id]
 
     print("Building CRF label sequences …")
@@ -1017,7 +997,7 @@ if __name__ == "__main__":
     np.savez_compressed(seqs_path, **label_seqs)
     print(f"  Label-sequence archive : {seqs_path}")
 
-    # ── 4. Derive alignment-coord segment CSV from the label sequences ────
+    # Derive alignment-coord segment CSV from the label sequences
     csv_path = f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_aln.csv"
     df_aln   = label_sequences_to_segments_csv(label_seqs, csv_path)
     print(f"\nAlignment-coord segments : {csv_path}  ({len(df_aln)} rows)")

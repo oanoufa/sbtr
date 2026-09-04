@@ -1,6 +1,7 @@
 # Large data
 data/model/checkpoints/
 data/model/reference_bank/
+data/model/metrics/
 data/output/
 data/archive/
 data/trash/

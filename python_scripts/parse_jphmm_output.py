@@ -1,11 +1,8 @@
 """Parse jpHMM output into a flat regions CSV.
-
 The input contains a sequence header followed by breakpoint rows:
-
     >seq_name (bw=1e-20)
     start_position    end_position    predicted_subtype
     ...
-
 The output contains sample_name, start, end, subtype, and length columns.
 """
 

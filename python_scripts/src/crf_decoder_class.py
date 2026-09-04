@@ -164,7 +164,7 @@ class CRFReferenceDecoder:
                 composition.append(subtype)
         return composition
 
-    # ── core computations ───────────────────────────────────────────────────
+    # core computations
 
     def _intersection_scores(
         self,
@@ -256,7 +256,6 @@ class CRFReferenceDecoder:
 
     def _gen_labels_dealigned(
         self,
-        sample_name: str,
         mask: np.ndarray,
         compactmapout_entry: List[Tuple[int, int, int]],
         label_names_aligned: List[str],
@@ -266,7 +265,6 @@ class CRFReferenceDecoder:
 
         Parameters
         ----------
-        sample_name : str, name of the sequence being queried.
         mask : np.ndarray, boolean array indicating valid positions in the aligned sequence.
         compactmapout_entry : List[Tuple[int, int, int]], the mapping of removed insertions to ata positions.
         label_names_aligned : List[str], the labels corresponding to the aligned (ata) sequence.
@@ -372,8 +370,6 @@ class CRFReferenceDecoder:
             decision += f".like.{close_crfs}"
             return decision
 
-    # ── public API ──────────────────────────────────────────────────────────
-
     def query(
         self,
         sample_name: str,
@@ -407,7 +403,7 @@ class CRFReferenceDecoder:
 
         mask = np.asarray(query_mask, dtype=np.float32)
 
-        # ── global ranking ──────────────────────────────────────────────────
+        # global ranking
         scores  = self._intersection_scores(probs, mask)
         top_idx = np.argsort(scores)[::-1][: self.top_k]
 
@@ -421,7 +417,7 @@ class CRFReferenceDecoder:
             for rank, i in enumerate(top_idx)
         ]
 
-        # ── per-position label sequence ─────────────────────────────────────
+        # per-position label sequence
         _, str_path = self._sliding_window(probs)       # (L,)
         str_path = self._trim_flanking_to_skip(str_path, mask, skip_label="U")
 
@@ -435,14 +431,14 @@ class CRFReferenceDecoder:
             compactmapout_entry=compactmapout_entry,
             label_names_aligned=label_names_aligned)
 
-        # ── breakpoint regions ──────────────────────────────────────────────
+        # breakpoint regions
         regions_aligned   = self._extract_breakpoints(label_names_aligned,   skip_label="U")
         regions_dealigned = self._extract_breakpoints(label_names_dealigned, skip_label="U")
 
-        # ── purity ──────────────────────────────────────────────────────────
+        # purity
         dominant, fraction = self._purity_stats(label_names_dealigned)
 
-        # ── composition ─────────────────────────────────────────────────────
+        # composition
         total_real  = int(mask.sum())
         composition = self._composition_from_regions(regions_dealigned, total_len=total_real)
         if not composition:

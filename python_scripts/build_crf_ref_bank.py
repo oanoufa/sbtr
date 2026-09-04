@@ -115,7 +115,7 @@ def build_crf_reference_bank(
         Randomly sampled CRF reference sequences.
     """
 
-    #  1. Load sequences                                                   #
+    #  1. Load sequences
     random.seed(seed)
     print(f"\nBuilding CRF reference bank from: {crf_ref_path}")
     all_records: list[SeqRecord] = list(SeqIO.parse(crf_ref_path, "fasta"))
@@ -123,7 +123,7 @@ def build_crf_reference_bank(
         sys.exit("ERROR: CRF reference FASTA is empty.")
     print(f"  Loaded {len(all_records)} CRF reference sequences")
 
-    #  2. Parse CRF type + accession                                       #
+    #  2. Parse CRF type + accession
     _REF_PREFIX = re.compile(r"^Ref\.")
 
     def parse_id(record_id: str) -> tuple[str, str]:
@@ -211,7 +211,7 @@ def build_crf_reference_bank(
 if __name__ == "__main__":
     n_packed = int(np.ceil(NUM_SUBTYPES / 8))
 
-    # ---- Load HXB2 reference -------------------------------------------
+    # Load HXB2 reference
     print(f"Loading HXB2 reference from: {PURE_REF_PATH}")
     hxb2_ata_seq = None
     for i, rec in enumerate(SeqIO.parse(PURE_REF_PATH, "fasta")):
@@ -225,7 +225,7 @@ if __name__ == "__main__":
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)
     print(f"  ATA length, HXB2 length     : {ATA_LEN, int(max(ata_to_hxb2))}")
 
-    # ---- Model + tokenizer --------------------------------------------
+    # Model + tokenizer
     model_used = "oanoufa/sbtr_ntv3_650M"
     tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True)
     model = HFModelForHIVSubtyping.from_pretrained(model_used)
@@ -234,7 +234,7 @@ if __name__ == "__main__":
     model.eval()
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
-    # ---- CRF reference bank ------------------------------------------
+    # CRF reference bank
     # Tokenize each CRF reference sequence directly (no HIVSequenceDataset wrapper needed).  We construct the attention mask ourselves from pad_token_id so we never rely on the tokenizer returning it.
     print(f"\nBuilding CRF reference bank from: {CRF_FILE_PATH}", flush=True)
     sequence_bank, test_set = build_crf_reference_bank(
@@ -247,7 +247,6 @@ if __name__ == "__main__":
         )
     N = len(sequence_bank)
 
-    # ---- Build metadata -----------------------------------------
     seq_names = [rec.id for rec in sequence_bank]
     metadata  = pd.DataFrame({
         "sequence_name": seq_names,
@@ -261,7 +260,7 @@ if __name__ == "__main__":
     metadata.to_csv(generated_meta_path, sep="\t", index=False)
     print(f"\nGenerated: {generated_meta_path}")
 
-    # ---- Allocate memmaps ----------------------------------------------
+    # Allocate memmaps
     out_seqs  = out_dir / f"sequences_v{VERSION}.npy"
     out_lbls  = out_dir / f"labels_v{VERSION}.npy"
     out_masks = out_dir / f"loss_masks_v{VERSION}.npy"
@@ -278,7 +277,7 @@ if __name__ == "__main__":
     print(f"  labels     : {out_lbls}  shape={lbl_mm.shape}")
     print(f"  loss_masks : {out_masks} shape={mask_mm.shape}")
 
-    # ---- 6. Fill memmaps --------------------------------------------------
+    # Fill memmaps
     zero_lbl_packed = np.zeros((ATA_LEN, n_packed), dtype=np.uint8)
     zero_mask = np.ones(ATA_LEN,             dtype=bool)
     gap_masks = {}
