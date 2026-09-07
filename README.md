@@ -35,7 +35,7 @@ apptainer pull sbtr.sif docker://ghcr.io/oanoufa/sbtr:latest
 
 ## Usage
 
-> **Note:** A Hugging Face token can be specified (`HF_TOKEN`) to download model weights and tokenizer files faster.
+> **Note:** A Hugging Face token must be specified (`HF_TOKEN`) to download model weights from InstaDeepAI/NTv3_650M_pre. This token must come from an account with access to the model repository. This can be done at this address [https://huggingface.co/InstadeepAI/NTv3_650M_pre](https://huggingface.co/InstadeepAI/NTv3_650M_pre).
 
 ### Running with Docker
 
@@ -47,7 +47,7 @@ docker run --rm --shm-size=2g \
   sbtr \
   --seq /data/in/sequences.fasta \
   --mafft_bin mafft \
-  --tag cuban \
+  --tag my_sequences \
   --out_dir /data/out \
   --wto r \
   --num_cpu ${N_WORKERS} \
@@ -61,13 +61,13 @@ docker run --rm --shm-size=2g \
 ```bash
 apptainer run --nv \
   --env HF_TOKEN=hf_xxxxxx \
-  --bind /tmp:/tmp \
+  --bind /path/to/tmp:/tmp \
   --bind /path/to/data/input:/data/in \
   --bind /path/to/data/output:/data/out \
   /pasteur/helix/projects/mPath/oanoufa/sbtr/sbtr.sif \
   --seq /data/in/sequences.fasta \
   --mafft_bin mafft \
-  --tag cuban \
+  --tag my_sequences \
   --out_dir /data/out \
   --wto r \
   --num_cpu ${N_WORKERS} \

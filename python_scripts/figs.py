@@ -19,6 +19,8 @@ import plotly.io as pio
 import matplotlib.patches as mpatches
 pio.defaults.default_format = "png"
 from src import config
+from collections import Counter
+
 
 workspace_path = config.WORKSPACE_PATH
 
@@ -187,8 +189,17 @@ def visualize_diversity(
         "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
     ]
 
+    # LTR boundaries
+    max_5 = hxb2_to_ata[max(config.START_5LTR)]
+    min_3 = hxb2_to_ata[min(config.NEF_3LTR)]
+    max_3 = hxb2_to_ata[max(config.NEF_3LTR)]
+
     for i, (name, diversity_array) in enumerate(diversity_arrays.items()):
         color          = trace_colors[i % len(trace_colors)]
+        # Zero rates in LTR regions
+        diversity_array[0:max_5] = 1e-10
+        diversity_array[min_3:max_3] = 1e-10
+        diversity_array /= diversity_array.sum()
         smoothed_rates = np.convolve(diversity_array, kernel, mode='same')
         mean_rate      = np.mean(diversity_array)
 
@@ -757,7 +768,7 @@ def visualize_metrics(save_path_loss,
         fig_perf.write_image(save_path_evol + '.png', scale=2)
     print(f"Performance evolution saved to: {save_path_evol}", flush=True)
 
-def visualize_confusion_matrix( # Not used here but imported in test
+def visualize_confusion_matrix(
     metrics,
     save_path: str = None,
 ) -> None:
@@ -785,9 +796,14 @@ def visualize_confusion_matrix( # Not used here but imported in test
         full_raw[i, i] = tp_vec[i]
 
     # Normalize by column (true label total = TP + FN)
-    true_totals = tp_vec + fn_vec                    # how many times each subtype was the TRUE label
+    true_totals = tp_vec + fn_vec
     true_totals_safe = np.where(true_totals == 0, 1, true_totals)
-    full_norm = full_raw / true_totals_safe[np.newaxis, :]   # normalize columns
+    full_norm = full_raw / true_totals_safe[np.newaxis, :]
+
+    # Log-transform for color mapping only (hover/text still use full_norm/full_raw)
+    eps = 1e-4
+    z_log = np.log10(full_norm + eps)
+    z_min, z_max = np.log10(eps), 0  # 0 = log10(1)
 
     # Hover text: "Predicted X | True Y\nrate: 0.03\ncount: 1234"
     hover = np.empty((n, n), dtype=object)
@@ -830,15 +846,17 @@ def visualize_confusion_matrix( # Not used here but imported in test
     # We use a diverging-ish blue scale; diagonal TPs are visually distinct
     fig.add_trace(
         go.Heatmap(
-            z=full_norm,
-            x=st_names,          # true label (columns)
-            y=st_names,          # predicted label (rows)
+            z=z_log,
+            x=st_names,
+            y=st_names,
             text=hover,
             hovertemplate="%{text}<extra></extra>",
             colorscale="Blues",
-            zmin=0, zmax=1,
+            zmin=z_min, zmax=z_max,
             colorbar=dict(
                 title="Rate",
+                tickvals=[np.log10(eps), -3, -2, -1, 0],
+                ticktext=["0", "0.001", "0.01", "0.1", "1"],
                 len=0.5, y=0.75,
                 thickness=12,
             ),
@@ -848,7 +866,7 @@ def visualize_confusion_matrix( # Not used here but imported in test
     )
 
     # Overlay diagonal boxes to highlight TPs visually
-    for i, st in enumerate(st_names):
+    for i, _ in enumerate(st_names):
         fig.add_shape(
             type="rect",
             x0=i - 0.5, x1=i + 0.5,
@@ -998,7 +1016,7 @@ def plot_reference_distribution(subtype_data,
 
     fig.update_layout(
         title=dict(
-            text="HIV-1 sequences by subtype in LANL Super Filtered alignment",
+            text="HIV-1 sequences by subtype in sbtr reference alignment",
             font=dict(size=18, family="Arial"),
             x=0.5,
             xanchor="center",
@@ -1027,6 +1045,86 @@ def plot_reference_distribution(subtype_data,
     fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.07)", type="log")
     fig.write_html(save_path, include_plotlyjs="cdn")
     print(f"\nPlot saved at {save_path}")
+
+    return fig
+
+def plot_reference_distribution_with_year(subtype_data,
+                                save_path=f"{workspace_path}/figs/subtype_distribution"):
+    subtypes = sorted(subtype_data.keys())
+    counts = [len(subtype_data[s]) for s in subtypes]
+
+    BAR_COLOR = "#3366A3"
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        row_heights=[0.55, 0.45],
+        vertical_spacing=0.04,
+    )
+
+    # Top: total sequence counts, log scale
+    fig.add_trace(
+        go.Bar(
+            x=subtypes,
+            y=counts,
+            marker_color=BAR_COLOR,
+            marker_line_width=0,
+            hovertemplate="<b>%{x}</b><br>Sequences: %{y}<extra></extra>",
+            showlegend=False,
+        ),
+        row=1, col=1,
+    )
+
+    # Bottom: dot per (subtype, year) present, sized by that year's count
+    x_dots, y_dots, sizes, hover = [], [], [], []
+    for s in subtypes:
+        yr_counts = Counter(subtype_data[s])
+        for yr, c in sorted(yr_counts.items()):
+            x_dots.append(s)
+            y_dots.append(yr)
+            sizes.append(c)
+            hover.append(f"<b>{s}</b><br>Year: {yr}<br>Sequences: {c}")
+
+    max_c = max(sizes)
+    marker_sizes = [4 + 10 * (c / max_c) ** 0.5 for c in sizes]
+
+    fig.add_trace(
+        go.Scatter(
+            x=x_dots,
+            y=y_dots,
+            mode="markers",
+            marker=dict(size=marker_sizes, color=BAR_COLOR, opacity=0.75, line=dict(width=0)),
+            text=hover,
+            hovertemplate="%{text}<extra></extra>",
+            showlegend=False,
+        ),
+        row=2, col=1,
+    )
+
+    fig.update_layout(
+        template="plotly_white",
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(family="Arial", size=12),
+        margin=dict(t=30, b=60, l=70, r=30),
+        height=650,
+        width=1000,
+    )
+
+    fig.update_xaxes(showgrid=False, linecolor="rgba(0,0,0,0.3)", linewidth=1, row=1, col=1)
+    fig.update_xaxes(
+        categoryorder="array", categoryarray=subtypes,
+        showgrid=False, linecolor="rgba(0,0,0,0.3)", linewidth=1,
+        title_text="Subtype", tickfont=dict(size=11, family="monospace"),
+        row=2, col=1,
+    )
+    fig.update_yaxes(type="log", title_text="Sequences (log)",
+                      gridcolor="rgba(0,0,0,0.07)", zeroline=False, row=1, col=1)
+    fig.update_yaxes(title_text="Year",
+                      gridcolor="rgba(0,0,0,0.07)", zeroline=False, row=2, col=1)
+
+    fig.write_html(save_path + ".html", include_plotlyjs="cdn")
+    print(f"\nPlot saved at {save_path} (.html/.png/.pdf)")
 
     return fig
 
@@ -1070,9 +1168,11 @@ if __name__ == "__main__":
 
     save_path_ref_dist = f"{workspace_path}/figs/reference_subtype_distribution.html"
 
-    fig = plot_reference_distribution(subtype_data,
-                                      save_path=save_path_ref_dist) 
+    fig = plot_reference_distribution_with_year(subtype_data,
+                                      save_path=save_path_ref_dist)
 
+    fig = plot_reference_distribution(subtype_data,
+                                      save_path=save_path_ref_dist)
 
     # rate array for diversity
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)

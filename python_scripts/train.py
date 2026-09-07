@@ -15,8 +15,9 @@ from src import config
 from src.dataset_class import HIVSequenceDataset, open_memmaps
 from src.model_class import HFModelForHIVSubtyping, HIVSubtypingConfig
 from src.metrics_class import HIVSubtypingMetrics, train_step, validation_step
+from figs import visualize_confusion_matrix
 
-from huggingface_hub import login, upload_folder
+from huggingface_hub import login
 TOKEN_PATH = config.TOKEN_PATH
 with open(TOKEN_PATH, 'r') as f:
     token = f.read().strip()
@@ -88,9 +89,7 @@ if __name__ == "__main__":
     print(f"Labels memmap    : {lbl_mm.shape}  dtype={lbl_mm.dtype}")
     print(f"Loss masks memmap: {mask_mm.shape}  dtype={mask_mm.dtype}")
 
-    # ------------------------------------------------------------------
     # Datasets - each split views its subset of rows via stored indices
-    # ------------------------------------------------------------------
     train_dataset = HIVSequenceDataset(
         seq_mm=seq_mm, lbl_mm=lbl_mm, mask_mm=mask_mm, metadata=metadata,
         tokenizer=tokenizer, n_subtypes=NUM_SUBTYPES,
@@ -104,9 +103,7 @@ if __name__ == "__main__":
         split="val",
     )
 
-    # ------------------------------------------------------------------
     # DataLoaders
-    # ------------------------------------------------------------------
     train_loader = DataLoader(
         train_dataset, batch_size=MODEL_CONFIG["batch_size"],
         shuffle=True, num_workers=MODEL_CONFIG["num_workers"], pin_memory=True,
@@ -119,9 +116,7 @@ if __name__ == "__main__":
     print(f"\nTrain samples : {len(train_dataset)}")
     print(f"Val samples   : {len(val_dataset)}")
 
-    # ------------------------------------------------------------------
     # Optimizer & scheduler
-    # ------------------------------------------------------------------
     backbone = model.module.backbone if isinstance(model, torch.nn.DataParallel) else model.backbone
 
     optimizer = AdamW([
@@ -149,9 +144,7 @@ if __name__ == "__main__":
         output_path=os.path.join(MODEL_CONFIG["metrics_dir"], f"val_metrics_v{MODEL_CONFIG['model_version']}.tsv"),
         id_to_st=id_to_st, n_token_id=n_token_id)
 
-    # ------------------------------------------------------------------
     # Optional: load from checkpoint to resume training
-    # ------------------------------------------------------------------
     if MODEL_CONFIG["load_checkpoint"]:
         checkpoint = torch.load(
             os.path.join(MODEL_CONFIG["checkpoint_dir"], MODEL_CONFIG["checkpoint_name"]),
@@ -177,9 +170,7 @@ if __name__ == "__main__":
     print(f"  Log every               : {MODEL_CONFIG['log_every_n_steps']} steps")
     print(f"  Validate every          : {MODEL_CONFIG['validate_every_n_steps']} steps")
 
-    # ------------------------------------------------------------------
     # Training loop
-    # ------------------------------------------------------------------
     print(f"\nStarting training for {MODEL_CONFIG['num_steps_training']} steps\n")
 
     train_iter  = iter(train_loader)
@@ -234,6 +225,10 @@ if __name__ == "__main__":
             model.train()
 
     print(f"\nTraining completed after {MODEL_CONFIG['num_steps_training']} steps.")
+
+# print confusion matrix
+save_path = f"{WORKSPACE_PATH}/figs/confusion_matrix.html"
+visualize_confusion_matrix(val_metrics, save_path=save_path)
 
 print(f"\nPushing model to HuggingFace")
 

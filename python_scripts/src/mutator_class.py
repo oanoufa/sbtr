@@ -223,11 +223,13 @@ class SequenceMutator:
         self,
         iqtree_dir: str,
         ata_len:    int,
+        hxb2_to_ata: np.ndarray,
         seed:       int = 42,
         cache_dir:  Optional[str] = None,
     ):
         self.iqtree_dir = Path(iqtree_dir)
         self.ata_len    = ata_len
+        self.hxb2_to_ata = hxb2_to_ata
         self._rng       = np.random.default_rng(seed)
         self._py_rng    = random.Random(seed)
 
@@ -237,6 +239,11 @@ class SequenceMutator:
         self.site_rates_dict: Dict[str, np.ndarray] = {}
         self.sub_probs_dict:  Dict[str, np.ndarray] = {}
         _Q_matrices:          Dict[str, np.ndarray] = {}
+
+        # LTR boundaries
+        max_5 = self.hxb2_to_ata[max(config.START_5LTR)]
+        min_3 = self.hxb2_to_ata[min(config.NEF_3LTR)]
+        max_3 = self.hxb2_to_ata[max(config.NEF_3LTR)]
 
         # per-subtype loading
         for st in _SUBTYPES_WITH_FILES:
@@ -251,6 +258,11 @@ class SequenceMutator:
                 print(f"  [SequenceMutator] Parsing IQ-TREE rates for subtype {st}")
                 rates = parse_iqtree_rates(str(rate_file), ata_len)
                 np.save(cache_path, rates)
+
+            # Zero rates in LTR regions
+            rates[0:max_5] = 1e-10
+            rates[min_3:max_3] = 1e-10
+            rates /= rates.sum()
 
             self.site_rates_dict[st] = rates
 
