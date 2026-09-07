@@ -1,10 +1,19 @@
+<table>
+<tr>
+<td width="150"><img src="figs/readme/sbtr.png" width="130"></td>
+<td>
+
 # sbtr: HIV-1 Deep Learning-based SuBTypeR
 
 **sbtr** is a novel genomic language model tool designed for fine-grain HIV-1 subtyping per nucleotide position. By predicting subtypes at high spatial resolution, sbtr detects novel recombinant forms and identifies precise recombination breakpoints rapidly.
 
+</td>
+</tr>
+</table>
+
 ---
 
-## How It Works
+## How it works
 
 sbtr processes input sequences through an automated end-to-end pipeline:
 1. **Dealign & Align**: Input FASTA sequences or existing alignments are dealigned and aligned against an internal HIV-1 reference using MAFFT.
@@ -13,11 +22,11 @@ sbtr processes input sequences through an automated end-to-end pipeline:
 
 ---
 
-## Installation & Setup
+## Installation & setup
 
 sbtr runs inside isolated container environments (Docker or Apptainer/Singularity) to manage CUDA and MAFFT dependencies.
 
-### 1. Retrieve the Container
+### 1. Retrieve the container
 
 **Docker:**
 
@@ -77,7 +86,7 @@ apptainer run --nv \
 
 ---
 
-## Command Line Arguments
+## Command line arguments
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -90,7 +99,7 @@ apptainer run --nv \
 | `--batch_size` | `int` | `1` | Forward pass batch size (increase for GPU runs). |
 | `--wto` | `str` | `""` | Optional outputs to write (see details below). |
 
-### Output Flags (`--wto`)
+### Output flags (`--wto`)
 The tool always outputs `results_<tag>.csv` and `summary_<tag>.json`. You can request additional outputs by concatenating any combination of these letters to `--wto`:
 
 * `f`: Generate plots/figures showing per-sequence predictions *(adds runtime)*.
@@ -108,3 +117,24 @@ The tool always outputs `results_<tag>.csv` and `summary_<tag>.json`. You can re
 * `summary_<tag>.json`: Run metadata and summary statistics.
 * `regions_dealigned_<tag>.csv` *(optional)*: Genomic coordinates and assigned subtypes.
 * `figures/` *(optional)*: Graphical visualisations of sequence subtype profiles.
+
+---
+
+## Example output
+
+Below is an example run on `65_cpx.CN.11.ANHUI_HF104.KC183778`, a CRF65_cpx recombinant (subtypes 01_AE / B / C).
+
+**1. Reference genome structure**
+The known subtype composition of CRF65_cpx across the HIV-1 genome (`gag`, `pol`, `env`, accessory genes), used here as ground truth.
+
+<img src="figs/readme/65_cpx_paper.png" width="800">
+
+**2. Per-position subtype predictions**
+sbtr's raw prediction scores for each HIV-1 subtype along the sequence, with gene annotations shown above the heatmap.
+
+<img src="figs/readme/65_cpx.CN.11.ANHUI_HF104.KC183778_preds.png" width="800">
+
+**3. Comparison with jpHMM**
+sbtr's sliding-window subtype calls closely track the reference structure and recover breakpoints that jpHMM's coarser segmentation misses.
+
+<img src="figs/readme/65_cpx.CN.11.ANHUI_HF104.KC183778_jphmm_comp.png" width="800">
