@@ -192,7 +192,7 @@ def visualize_diversity(
     # LTR boundaries
     max_5 = hxb2_to_ata[max(config.START_5LTR)]
     min_3 = hxb2_to_ata[min(config.NEF_3LTR)]
-    max_3 = hxb2_to_ata[max(config.NEF_3LTR)]
+    max_3 = ata_len
 
     for i, (name, diversity_array) in enumerate(diversity_arrays.items()):
         color          = trace_colors[i % len(trace_colors)]
@@ -817,31 +817,9 @@ def visualize_confusion_matrix(
                 f"Count: {int(full_raw[i, j]):,}"
             )
 
-    # Per-subtype bar data
-    per_st  = m["per_subtype"]                       # dict subtype -> {f1, precision, recall}
-    f1_vals = [per_st[s]["f1"]        for s in st_names]
-    p_vals  = [per_st[s]["precision"] for s in st_names]
-    r_vals  = [per_st[s]["recall"]    for s in st_names]
-
-    # Sort by F1 ascending for readability
-    order    = np.argsort(f1_vals)
-    st_ord   = [st_names[i] for i in order]
-    f1_ord   = [f1_vals[i]  for i in order]
-    p_ord    = [p_vals[i]   for i in order]
-    r_ord    = [r_vals[i]   for i in order]
-
     # Figure
-    fig = make_subplots(
-        rows=1, cols=2,
-        column_widths=[0.60, 0.40],
-        subplot_titles=(
-            "<b>FP / TP confusion (col-normalized by true label)</b>",
-            "<b>Per-subtype F1 / precision / recall</b>",
-        ),
-        horizontal_spacing=0.12,
-    )
+    fig = go.Figure()
 
-    # Left: heatmap
     # Mask diagonal separately so it gets a different colorscale feel
     # We use a diverging-ish blue scale; diagonal TPs are visually distinct
     fig.add_trace(
@@ -861,8 +839,7 @@ def visualize_confusion_matrix(
                 thickness=12,
             ),
             xgap=1, ygap=1,
-        ),
-        row=1, col=1,
+        )
     )
 
     # Overlay diagonal boxes to highlight TPs visually
@@ -873,44 +850,22 @@ def visualize_confusion_matrix(
             y0=i - 0.5, y1=i + 0.5,
             line=dict(color="#072C4B", width=1.5),
             fillcolor="rgba(0,0,0,0)",
-            row=1, col=1,
-        )
-
-    # Right: horizontal grouped bar
-    bar_colors = {"F1": "#072C4B", "Precision": "#F28089", "Recall": "#71cddd"}
-
-    for metric, vals in [("F1", f1_ord), ("Precision", p_ord), ("Recall", r_ord)]:
-        fig.add_trace(
-            go.Bar(
-                x=vals,
-                y=st_ord,
-                name=metric,
-                orientation="h",
-                marker_color=bar_colors[metric],
-                opacity=0.85,
-                hovertemplate=f"{metric}: %{{x:.3f}}<extra>%{{y}}</extra>",
-            ),
-            row=1, col=2,
         )
 
     # Layout
     fig.update_layout(
         template="plotly_white",
-        width=1400,
+        width=800,
         height=max(500, 30 * n + 150),
-        barmode="group",
-        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1),
         margin=dict(t=80, l=100, r=40, b=80),
         title=dict(
-            text=f"<b>Confusion matrix — {metrics.split.upper()} split</b>",
+            text=f"<b>Confusion matrix — {metrics.split.upper()} split (col-normalized by true label)</b>",
             font=dict(size=14),
         ),
     )
 
-    fig.update_xaxes(title_text="True subtype",      tickangle=45, row=1, col=1)
-    fig.update_yaxes(title_text="Predicted subtype",               row=1, col=1)
-    fig.update_xaxes(title_text="Score", range=[0, 1],             row=1, col=2)
-    fig.update_yaxes(title_text="",                                row=1, col=2)
+    fig.update_xaxes(title_text="True subtype", tickangle=45)
+    fig.update_yaxes(title_text="Predicted subtype")
 
     if save_path:
         if save_path.endswith(".html"):
@@ -962,98 +917,14 @@ def parse_fasta_headers(filepath):
             subtype_data[subtype].append(year)
  
     return subtype_data
- 
- 
-def plot_reference_distribution(subtype_data,
-                                save_path=f"{workspace_path}/figs/subtype_distribution.html"):
-    subtypes = sorted(subtype_data.keys())
 
-    CLADE_GROUPS = {
-        "A_Clade": ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8"],
-        "F_Clade": ["F1", "F2"],
-        "B/D": ["B", "D"],
-        "N/O/P": ["N", "O", "P"],
-    }
-    # Colour clades with similar hues, but distinct enough to differentiate
-    clade_colors = {
-        "A_Clade": "#1f77b4",  # blue
-        "F_Clade": "#ff7f0e",  # orange
-        "B/D": "#2ca02c",      # green
-        "N/O/P": "#d62728",   # red
-        "Other": "#7f7f7f",    # grey for ungrouped subtypes
-    }
-    subtype_colors = []
-    for st in subtypes:
-        group = next((g for g, sts in CLADE_GROUPS.items() if st in sts), "Other")
-        subtype_colors.append(clade_colors[group])
-
-    counts     = [len(subtype_data[s]) for s in subtypes]
-    min_years  = [min(subtype_data[s]) for s in subtypes]
-    max_years  = [max(subtype_data[s]) for s in subtypes]
-    year_labels = [
-        f"{mn} – {mx}" if mn != mx else str(mn)
-        for mn, mx in zip(min_years, max_years)
-    ]
-
-    fig = go.Figure()
-
-    fig.add_trace(go.Bar(
-        x=subtypes,
-        y=counts,
-        marker_color=subtype_colors,
-        marker_line_width=0,
-        text=year_labels,
-        textposition="outside",
-        textfont=dict(size=11, family="monospace"),
-        customdata=list(zip(min_years, max_years, counts)),
-        hovertemplate=(
-            "<b>Subtype %{x}</b><br>"
-            "Sequences: %{customdata[2]}<br>"
-            "Earliest: %{customdata[0]}<br>"
-            "Latest: %{customdata[1]}<extra></extra>"
-        ),
-    ))
-
-    fig.update_layout(
-        title=dict(
-            text="HIV-1 sequences by subtype in sbtr reference alignment",
-            font=dict(size=18, family="Arial"),
-            x=0.5,
-            xanchor="center",
-        ),
-        xaxis=dict(
-            title="Subtype",
-            tickfont=dict(size=12, family="monospace"),
-            categoryorder="array",
-            categoryarray=subtypes,
-        ),
-        yaxis=dict(
-            title="Number of sequences (log scale)",
-            gridcolor="rgba(0,0,0,0.06)",
-            zeroline=False,
-        ),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        margin=dict(t=80, b=60, l=60, r=30),
-        bargap=0.3,
-        font=dict(family="Arial"),
-        height=520,
-    )
- 
-    # Subtle grid lines only on y
-    fig.update_xaxes(showgrid=False, linecolor="rgba(0,0,0,0.15)", linewidth=1)
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.07)", type="log")
-    fig.write_html(save_path, include_plotlyjs="cdn")
-    print(f"\nPlot saved at {save_path}")
-
-    return fig
 
 def plot_reference_distribution_with_year(subtype_data,
-                                save_path=f"{workspace_path}/figs/subtype_distribution"):
+                                save_path=f"{workspace_path}/figs/subtype_distribution.html"):
     subtypes = sorted(subtype_data.keys())
     counts = [len(subtype_data[s]) for s in subtypes]
 
-    BAR_COLOR = "#3366A3"
+    BAR_COLOR = "#072C4B"
 
     fig = make_subplots(
         rows=2, cols=1,
@@ -1123,7 +994,7 @@ def plot_reference_distribution_with_year(subtype_data,
     fig.update_yaxes(title_text="Year",
                       gridcolor="rgba(0,0,0,0.07)", zeroline=False, row=2, col=1)
 
-    fig.write_html(save_path + ".html", include_plotlyjs="cdn")
+    fig.write_html(save_path, include_plotlyjs="cdn")
     print(f"\nPlot saved at {save_path} (.html/.png/.pdf)")
 
     return fig
@@ -1166,12 +1037,9 @@ if __name__ == "__main__":
         yrs = subtype_data[s]
         print(f"  {s:12s}  n={len(yrs):4d}  [{min(yrs)} – {max(yrs)}]")
 
-    save_path_ref_dist = f"{workspace_path}/figs/reference_subtype_distribution.html"
+    save_path_ref_dist = f"{workspace_path}/figs/reference_subtype_distribution_with_year.html"
 
     fig = plot_reference_distribution_with_year(subtype_data,
-                                      save_path=save_path_ref_dist)
-
-    fig = plot_reference_distribution(subtype_data,
                                       save_path=save_path_ref_dist)
 
     # rate array for diversity

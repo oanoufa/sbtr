@@ -62,7 +62,7 @@ MODEL_CONFIG = {
 
     # Training
     "batch_size": 4,
-    "num_steps_training": 1,
+    "num_steps_training": 2,
     # Only batch_size * num_steps_training samples will be used for training (randomly sampled from the training split)
     "log_every_n_steps": 1500,
     "learning_rate": 1e-5,
@@ -73,7 +73,7 @@ MODEL_CONFIG = {
     "tv_weight": 0.03,
 
     # Validation
-    "validate_every_n_steps": 15000,
+    "validate_every_n_steps": 1,
     "max_val_batches": 500,
 
     # Inference

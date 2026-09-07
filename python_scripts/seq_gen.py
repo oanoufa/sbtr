@@ -916,6 +916,7 @@ if __name__ == "__main__":
     mutator = SequenceMutator(
         iqtree_dir=f"{WORKSPACE_PATH}/data/output/rates/",
         ata_len=ata_len,
+        hxb2_to_ata=hxb2_to_ata,
         seed=SEED,
         cache_dir=f"{WORKSPACE_PATH}/data/input/diversity/",
     )

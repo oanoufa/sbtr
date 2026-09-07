@@ -57,14 +57,6 @@ CRF_FILE_PATH = Path(args.crf_file_path)
 out_dir = Path(WORKSPACE_PATH) / "data" / "model" / "reference_bank"
 out_dir.mkdir(parents=True, exist_ok=True)
 
-
-mutator = SequenceMutator(
-        iqtree_dir=f"{WORKSPACE_PATH}/data/output/rates/",
-        ata_len=ATA_LEN,
-        seed=42,
-        cache_dir=f"{WORKSPACE_PATH}/data/input/diversity/",
-    )
-
 GAG_HXB2 = (790, 2292)
 POL_HXB2 = (2085, 5096)
 PCT_PER_CRF_BANK = config.PCT_PER_CRF_BANK # Adaptive bank size depending on the number of sequences of the CRF
@@ -225,6 +217,13 @@ if __name__ == "__main__":
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)
     print(f"  ATA length, HXB2 length     : {ATA_LEN, int(max(ata_to_hxb2))}")
 
+    mutator = SequenceMutator(
+            iqtree_dir=f"{WORKSPACE_PATH}/data/output/rates/",
+            ata_len=ATA_LEN,
+            hxb2_to_ata=hxb2_to_ata,
+            seed=42,
+            cache_dir=f"{WORKSPACE_PATH}/data/input/diversity/",
+        )
     # Model + tokenizer
     model_used = "oanoufa/sbtr_ntv3_650M"
     tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True)

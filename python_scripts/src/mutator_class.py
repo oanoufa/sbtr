@@ -243,7 +243,7 @@ class SequenceMutator:
         # LTR boundaries
         max_5 = self.hxb2_to_ata[max(config.START_5LTR)]
         min_3 = self.hxb2_to_ata[min(config.NEF_3LTR)]
-        max_3 = self.hxb2_to_ata[max(config.NEF_3LTR)]
+        max_3 = self.ata_len
 
         # per-subtype loading
         for st in _SUBTYPES_WITH_FILES:

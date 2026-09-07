@@ -205,6 +205,9 @@ if __name__ == "__main__":
             # If we are at the last validation step, compute and save final metrics (including confusion matrices)
             if (step_idx + 1) >= MODEL_CONFIG["num_steps_training"]:
                 val_metrics.print_detailed()
+                # print confusion matrix
+                save_path = f"{WORKSPACE_PATH}/figs/confusion_matrix.html"
+                visualize_confusion_matrix(val_metrics, save_path=save_path)
             else:
                 val_metrics.print_metrics()
             val_result = val_metrics.compute()
@@ -226,9 +229,6 @@ if __name__ == "__main__":
 
     print(f"\nTraining completed after {MODEL_CONFIG['num_steps_training']} steps.")
 
-# print confusion matrix
-save_path = f"{WORKSPACE_PATH}/figs/confusion_matrix.html"
-visualize_confusion_matrix(val_metrics, save_path=save_path)
 
 print(f"\nPushing model to HuggingFace")
 
@@ -239,6 +239,6 @@ HFModelForHIVSubtyping.register_for_auto_class("AutoModel")
 model.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
 tokenizer.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
 
-# Or push directly to your Hugging Face repository
-tokenizer.push_to_hub("oanoufa/sbtr_ntv3_650M")
-model.push_to_hub("oanoufa/sbtr_ntv3_650M")
+# push to Hugging Face repository
+# tokenizer.push_to_hub("oanoufa/sbtr_ntv3_650M")
+# model.push_to_hub("oanoufa/sbtr_ntv3_650M")

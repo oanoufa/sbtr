@@ -503,7 +503,7 @@ def _build_hxb2_label_array(
     * Pure-subtype terminal (A1, B, E, ...)  -> unified string, e.g. A1 -> 'A'
     * Compound label (B/C, E/A1, ...)        -> sorted pure-subtype string per
                                               position, e.g. 'E/A1' -> 'A/E'
-    * CRF reference (CRF01_AE, CRF07_BC)  → per-position labels copied from
+    * CRF reference (CRF01_AE, CRF07_BC)  -> per-position labels copied from
                                               the referenced CRF's own array
                                               (intersected with [start, end])
     * 'mix' or unknown label               -> replace with 'U'
@@ -841,9 +841,6 @@ def prepare_pure_alignment(lanl_alignment_path: str,
     mapping_path = Path(f"{WORKSPACE_PATH}/data/output/hxb2_ata_mapping.csv")
     if mapping_path.is_file():
         mapping_df = pd.read_csv(mapping_path)
-        if len(mapping_df) == ATA_LEN:
-            return ata_to_hxb2, hxb2_to_ata
-    
     with open(mapping_path, "w") as f:
         f.write("ata_pos,hxb2_pos\n")
         for ata_pos in range(ATA_LEN):
