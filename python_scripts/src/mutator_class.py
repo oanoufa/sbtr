@@ -214,9 +214,6 @@ class SequenceMutator:
         Length of the ATA alignment (number of sites).
     seed : int
         Seed for the internal numpy and Python RNGs.
-    cache_dir : str, optional
-        Directory for caching pre-computed ``.npy`` rate arrays.
-        Defaults to ``iqtree_dir``.
     """
 
     def __init__(
@@ -225,16 +222,12 @@ class SequenceMutator:
         ata_len:    int,
         hxb2_to_ata: np.ndarray,
         seed:       int = 42,
-        cache_dir:  Optional[str] = None,
     ):
         self.iqtree_dir = Path(iqtree_dir)
         self.ata_len    = ata_len
         self.hxb2_to_ata = hxb2_to_ata
         self._rng       = np.random.default_rng(seed)
         self._py_rng    = random.Random(seed)
-
-        _cache = Path(cache_dir) if cache_dir else self.iqtree_dir
-        _cache.mkdir(parents=True, exist_ok=True)
 
         self.site_rates_dict: Dict[str, np.ndarray] = {}
         self.sub_probs_dict:  Dict[str, np.ndarray] = {}
@@ -249,15 +242,9 @@ class SequenceMutator:
         for st in _SUBTYPES_WITH_FILES:
             rate_file   = self.iqtree_dir / f"HIV1_{st}_ALIGNED.fasta.rate"
             iqtree_file = self.iqtree_dir / f"HIV1_{st}_ALIGNED.fasta.iqtree"
-            cache_path  = _cache / f"site_rates_{st}.npy"
 
-            if cache_path.exists():
-                rates = np.load(cache_path)
-                print(f"  [SequenceMutator] Loaded cached rates for subtype {st} with length {len(rates)}")
-            else:
-                print(f"  [SequenceMutator] Parsing IQ-TREE rates for subtype {st}")
-                rates = parse_iqtree_rates(str(rate_file), ata_len)
-                np.save(cache_path, rates)
+            print(f"  [SequenceMutator] Parsing IQ-TREE rates for subtype {st}")
+            rates = parse_iqtree_rates(str(rate_file), ata_len)
 
             # Zero rates in LTR regions
             rates[0:max_5] = 1e-10
@@ -271,16 +258,15 @@ class SequenceMutator:
             self.sub_probs_dict[st] = build_substitution_probs(Q)
 
         # average over A-G
-        avg_cache = _cache / "site_rates_avg.npy"
-        if avg_cache.exists():
-            avg_rates = np.load(avg_cache)
-        else:
-            stacked   = np.stack(
-                [self.site_rates_dict[s] for s in _SUBTYPES_WITH_FILES]
-            )
-            avg_rates = stacked.mean(axis=0)
-            avg_rates /= avg_rates.sum()
-            np.save(avg_cache, avg_rates)
+        stacked   = np.stack(
+            [self.site_rates_dict[s] for s in _SUBTYPES_WITH_FILES]
+        )
+        avg_rates = stacked.mean(axis=0)
+        avg_rates /= avg_rates.sum()
+
+        avg_rates[0:max_5] = 1e-10
+        avg_rates[min_3:max_3] = 1e-10
+        avg_rates /= avg_rates.sum()
 
         self.site_rates_dict['avg'] = avg_rates
 

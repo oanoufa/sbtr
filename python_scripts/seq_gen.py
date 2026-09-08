@@ -784,7 +784,6 @@ if __name__ == "__main__":
         ata_len=ata_len,
         hxb2_to_ata=hxb2_to_ata,
         seed=SEED,
-        cache_dir=f"{WORKSPACE_PATH}/data/input/diversity/",
     )
     site_rates_dict = mutator.site_rates_dict
     sub_probs_dict  = mutator.sub_probs_dict

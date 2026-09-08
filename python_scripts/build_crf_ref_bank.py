@@ -222,7 +222,6 @@ if __name__ == "__main__":
             ata_len=ATA_LEN,
             hxb2_to_ata=hxb2_to_ata,
             seed=42,
-            cache_dir=f"{WORKSPACE_PATH}/data/input/diversity/",
         )
     # Model + tokenizer
     model_used = "oanoufa/sbtr_ntv3_650M"
