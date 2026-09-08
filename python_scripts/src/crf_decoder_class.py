@@ -51,8 +51,6 @@ class CRFReferenceDecoder:
             f"profile ({self.L} x {self.C})"
         )
 
-    # ── helpers ─────────────────────────────────────────────────────────────
-
     @staticmethod
     def _parse_crf_type(full_id: str) -> str:
         parts = str(full_id).split(".")
@@ -426,7 +424,6 @@ class CRFReferenceDecoder:
             hxb2_to_ata=hxb2_to_ata)
 
         label_names_dealigned = self._gen_labels_dealigned(
-            sample_name=sample_name,
             mask=mask,
             compactmapout_entry=compactmapout_entry,
             label_names_aligned=label_names_aligned)
