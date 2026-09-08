@@ -327,8 +327,8 @@ def global_results(
     status_counts = df.loc[df['kind'] == 'recombinant', 'status'].value_counts()
     crf_assigned_counts = df['crf_assigned'].value_counts()
     ref_best_counts = df['ref_best_crf'].value_counts()
-    crf_assigned_size = df['crf_assigned'].shape[0]
-    crf_like_size = df['crf_like'].shape[0]
+    crf_assigned_size = df['crf_assigned'].count()
+    crf_like_size = df['crf_like'].count()
 
     # Combined: assigned CRF (single value) + "like" pure calls (may list several nearest refs)
     like_mask = df['status'] == 'like'
@@ -342,7 +342,7 @@ def global_results(
         like_exploded,
     ])
 
-    crf_combined_size = crf_assigned_size + crf_like_size
+    crf_combined_size = len(combined_series)
     crf_counts_combined = combined_series.value_counts()
 
     summary = {
