@@ -137,37 +137,50 @@ sample_name,composition,dominant_subtype,dominant_fraction,ref_best_crf,ref_best
 
 **2. Summary json**
 
-The summary json contains global information on the input batch of sequences. It contains the following information:
+The summary json contains global information on the input batch of sequences. For the sake of the example, the summary JSON presented here is the result of a run on a batch containing both the example and three other CRF sequences.
 
 ```json
 {
-  "n_sequences": 637,
+  "n_sequences": 4,
   "composition_prevalence": {
+    "AE_C_B": 0.5,
+    "B_C": 0.25,
+    "B_F1": 0.25
   },
   "dominant_subtype_prevalence": {
+    "C": 0.75,
+    "B": 0.25
   },
   "pure_vs_recombinant": {
-    "recombinant": 0.5228,
-    "pure": 0.4772
+    "recombinant": 1.0
+  },
+  "full_vs_partial": {
+    "full": 0.75,
+    "partial": 0.25
   },
   "recombinant_assigned_vs_unassigned": {
-    "like": 0.4745,
-    "assigned": 0.3754,
-    "unassigned": 0.1502
+    "assigned": 1.0
   },
   "crf_prevalence_among_assigned": {
+    "65_cpx": 0.5,
+    "64_BC": 0.25,
+    "70_BF1": 0.25
   },
   "crf_prevalence_among_like_and_assigned": {
+    "65_cpx": 0.5,
+    "64_BC": 0.25,
+    "70_BF1": 0.25
   },
   "dominant_fraction_stats": {
-    "mean": 0.8081,
-    "std": 0.2098,
-    "min": 0.3172,
-    "50%": 0.9123,
-    "max": 1.0
+    "mean": 0.7046,
+    "std": 0.1396,
+    "min": 0.5971,
+    "50%": 0.6558,
+    "max": 0.9098
   },
-  "low_confidence_fraction": 0.0518,
+  "low_confidence_fraction": 0.0,
   "repeated_best_ref": {
+    "65_cpx.CN.11.ANHUI_HF104.KC183778": 2
   }
 }
 ```
@@ -247,4 +260,3 @@ The FASTA files in `data/input/diversity` corresponds to all full length genome 
 
 All scripts in `python_scripts` were used for preprocessing, data generation, results comparison, or are called by `sbtr.py` when the model is ran.
 
-## Example output
