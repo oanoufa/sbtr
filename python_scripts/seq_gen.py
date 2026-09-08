@@ -32,6 +32,7 @@ from src.mutator_class import (
     mutate_sequence_gtr,
     _ACGT_BYTES,
 )
+from figs import plot_fragment_length_distribution, plot_reference_distribution_with_year
 
 WORKSPACE_PATH = config.WORKSPACE_PATH
 # Command line arguments
@@ -161,8 +162,9 @@ def infer_params(df_seg: pd.DataFrame, ata_len: int, hxb2_len: int = 9719) -> di
     print(f"  min_seg   {min_hxb2} HXB2 → {params['min_seg_len']} ATA")
     return params
 
-def compare_generated_vs_real(names, out_labels, n_subtypes, n_packed, ata_len,
-                               pure_st_list, df_seg, ata_to_hxb2):
+def compare_generated_vs_real(
+        names, out_labels, n_subtypes, ata_len, df_seg, ata_to_hxb2,
+        ):
     """
     Read back generated labels, extract per-recombinant statistics,
     and compare against real CRF segment data.
@@ -223,7 +225,7 @@ def compare_generated_vs_real(names, out_labels, n_subtypes, n_packed, ata_len,
     W_L, W_C = 30, 12
 
     def _header(title):
-        print(f"\n  -- {title} --")
+        print(f"\n {title}")
         print(f"  {'':>{W_L}}  {'real':>{W_C}}  {'generated':>{W_C}}")
         print(f"  {'-' * (W_L + 2 * W_C + 4)}")
 
@@ -270,18 +272,18 @@ def compare_generated_vs_real(names, out_labels, n_subtypes, n_packed, ata_len,
 
         color_scheme = ['#072C4B', '#F28089', '#71cddd']
 
-        # -- n_breakpoints / sequence --
+        #n_breakpoints / sequence
         n_bp = pd.Series(n_bp)
         n_st = pd.Series(n_st)
         seg_lens = pd.Series(seg_lens)
         bp_values = n_bp.value_counts().sort_index().index.tolist()
         bp_real_pct = n_bp.value_counts(normalize=True).sort_index().values.tolist()
 
-        # -- n_subtypes / sequence --
+        #n_subtypes / sequence
         st_values = n_st.value_counts().sort_index().index.tolist()
         st_real_pct = n_st.value_counts(normalize=True).sort_index().values.tolist()
 
-        # -- segment lengths --
+        #segment lengths
         sl_mu = seg_lens.apply(lambda x: np.log(x)).mean()
         sl_sigma = seg_lens.apply(lambda x: np.log(x)).std()
         bin_width = 200
@@ -375,142 +377,6 @@ def compare_generated_vs_real(names, out_labels, n_subtypes, n_packed, ata_len,
                                   title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">{len(gen_n_bp)} generated recombinants</sup>')
     _plot_distribution_comparison(real_n_bp, real_n_st, real_seg_lens, crf_dist_path,
                                   title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">Data taken from LANL Sequence Database - {len(real_n_bp)} CRFs</sup>')
-
-# Fragment-length distribution
-def plot_fragment_length_distribution(frag_starts, frag_ends, ata_len,
-                                      min_frag_len, path):
-    """
-    Print a summary and write an HTML plot for partial-sequence fragment
-    lengths and start positions.
-
-    Two panels:
-      Left  - histogram of fragment lengths overlaid with the theoretical
-               log-uniform density (the sampling distribution used in
-               sample_fragment_window), so any systematic deviation is
-               immediately visible.
-      Right - histogram of fragment start positions (should be roughly
-               uniform as a sanity-check).
-    """
-    partial_mask = [(fe - fs) < ata_len for fs, fe in zip(frag_starts, frag_ends)]
-    frag_lens  = [frag_ends[i] - frag_starts[i] for i, m in enumerate(partial_mask) if m]
-    starts_arr = [frag_starts[i]                for i, m in enumerate(partial_mask) if m]
-
-    if not frag_lens:
-        print("  No partial sequences — skipping fragment-length plot.")
-        return
-
-    fl = pd.Series(frag_lens, dtype=float)
-    print(f"\n  === Partial Sequence Fragment Lengths  "
-          f"({len(frag_lens)} / {len(frag_starts)} sequences) ===")
-    print(f"  Min   : {fl.min():.0f}  ATA pos")
-    print(f"  Median: {fl.median():.0f}  ATA pos")
-    print(f"  Mean  : {fl.mean():.1f}  ATA pos")
-    print(f"  Max   : {fl.max():.0f}  ATA pos")
-    print(f"  Std   : {fl.std():.1f}  ATA pos")
-    if len(fl) > 1:
-        print(f"  log-uniform μ (expected): "
-              f"{(np.log(min_frag_len) + np.log(ata_len)) / 2:.3f}")
-        print(f"  log-normal μ (observed) : {np.log(fl).mean():.3f}")
-        print(f"  log-uniform σ (expected): "
-              f"{(np.log(ata_len) - np.log(min_frag_len)) / (2 * np.sqrt(3)):.3f}")
-        print(f"  log-normal σ (observed) : {np.log(fl).std():.3f}")
-
-    color_scheme = ['#072C4B', '#F28089', '#71cddd']
-
-    # panel 1: fragment lengths
-    n_bins      = min(60, max(10, (ata_len - min_frag_len) // 150))
-    bin_edges   = np.linspace(min_frag_len, ata_len, n_bins + 1)
-    bin_width   = bin_edges[1] - bin_edges[0]
-    bin_centers = bin_edges[:-1] + bin_width / 2
-
-    counts, _ = np.histogram(frag_lens, bins=bin_edges)
-    pcts      = counts / counts.sum() * 100
-
-    hover_len = [
-        f"{int(bin_edges[i])} – {int(bin_edges[i+1])} ATA pos<br>{pcts[i]:.1f}%"
-        for i in range(len(bin_centers))
-    ]
-
-    # Theoretical log-uniform PDF:  f(x) = 1 / (x · ln(b/a)),  x ∈ [a, b]
-    log_range  = np.log(ata_len / min_frag_len)
-    x_theory   = np.linspace(min_frag_len, ata_len, 600)
-    y_theory   = (1.0 / (x_theory * log_range)) * bin_width * 100  # scale to %
-
-    # panel 2: start positions
-    n_bins_s     = min(60, max(10, ata_len // 150))
-    s_edges      = np.linspace(0, ata_len, n_bins_s + 1)
-    s_width      = s_edges[1] - s_edges[0]
-    s_centers    = s_edges[:-1] + s_width / 2
-    s_counts, _  = np.histogram(starts_arr, bins=s_edges)
-    s_pcts       = s_counts / s_counts.sum() * 100 if s_counts.sum() > 0 else s_counts
-    uniform_pct  = 100.0 / n_bins_s           # expected height if perfectly uniform
-    hover_start  = [
-        f"Start {int(s_edges[i])} – {int(s_edges[i+1])}<br>{s_pcts[i]:.1f}%"
-        for i in range(len(s_centers))
-    ]
-
-    # build figure
-    fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=("Fragment length distribution",
-                        "Fragment start-position distribution"),
-        horizontal_spacing=0.12,
-    )
-
-    # Left: observed bars
-    fig.add_trace(
-        go.Bar(x=bin_centers, y=pcts, width=bin_width * 0.9,
-               marker_color=color_scheme[0], opacity=0.8,
-               hoverinfo="text", hovertext=hover_len, name="Observed"),
-        row=1, col=1,
-    )
-    # Left: theoretical log-uniform line
-    fig.add_trace(
-        go.Scatter(x=x_theory, y=y_theory, mode="lines",
-                   line=dict(color=color_scheme[1], width=3),
-                   name="Log-uniform (expected)", hoverinfo="none"),
-        row=1, col=1,
-    )
-
-    # Right: start positions
-    fig.add_trace(
-        go.Bar(x=s_centers, y=s_pcts, width=s_width * 0.9,
-               marker_color=color_scheme[2], opacity=0.8,
-               hoverinfo="text", hovertext=hover_start, name="Start positions"),
-        row=1, col=2,
-    )
-    # Right: uniform reference line
-    fig.add_trace(
-        go.Scatter(x=[0, ata_len], y=[uniform_pct, uniform_pct], mode="lines",
-                   line=dict(color=color_scheme[1], width=2, dash="dash"),
-                   name="Uniform (expected)", hoverinfo="none"),
-        row=1, col=2,
-    )
-
-    fig.update_xaxes(title_text="Fragment length (ATA positions)", row=1, col=1)
-    fig.update_yaxes(title_text="Percentage (%)", row=1, col=1)
-    fig.update_xaxes(title_text="Fragment start position (ATA)", row=1, col=2)
-    fig.update_yaxes(title_text="Percentage (%)", row=1, col=2)
-
-    fig.update_layout(
-        title=dict(
-            text=(
-                f"<b>Partial-sequence fragment statistics</b><br>"
-                f'<sup style="color:gray">'
-                f"{len(frag_lens)} partial sequences  ·  "
-                f"log-uniform sampling in [{min_frag_len}, {ata_len}] ATA positions"
-                f"</sup>"
-            ),
-            x=0.5,
-        ),
-        template="plotly_white",
-        showlegend=True,
-        height=500,
-        width=1100,
-        bargap=0.1,
-    )
-    fig.write_html(path)
-    print(f"  Fragment-length plot → {path}")
 
 # Subtype sampling
 def weighted_subtype_probs(counts: dict, floor: float = 0.015) -> dict:
@@ -989,10 +855,12 @@ if __name__ == "__main__":
     print(f"Partial (cropped)      : {n_partial}/{len(names)}  ({n_partial/len(names):.2%})")
 
     st_counts = defaultdict(int)
-    for name in names:
+    gen_subtype_data = defaultdict(list)
+    for name, yr in zip(names, target_years):
         raw = name.split("_")[1]
         for st in raw.split("+"):
             st_counts[st] += 1
+            gen_subtype_data[st].append(yr)
     print("\nSubtype appearances:")
     for st in pure_st_list:
         print(f"  {st:6s}: {st_counts[st]:>6d}  ({st_counts[st]/len(names):6.2%})")
@@ -1070,10 +938,13 @@ if __name__ == "__main__":
             frag_starts, frag_ends, ata_len, MIN_FRAG_LEN, frag_dist_path,
         )
 
+    # generated subtype distribution
+    gen_dist_path = f"{WORKSPACE_PATH}/figs/generated_subtype_distribution_with_year.html"
+    plot_reference_distribution_with_year(gen_subtype_data, save_path=gen_dist_path)
+
     # distribution comparison
     compare_generated_vs_real(
-        names, out_labels, n_subtypes, n_packed, ata_len,
-        pure_st_list, df_seg, ata_to_hxb2,
+        names, out_labels, n_subtypes, ata_len, df_seg, ata_to_hxb2,
     )
 
     # sanity check

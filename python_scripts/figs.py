@@ -999,6 +999,141 @@ def plot_reference_distribution_with_year(subtype_data,
 
     return fig
 
+def plot_fragment_length_distribution(
+        frag_starts, frag_ends, ata_len, min_frag_len, path,
+        ):
+    """
+    Print a summary and write an HTML plot for partial-sequence fragment
+    lengths and start positions.
+
+    Two panels:
+      Left  - histogram of fragment lengths overlaid with the theoretical
+               log-uniform density (the sampling distribution used in
+               sample_fragment_window), so any systematic deviation is
+               immediately visible.
+      Right - histogram of fragment start positions (should be roughly
+               uniform as a sanity-check).
+    """
+    partial_mask = [(fe - fs) < ata_len for fs, fe in zip(frag_starts, frag_ends)]
+    frag_lens  = [frag_ends[i] - frag_starts[i] for i, m in enumerate(partial_mask) if m]
+    starts_arr = [frag_starts[i]                for i, m in enumerate(partial_mask) if m]
+
+    if not frag_lens:
+        print("  No partial sequences — skipping fragment-length plot.")
+        return
+
+    fl = pd.Series(frag_lens, dtype=float)
+    print(f"\n  === Partial Sequence Fragment Lengths  "
+          f"({len(frag_lens)} / {len(frag_starts)} sequences) ===")
+    print(f"  Min   : {fl.min():.0f}  ATA pos")
+    print(f"  Median: {fl.median():.0f}  ATA pos")
+    print(f"  Mean  : {fl.mean():.1f}  ATA pos")
+    print(f"  Max   : {fl.max():.0f}  ATA pos")
+    print(f"  Std   : {fl.std():.1f}  ATA pos")
+    if len(fl) > 1:
+        print(f"  log-uniform μ (expected): "
+              f"{(np.log(min_frag_len) + np.log(ata_len)) / 2:.3f}")
+        print(f"  log-normal μ (observed) : {np.log(fl).mean():.3f}")
+        print(f"  log-uniform σ (expected): "
+              f"{(np.log(ata_len) - np.log(min_frag_len)) / (2 * np.sqrt(3)):.3f}")
+        print(f"  log-normal σ (observed) : {np.log(fl).std():.3f}")
+
+    color_scheme = ['#072C4B', '#F28089', '#71cddd']
+
+    # panel 1: fragment lengths
+    n_bins      = min(60, max(10, (ata_len - min_frag_len) // 150))
+    bin_edges   = np.linspace(min_frag_len, ata_len, n_bins + 1)
+    bin_width   = bin_edges[1] - bin_edges[0]
+    bin_centers = bin_edges[:-1] + bin_width / 2
+
+    counts, _ = np.histogram(frag_lens, bins=bin_edges)
+    pcts      = counts / counts.sum() * 100
+
+    hover_len = [
+        f"{int(bin_edges[i])} – {int(bin_edges[i+1])} ATA pos<br>{pcts[i]:.1f}%"
+        for i in range(len(bin_centers))
+    ]
+
+    # Theoretical log-uniform PDF:  f(x) = 1 / (x · ln(b/a)),  x ∈ [a, b]
+    log_range  = np.log(ata_len / min_frag_len)
+    x_theory   = np.linspace(min_frag_len, ata_len, 600)
+    y_theory   = (1.0 / (x_theory * log_range)) * bin_width * 100  # scale to %
+
+    # panel 2: start positions
+    n_bins_s     = min(60, max(10, ata_len // 150))
+    s_edges      = np.linspace(0, ata_len, n_bins_s + 1)
+    s_width      = s_edges[1] - s_edges[0]
+    s_centers    = s_edges[:-1] + s_width / 2
+    s_counts, _  = np.histogram(starts_arr, bins=s_edges)
+    s_pcts       = s_counts / s_counts.sum() * 100 if s_counts.sum() > 0 else s_counts
+    uniform_pct  = 100.0 / n_bins_s           # expected height if perfectly uniform
+    hover_start  = [
+        f"Start {int(s_edges[i])} – {int(s_edges[i+1])}<br>{s_pcts[i]:.1f}%"
+        for i in range(len(s_centers))
+    ]
+
+    # build figure
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=("Fragment length distribution",
+                        "Fragment start-position distribution"),
+        horizontal_spacing=0.12,
+    )
+
+    # Left: observed bars
+    fig.add_trace(
+        go.Bar(x=bin_centers, y=pcts, width=bin_width * 0.9,
+               marker_color=color_scheme[0], opacity=0.8,
+               hoverinfo="text", hovertext=hover_len, name="Observed"),
+        row=1, col=1,
+    )
+    # Left: theoretical log-uniform line
+    fig.add_trace(
+        go.Scatter(x=x_theory, y=y_theory, mode="lines",
+                   line=dict(color=color_scheme[1], width=3),
+                   name="Log-uniform (expected)", hoverinfo="none"),
+        row=1, col=1,
+    )
+
+    # Right: start positions
+    fig.add_trace(
+        go.Bar(x=s_centers, y=s_pcts, width=s_width * 0.9,
+               marker_color=color_scheme[2], opacity=0.8,
+               hoverinfo="text", hovertext=hover_start, name="Start positions"),
+        row=1, col=2,
+    )
+    # Right: uniform reference line
+    fig.add_trace(
+        go.Scatter(x=[0, ata_len], y=[uniform_pct, uniform_pct], mode="lines",
+                   line=dict(color=color_scheme[1], width=2, dash="dash"),
+                   name="Uniform (expected)", hoverinfo="none"),
+        row=1, col=2,
+    )
+
+    fig.update_xaxes(title_text="Fragment length (ATA positions)", row=1, col=1)
+    fig.update_yaxes(title_text="Percentage (%)", row=1, col=1)
+    fig.update_xaxes(title_text="Fragment start position (ATA)", row=1, col=2)
+    fig.update_yaxes(title_text="Percentage (%)", row=1, col=2)
+
+    fig.update_layout(
+        title=dict(
+            text=(
+                f"<b>Partial-sequence fragment statistics</b><br>"
+                f'<sup style="color:gray">'
+                f"{len(frag_lens)} partial sequences  ·  "
+                f"log-uniform sampling in [{min_frag_len}, {ata_len}] ATA positions"
+                f"</sup>"
+            ),
+            x=0.5,
+        ),
+        template="plotly_white",
+        showlegend=True,
+        height=500,
+        width=1100,
+        bargap=0.1,
+    )
+    fig.write_html(path)
+
 if __name__ == "__main__":
     breakpoints_path = f"{workspace_path}/data/output/lanl_crf_breakpoints.csv"
     df_bp = pd.read_csv(breakpoints_path)

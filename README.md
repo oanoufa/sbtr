@@ -10,11 +10,11 @@
 ## How it works
 
 sbtr processes input sequences through an automated end-to-end pipeline:
-1. **Dealign & Align**: Input FASTA sequences or existing alignments are dealigned and aligned against an internal HIV-1 reference using MAFFT.
-2. **Language Model Inference**: Aligned sequences pass through a pre-trained genomic language model.
-3. **Subtype Classification**: Predictions are compared against model outputs from a reference bank of Circulating Recombinant Forms (CRFs) to generate final per-position and global subtype assignments.
+1. **Dealign & Align**: Input FASTA sequences or existing alignments are dealigned and aligned against an internal HIV-1 reference alignment using MAFFT.
+2. **Language Model Inference**: Aligned sequences pass through a pre-trained genomic language model that uses [Nucleotide Transformer v3](https://huggingface.co/spaces/InstaDeepAI/ntv3) as a backbone. The model outputs predictions as a 2D array of size (num_subtypes, alignment_length). A value close to 1 in cell i, j means a prediction of subtype i at position j.
+3. **Subtype Classification**: Predictions are compared against model outputs from a reference bank built with 3 sequences of each Circulating Recombinant Forms (CRFs). The comparison is a simple intersection between the input sequence prediction array and each prediction array in the bank. sbtr finally generates per-position and global subtype assignments. An example is given in the readme.
 
----
+
 
 ## Installation & setup
 
@@ -34,11 +34,13 @@ docker pull ghcr.io/oanoufa/sbtr:latest
 apptainer pull sbtr.sif docker://ghcr.io/oanoufa/sbtr:latest
 ```
 
----
+
 
 ## Usage
 
 > **Note:** A Hugging Face token must be specified (`HF_TOKEN`) to download model weights from InstaDeepAI/NTv3_650M_pre. This token must come from an account with access to the model repository. This can be done at this address [https://huggingface.co/InstadeepAI/NTv3_650M_pre](https://huggingface.co/InstadeepAI/NTv3_650M_pre).
+
+> **Note:** Using gpu is highly recommended if possible. The backbone model contains 650M parameters, running on a computer with high memory is also recommended.
 
 ### Running with Docker
 
@@ -78,13 +80,12 @@ apptainer run --nv \
   --batch_size 8
 ```
 
----
 
 ## Command line arguments
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--seq` | `str` | *Required* | Path to input FASTA file or alignment. |
+| `--seq` | `str` | *Required* | Path to input FASTA file or alignment of sequences. |
 | `--out_dir` | `str` | `"./sbtr_output"` | Output directory destination. |
 | `--tag` | `str` | `"sbtr"` | Text appended to generated output file names. |
 | `--mafft_bin` | `str` | `"mafft"` | Path to MAFFT executable (assumed on `PATH`). |
@@ -93,26 +94,24 @@ apptainer run --nv \
 | `--batch_size` | `int` | `1` | Forward pass batch size (increase for GPU runs). |
 | `--wto` | `str` | `""` | Optional outputs to write (see details below). |
 
-### Output flags (`--wto`)
+### Output flag (`--wto`)
 The tool always outputs `results_<tag>.csv` and `summary_<tag>.json`. You can request additional outputs by concatenating any combination of these letters to `--wto`:
 
 * `f`: Generate plots/figures showing per-sequence predictions *(adds runtime)*.
-* `r`: Output a region CSV containing `(start, end, subtype)` breakpoints.
+* `r`: Output a region csv containing `(start, end, subtype)` breakpoints.
 * `p`: Export raw prediction scores as a NumPy (`.npy`) file.
 * `a`: Save model attention masks.
 
-*Example:* `--wto fr` outputs both the prediction figures and the genomic regions CSV.
+*Example:* `--wto fr` outputs both the prediction figures and the genomic regions csv.
 
----
 
 ## Outputs
 
 * `results_<tag>.csv`: Final per-position subtype predictions.
-* `summary_<tag>.json`: Run metadata and summary statistics.
+* `summary_<tag>.json`: Run metadata and summary statistics on the input batch of sequences.
 * `regions_dealigned_<tag>.csv` *(optional)*: Genomic coordinates and assigned subtypes.
-* `figures/` *(optional)*: Graphical visualisations of sequence subtype profiles.
+* `--out_dir/figs/` *(optional)*: Graphical visualisations of sequence subtype profiles.
 
----
 
 ## Example output
 
@@ -174,3 +173,18 @@ This 1D representation compares our results to the output of jpHMM. jpHMM was us
 We notice that sbtr's sliding-window subtype calls closely track the reference structure and recover breakpoints that jpHMM misses such as the B block in the middle of the *pol* gene and the C block in between the two 01_AE blocks at the end of `env`. However, we also notice that our model found two new blocks: a B at the beginning of the genome, after the 01_AE block and a 01_AE block at the beginning of `vif`.
 
 Those two new blocks were further inspected.
+
+
+
+
+## Repository breakdown
+
+Using a genomic language model means training a model on sequence data. In the case of HIV-1, real sequence data is extremely biased towards known subtypes. `data/input` contains all real sequences that were used to train our model. We used LANL HIV-1 2023 full genome reference alignment and HIV-1 2022 full genome Super Filtered Web Alignment. Information on those alignments can be found on [LANL website](https://www.hiv.lanl.gov/content/sequence/NEWALIGN/align.html). The distributions of the sequences from both these alignments per subtype is shown below. We also display the sequence year to evaluate the temporal diversity.
+
+<img src="figs/readme/ref_ali_dist.png" width="800">
+
+The process used to augment this set to our training set is described precisely in our manuscript. The final distribution after augmentation is shown in the figure below.
+
+
+
+All scripts in `python_scripts` were used for preprocessing, data generation, or are called by `sbtr.py` when the model is ran.
