@@ -308,11 +308,12 @@ def global_results(
     def parse_decision(d):
         parts = d.split('.')
         kind = parts[0]                                   # pure | recombinant
+        full_or_partial = parts[2] if len(parts) > 2 else None  # full | partial
         status = parts[3] if len(parts) > 3 else None      # like | assigned | unassigned
         crf = parts[4] if len(parts) > 4 else None         # e.g. 24_BG, or 51_01B+179_12B+...
-        return kind, status, crf
+        return kind, full_or_partial, status, crf
 
-    df[['kind', 'status', 'crf_raw']] = df['final_decision'].apply(
+    df[['kind', 'full_or_partial', 'status', 'crf_raw']] = df['final_decision'].apply(
         lambda d: pd.Series(parse_decision(d))
     )
     # For assigned recombinants, crf_raw is a single CRF name; keep as-is.
@@ -324,6 +325,7 @@ def global_results(
     composition_counts = df['composition'].value_counts()
     dominant_counts = df['dominant_subtype'].value_counts()
     kind_counts = df['kind'].value_counts()
+    full_or_partial_counts = df['full_or_partial'].value_counts()
     status_counts = df.loc[df['kind'] == 'recombinant', 'status'].value_counts()
     crf_assigned_counts = df['crf_assigned'].value_counts()
     ref_best_counts = df['ref_best_crf'].value_counts()
@@ -350,6 +352,7 @@ def global_results(
         "composition_prevalence": (composition_counts / n).round(4).to_dict(),
         "dominant_subtype_prevalence": (dominant_counts / n).round(4).to_dict(),
         "pure_vs_recombinant": (kind_counts / n).round(4).to_dict(),
+        "full_vs_partial": (full_or_partial_counts / n).round(4).to_dict(),
         "recombinant_assigned_vs_unassigned": (
             (status_counts / status_counts.sum()).round(4).to_dict()
             if status_counts.sum() > 0 else {}
@@ -374,6 +377,7 @@ def global_results(
     print("\n=== Global summary ===")
     print(f"N sequences:              {n}")
     print(f"Pure / recombinant:       {summary['pure_vs_recombinant']}")
+    print(f"Full / partial:           {summary['full_vs_partial']}")
     print(f"Top compositions:         {composition_counts.head(5).to_dict()}")
     print(f"Top dominant subtypes:    {dominant_counts.head(5).to_dict()}")
     print(f"CRF prevalence (assigned):{summary['crf_prevalence_among_assigned']}")
@@ -607,6 +611,8 @@ if __name__ == "__main__":
             results_buffer.append(res_line)
             regions_buffer.extend(reg_lines)
 
+    results_buffer = sorted(results_buffer, key=lambda x: x.split(',')[0].lower())
+    regions_buffer = sorted(regions_buffer, key=lambda x: x.lower())
 
     # Write results out in bulk
     result_csv_path = out_dir / f"results_{tag}.csv"

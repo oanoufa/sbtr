@@ -160,6 +160,8 @@ class CRFReferenceDecoder:
             if subtype not in seen:
                 seen.add(subtype)
                 composition.append(subtype)
+        # sort alphabetically
+        composition.sort()
         return composition
 
     # core computations
