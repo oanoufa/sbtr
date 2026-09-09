@@ -557,7 +557,6 @@ def _worker(cfg):
     st_id      = cfg["pure_st_to_id_dict"]
     n_st_total = len(st_id)
     ata_len    = cfg["ata_len"]
-    n_packed   = cfg["n_packed"]
     site_rates_dict = cfg["site_rates_dict"]
     sub_probs_dict  = cfg["sub_probs_dict"]
     st_list    = cfg["pure_st_list"]
@@ -823,7 +822,7 @@ if __name__ == "__main__":
              pure_st_to_id_dict=ST_TO_ID_DICT, params=params,
              site_rates_dict=site_rates_dict,
              sub_probs_dict=sub_probs_dict,
-             ata_len=ata_len, n_packed=n_packed,
+             ata_len=ata_len,
              div_window_size=DIV_WINDOW_SIZE, min_div=MIN_DIV, max_retries=MAX_RETRIES,
              force_divergent=FORCE_DIV, realistic=REALISTIC,
              partial_frac=PARTIAL_FRAC, min_frag_len=MIN_FRAG_LEN)
