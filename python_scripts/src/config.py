@@ -8,6 +8,7 @@ WORKSPACE_PATH = "/pasteur/helix/projects/mPath/oanoufa/sbtr"
 PURE_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_PURE_REF.fasta"
 CRF_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_CRF_REF.fasta"
 COMBINED_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_COMBINED_REF.fasta"
+TOKEN_PATH = f"{WORKSPACE_PATH}/hftoken.txt"
 
 # SEQUENCE GENERATION PARAMETERS
 N_SEQ = 1000000
@@ -38,17 +39,15 @@ CRF_ASSIGN_THR = 0.5 # Minimum match to assign a CRF
 PARTIAL_THR = 7000 # Threshold to consider a sequence full (>=7000nt) or partial (<7000nt)
 
 # NUCLEOTIDE TRANSFORMER PARAMETERS
-VERSION = "0.1"
+VERSION = "0.2_embedlayer-1"
 PAD_LEN =  128
 SEQ_LEN_AFTER_PAD = ((ATA_LEN // PAD_LEN) + 1) * PAD_LEN
-
-TOKEN_PATH = f"{WORKSPACE_PATH}/hftoken.txt"
 
 MODEL_CONFIG = {
     # Model
     "model_name": "InstaDeepAI/NTv3_650M_pre", # zhihan1996/DNABERT-2-117M
     "checkpoint_name": f"sbtr_v{VERSION}.pt",
-    "load_checkpoint": True, # Whether to load from checkpoint to resume training or start fresh training
+    "load_checkpoint": False, # Whether to load from checkpoint to resume training or start fresh training
     "model_version": VERSION,
 
     # Data
@@ -57,15 +56,15 @@ MODEL_CONFIG = {
     "loss_masks_path": f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}/loss_masks_{N_SEQ}_{RP}.npy",
     "metadata_path": f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}/metadata_{N_SEQ}_{RP}.tsv",
     "data_cache_dir": f"{WORKSPACE_PATH}/data/model",
-    "checkpoint_dir": f"{WORKSPACE_PATH}/data/model/checkpoints",
+    "checkpoint_dir": f"{WORKSPACE_PATH}/data/model/checkpoints/v{VERSION}",
     "metrics_dir": f"{WORKSPACE_PATH}/data/model/metrics",
 
     # Training
-    "batch_size": 4,
-    "num_steps_training": 2,
+    "batch_size": 8,
+    "num_steps_training": 1000,
     # Only batch_size * num_steps_training samples will be used for training (randomly sampled from the training split)
     "log_every_n_steps": 1500,
-    "learning_rate": 1e-5,
+    "learning_rate": 1e-4,
     "weight_decay": 0.01,
     "warmup_proportion": 0.05,  # 5% of training steps for warmup
     "grad_clip_norm": 1.0,
@@ -73,7 +72,7 @@ MODEL_CONFIG = {
     "tv_weight": 0.03,
 
     # Validation
-    "validate_every_n_steps": 1,
+    "validate_every_n_steps": 1000,
     "max_val_batches": 500,
 
     # Inference

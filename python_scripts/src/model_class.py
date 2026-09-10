@@ -13,12 +13,14 @@ class HIVSubtypingConfig(PretrainedConfig):
         backbone_name: str = "InstaDeepAI/NTv3_650M_pre",
         num_subtypes: int = 22,
         smooth_kernel: int = 5,
+        embed_layer: int = -1,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.backbone_name = backbone_name
         self.num_subtypes = num_subtypes
         self.smooth_kernel = smooth_kernel
+        self.embed_layer = embed_layer
 
 class HIVClassificationHead(nn.Module):
     def __init__(self, embed_dim: int, num_subtypes: int, smooth_kernel: int = 5):
@@ -64,7 +66,8 @@ class HFModelForHIVSubtyping(PreTrainedModel):
         self.subtype_head = HIVClassificationHead(
             embed_dim=embed_dim,
             num_subtypes=config.num_subtypes,
-            smooth_kernel=config.smooth_kernel
+            smooth_kernel=config.smooth_kernel,
+            embed_layer=config.embed_layer,
         )
 
         # Initialize weights and property aliases for Hugging Face compatibility
@@ -86,6 +89,6 @@ class HFModelForHIVSubtyping(PreTrainedModel):
         if attention_mask is not None:
             backbone_inputs["attention_mask"] = attention_mask
         outputs = self.backbone(**backbone_inputs, output_hidden_states=True)
-        embedding = outputs.hidden_states[-1]
+        embedding = outputs.hidden_states[self.config.embed_layer]  # [batch, seq_len, embed_dim]
         subtype_logits = self.subtype_head(embedding)
         return {"subtype_logits": subtype_logits}

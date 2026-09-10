@@ -1151,6 +1151,7 @@ def plot_time_per_10k(csv_path, out_path=None):
     -------
     plotly.graph_objects.Figure
     """
+    bar_color = COLOR_SCHEME[0]
     df = pd.read_csv(csv_path)
     df["sec_per_seq"] = df["time_sec"] / df["n_it"]
     df["sec_per_10k"] = df["sec_per_seq"] * 10_000
@@ -1174,7 +1175,7 @@ def plot_time_per_10k(csv_path, out_path=None):
             orientation="h",
             text=labels,
             textposition="outside",
-            marker=dict(color="#4C72B0"),
+            marker=dict(color=bar_color),
         )
     )
 
@@ -1184,8 +1185,12 @@ def plot_time_per_10k(csv_path, out_path=None):
         xaxis_title="Time (seconds, log scale)",
         yaxis_title="",
         xaxis_type="log",
-        font=dict(family="Arial", size=14, color="black"),
-        margin=dict(l=100, r=40, t=60, b=50),
+        xaxis_range=[
+            np.log10(df["sec_per_10k"].min()) - 0.3,
+            np.log10(df["sec_per_10k"].max()) + 0.5,
+        ],
+        font=dict(size=12, color="black"),
+        margin=dict(l=100, r=60, t=60, b=50),
         width=800,
         height=450,
         showlegend=False,

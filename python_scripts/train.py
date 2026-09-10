@@ -23,15 +23,19 @@ with open(TOKEN_PATH, 'r') as f:
     token = f.read().strip()
 login(token=token)
 
-WORKSPACE_PATH = config.WORKSPACE_PATH
-ST_TO_ID_DICT = config.ST_TO_ID_DICT
+WORKSPACE_PATH     = config.WORKSPACE_PATH
+ST_TO_ID_DICT      = config.ST_TO_ID_DICT
 NUM_SUBTYPES       = len(ST_TO_ID_DICT)
 MODEL_CONFIG       = config.MODEL_CONFIG
 MAX_LENGTH         = config.SEQ_LEN_AFTER_PAD
 PAD_MULTIPLE_OF    = config.PAD_LEN
 COMBINED_REF_PATH = config.COMBINED_REF_PATH
 ATA_LEN            = config.ATA_LEN
+SEED               = MODEL_CONFIG["seed"]
 
+
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
 
 os.makedirs(MODEL_CONFIG["data_cache_dir"], exist_ok=True)
 os.makedirs(MODEL_CONFIG["checkpoint_dir"], exist_ok=True)
@@ -69,6 +73,9 @@ if __name__ == "__main__":
         num_subtypes = NUM_SUBTYPES,
     )
     model = HFModelForHIVSubtyping.from_pretrained_backbone(model_param)
+    print(model)
+    print(f"\nBackbone: {sum(p.numel() for p in model.backbone.parameters()):,} params")
+    print(f"Head:     {sum(p.numel() for p in model.subtype_head.parameters()):,} params")
     model = model.to(device)
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
@@ -118,12 +125,14 @@ if __name__ == "__main__":
 
     # Optimizer & scheduler
     backbone = model.module.backbone if isinstance(model, torch.nn.DataParallel) else model.backbone
+    subtype_head = model.module.subtype_head if isinstance(model, torch.nn.DataParallel) else model.subtype_head
 
     optimizer = AdamW([
         {"params": backbone.parameters(),
-         "lr": MODEL_CONFIG["learning_rate"] * MODEL_CONFIG["backbone_learning_rate_multiplier"]},
-        {"params": model.subtype_head.parameters(), "lr": MODEL_CONFIG["learning_rate"]},
+        "lr": MODEL_CONFIG["learning_rate"] * MODEL_CONFIG["backbone_learning_rate_multiplier"]},
+        {"params": subtype_head.parameters(), "lr": MODEL_CONFIG["learning_rate"]},
     ], weight_decay=MODEL_CONFIG["weight_decay"])
+
 
     num_warmup_steps = int(MODEL_CONFIG["warmup_proportion"] * MODEL_CONFIG["num_steps_training"])
     scheduler = get_linear_schedule_with_warmup(
@@ -151,12 +160,16 @@ if __name__ == "__main__":
             map_location=device,
             weights_only=True,
         )
-        model.load_state_dict(checkpoint["model_state_dict"],
-                            strict=False)
-        # Last step value
-        curr_train_df = pd.read_csv(train_metrics_dir, sep='\t')
-        last_step = curr_train_df['step'].max()
-        print(f"Loaded last checkpoint and starting training at step {last_step}", flush=True)
+        load_result = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        if load_result.missing_keys or load_result.unexpected_keys:
+            print(f"  WARNING - missing keys: {load_result.missing_keys}")
+            print(f"  WARNING - unexpected keys: {load_result.unexpected_keys}")
+
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        best_val_f1 = checkpoint.get("val_f1", 0.0)
+        last_step = checkpoint["step"]
+        print(f"Loaded checkpoint and resuming at step {last_step} (best_val_f1={best_val_f1:.4f})", flush=True)
     else:
         last_step = 0
 
@@ -199,7 +212,7 @@ if __name__ == "__main__":
 
             for i, val_batch in enumerate(val_loader):
                 validation_step(model, val_batch, val_metrics, device=device)
-                if i >= MODEL_CONFIG["max_val_batches"]:
+                if i + 1 >= MODEL_CONFIG["max_val_batches"]:
                     break
 
             # If we are at the last validation step, compute and save final metrics (including confusion matrices)
@@ -214,15 +227,13 @@ if __name__ == "__main__":
             val_metrics.save_metrics(step=last_step + step_idx + 1)
             val_metrics.reset()
 
-            if val_result["f1/micro"] > best_val_f1:
-                best_val_f1 = val_result["f1/micro"]
-                torch.save({
-                    "step": step_idx,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
-                    "val_f1": best_val_f1,
-                }, os.path.join(MODEL_CONFIG["checkpoint_dir"], MODEL_CONFIG["checkpoint_name"]))
+            torch.save({
+                "step": step_idx,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "val_f1": val_result["f1/micro"],
+            }, os.path.join(MODEL_CONFIG["checkpoint_dir"], MODEL_CONFIG["checkpoint_name"]))
 
             print("\n" + "-" * 50 + "\nTraining metrics:")
             model.train()
@@ -236,7 +247,8 @@ print(f"\nPushing model to HuggingFace")
 HIVSubtypingConfig.register_for_auto_class()
 HFModelForHIVSubtyping.register_for_auto_class("AutoModel")
 
-model.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
+model_to_save = model.module if isinstance(model, torch.nn.DataParallel) else model
+model_to_save.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
 tokenizer.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
 
 # push to Hugging Face repository
