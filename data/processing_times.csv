@@ -1,0 +1,7 @@
+tool,time_sec,n_it
+REGA-v3,135,5
+COMET,30,1000
+jpHMM,120,5
+Sierrapy,316,1000
+Kameris,4,15000
+sbtr,276,1000

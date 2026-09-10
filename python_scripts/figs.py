@@ -1134,6 +1134,68 @@ def plot_fragment_length_distribution(
     )
     fig.write_html(path)
 
+
+def plot_time_per_10k(csv_path, out_path=None):
+    """
+    Plot approximate processing time for 10,000 sequences per tool,
+    extrapolated from measured time_sec / n_it.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to CSV with columns: tool, time_sec, n_it
+    out_path : str, optional
+        If given, saves the figure (e.g. 'plot.pdf', 'plot.svg', 'plot.png').
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    df = pd.read_csv(csv_path)
+    df["sec_per_seq"] = df["time_sec"] / df["n_it"]
+    df["sec_per_10k"] = df["sec_per_seq"] * 10_000
+    df = df.sort_values("sec_per_10k", ascending=True)
+
+    # Human-readable labels for each bar
+    def fmt_time(s):
+        if s < 60:
+            return f"{s:.1f} s"
+        elif s < 3600:
+            return f"{s/60:.1f} min"
+        else:
+            return f"{s/3600:.1f} h"
+
+    labels = df["sec_per_10k"].apply(fmt_time)
+
+    fig = go.Figure(
+        go.Bar(
+            x=df["sec_per_10k"],
+            y=df["tool"],
+            orientation="h",
+            text=labels,
+            textposition="outside",
+            marker=dict(color="#4C72B0"),
+        )
+    )
+
+    fig.update_layout(
+        template="simple_white",
+        title="Approximate time to process 10,000 sequences",
+        xaxis_title="Time (seconds, log scale)",
+        yaxis_title="",
+        xaxis_type="log",
+        font=dict(family="Arial", size=14, color="black"),
+        margin=dict(l=100, r=40, t=60, b=50),
+        width=800,
+        height=450,
+        showlegend=False,
+    )
+    fig.update_xaxes(showline=True, linecolor="black", ticks="outside")
+    fig.update_yaxes(showline=True, linecolor="black", ticks="outside")
+
+    fig.write_html(out_path)
+
+
 if __name__ == "__main__":
     breakpoints_path = f"{workspace_path}/data/output/lanl_crf_breakpoints.csv"
     df_bp = pd.read_csv(breakpoints_path)
@@ -1198,3 +1260,7 @@ if __name__ == "__main__":
     save_path_evol = f"{workspace_path}/figs/metrics_evolution.html"
     visualize_metrics(save_path_loss=save_path_loss,
                       save_path_evol=save_path_evol)
+
+    processing_times = f"{workspace_path}/data/processing_times.csv"
+    save_path_time = f"{workspace_path}/figs/processing_time_per_10k.html"
+    plot_time_per_10k(processing_times, save_path_time)
