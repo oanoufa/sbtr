@@ -771,7 +771,7 @@ if __name__ == "__main__":
     ata_len        = len(hxb2_ata_seq)
 
     # infer parameters from real CRFs
-    df_seg = pd.read_csv(f"{WORKSPACE_PATH}/data/output/lanl_crf_segments.csv")
+    df_seg = pd.read_csv(f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_hxb2.csv")
     print("Inferred parameters:")
     params = infer_params(df_seg, ata_len)
 

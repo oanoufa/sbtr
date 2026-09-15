@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
     print(f"  ATA length, HXB2 length     : {ATA_LEN, int(max(ATA_TO_HXB2))}", flush=True)
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_CONFIG["model_name"], trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_CONFIG["tokenizer"], trust_remote_code=True)
 
     print(f"CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
@@ -69,11 +69,15 @@ if __name__ == "__main__":
     print(f"Torch CPU threads: {torch.get_num_threads()}")
 
     model_param = HIVSubtypingConfig(
-        backbone_name = MODEL_CONFIG["model_name"],
+        backbone_name = MODEL_CONFIG["backbone"],
         num_subtypes = NUM_SUBTYPES,
+        smooth_kernel = MODEL_CONFIG["smooth_kernel"],
+        embed_layer = MODEL_CONFIG["embed_layer"],
+        custom_vocab_size = len(tokenizer),
     )
+
     model = HFModelForHIVSubtyping.from_pretrained_backbone(model_param)
-    print(model)
+    print(f"\nModel architecture:\n{model}")
     print(f"\nBackbone: {sum(p.numel() for p in model.backbone.parameters()):,} params")
     print(f"Head:     {sum(p.numel() for p in model.subtype_head.parameters()):,} params")
     model = model.to(device)
@@ -84,6 +88,8 @@ if __name__ == "__main__":
     model.train()
 
     print(f"Model loaded: {MODEL_CONFIG['model_name']}")
+    print(f"Backbone loaded: {MODEL_CONFIG['backbone']}")
+    print(f"Tokenizer loaded: {MODEL_CONFIG['tokenizer']}")
     print(f"Number of subtypes: {NUM_SUBTYPES}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -160,7 +166,7 @@ if __name__ == "__main__":
             map_location=device,
             weights_only=True,
         )
-        load_result = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        load_result = model.load_state_dict(checkpoint["model_state_dict"]) # ,strict=False)
         if load_result.missing_keys or load_result.unexpected_keys:
             print(f"  WARNING - missing keys: {load_result.missing_keys}")
             print(f"  WARNING - unexpected keys: {load_result.unexpected_keys}")
@@ -241,7 +247,6 @@ if __name__ == "__main__":
     print(f"\nTraining completed after {MODEL_CONFIG['num_steps_training']} steps.")
 
 
-print(f"\nPushing model to HuggingFace")
 
 # Save locally
 HIVSubtypingConfig.register_for_auto_class()
@@ -251,6 +256,7 @@ model_to_save = model.module if isinstance(model, torch.nn.DataParallel) else mo
 model_to_save.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
 tokenizer.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
 
+# print(f"\nPushing model to HuggingFace")
 # push to Hugging Face repository
 # tokenizer.push_to_hub("oanoufa/sbtr_ntv3_650M")
 # model.push_to_hub("oanoufa/sbtr_ntv3_650M")

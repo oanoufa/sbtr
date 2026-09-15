@@ -25,21 +25,26 @@ class CRFReferenceDecoder:
 
     def __init__(
         self,
-        bank_path: str | Path,
+        bank_path: str = None,
     ) -> None:
 
-        bank_path = Path(bank_path)
-        if not bank_path.exists():
-            raise FileNotFoundError(f"Reference bank not found: {bank_path}")
+        if bank_path is None:
+            self.has_bank = False
+            print("[CRFReferenceDecoder] No reference bank provided. Only per-position subtype calls will be returned.")
+        else:
+            self.has_bank = True
+            bank_path = Path(bank_path)
+            if not bank_path.exists():
+                raise FileNotFoundError(f"Reference bank not found: {bank_path}")
 
-        data       = np.load(bank_path, allow_pickle=True)
-        self.bank  = data["reference_bank"].astype(np.float32)   # (R, L, C)
-        self.names = np.asarray(data["reference_names"])          # (R,)
-        self.R, self.L, self.C = self.bank.shape
+            data       = np.load(bank_path, allow_pickle=True)
+            self.bank  = data["reference_bank"].astype(np.float32)   # (R, L, C)
+            self.names = np.asarray(data["reference_names"])          # (R,)
+            self.R, self.L, self.C = self.bank.shape
+            self.crf_types        = [self._parse_crf_type(n) for n in self.names]
+            self.top_k            = TOP_K
 
-        self.top_k            = TOP_K
         self.prob_threshold   = PROB_ZERO_THRESHOLD
-        self.crf_types        = [self._parse_crf_type(n) for n in self.names]
         self.window_size      = SLIDING_WINDOW_SIZE
         self.crf_match_margin    = CRF_MATCH_MARGIN
         self.partial_thr = PARTIAL_THR
@@ -237,7 +242,7 @@ class CRFReferenceDecoder:
         label_names: np.ndarray,
         mask: np.ndarray,
         skip_label: str = "U",
-    ) -> np.ndarray:
+    ) -> Tuple[int, int, np.ndarray]:
         """
         Force positions before the first valid (mask==1) index and after the
         last valid index to skip_label. Interior mask==0 gaps (alignment gaps
@@ -252,7 +257,7 @@ class CRFReferenceDecoder:
         first, last = valid_idx[0], valid_idx[-1]
         label_names[:first] = skip_label
         label_names[last + 1:] = skip_label
-        return label_names
+        return first, last, label_names
 
     def _gen_labels_dealigned(
         self,
@@ -396,6 +401,7 @@ class CRFReferenceDecoder:
             dominant_subtype, dominant_fraction  — purity stats
             is_candidate_pure                    — bool
             composition, composition_str         — abstract characterisation
+            active_positions                     — string indicating active position range
         """
         probs = np.asarray(probs, dtype=np.float32)
         if probs.shape != (self.L, self.C):
@@ -403,24 +409,11 @@ class CRFReferenceDecoder:
 
         mask = np.asarray(query_mask, dtype=np.float32)
 
-        # global ranking
-        scores  = self._intersection_scores(probs, mask)
-        top_idx = np.argsort(scores)[::-1][: self.top_k]
-
-        top_sequences = [
-            {
-                "rank"    : rank + 1,
-                "name"    : str(self.names[i]),
-                "crf_type": self.crf_types[i],
-                "score"   : float(scores[i]),
-            }
-            for rank, i in enumerate(top_idx)
-        ]
-
         # per-position label sequence
         _, str_path = self._sliding_window(probs)       # (L,)
-        str_path = self._trim_flanking_to_skip(str_path, mask, skip_label="U")
+        first, last, str_path = self._trim_flanking_to_skip(str_path, mask, skip_label="U")
 
+        active_positions = f"{str(first)}-{str(last)}" if first <= last else "none"
         label_names_aligned = self._overwrite_LTR(
             label_names_aligned=str_path,
             hxb2_to_ata=hxb2_to_ata)
@@ -447,6 +440,34 @@ class CRFReferenceDecoder:
             else (composition[0] if composition else "")
         )
 
+        if not self.has_bank:
+            return {
+                "label_names_aligned"   : label_names_aligned,
+                "label_names_dealigned" : label_names_dealigned,
+                "regions_aligned"       : regions_aligned,
+                "regions_dealigned"     : regions_dealigned,
+                "active_positions"      : active_positions,
+                "dominant_subtype"      : dominant,
+                "dominant_fraction"     : fraction,
+                "composition"           : composition,
+                "composition_str"       : composition_str,
+            }
+
+
+        # global ranking
+        scores  = self._intersection_scores(probs, mask)
+        top_idx = np.argsort(scores)[::-1][: self.top_k]
+
+        top_sequences = [
+            {
+                "rank"    : rank + 1,
+                "name"    : str(self.names[i]),
+                "crf_type": self.crf_types[i],
+                "score"   : float(scores[i]),
+            }
+            for rank, i in enumerate(top_idx)
+        ]
+
         top_crf_types = self._aggregate_by_type(self.crf_types, scores, self.top_k)
 
         final_decision = self._final_decision(
@@ -463,6 +484,7 @@ class CRFReferenceDecoder:
             "label_names_dealigned" : label_names_dealigned,
             "regions_aligned"       : regions_aligned,
             "regions_dealigned"     : regions_dealigned,
+            "active_positions"      : active_positions,
             "dominant_subtype"      : dominant,
             "dominant_fraction"     : fraction,
             "composition"           : composition,

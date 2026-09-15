@@ -19,16 +19,16 @@ ATA_LEN = 11561 # max length of sequences in the dataset is (11954) (NOW 16980) 
 MIN_SEG_LEN = 50 # Min length of segments of a subtype in a recombinant sequence (in ATA positions)
 MAX_SUBTYPES = 7
 MAX_BREAKPOINTS = 10
-PARTIAL_FRAC  = 0.30 # Fraction of sequences that are partial (i.e., not full-length)
-MIN_FRAG_LEN  = 1000 # Min length of a partial sequence
-DIV_WINDOW_SIZE   = 200
-MIN_DIV       = 15
-MAX_RETRIES   = 50
+PARTIAL_FRAC = 0.30 # Fraction of sequences that are partial (i.e., not full-length)
+MIN_FRAG_LEN = 400 # Min length of a partial sequence
+DIV_WINDOW_SIZE = 200
+MIN_DIV = 15
+MAX_RETRIES = 50
 
 # CRF REF BANK PARAMETERS
 PCT_PER_CRF_BANK = 0.10 # Adaptive bank size depending on the number of sequences of the CRF
 MIN_PER_CRF_BANK = 3 # Min bank size for each CRF
-N_TEST           = 5 # Test size for each CRF (including one gag and one pol sequence)
+N_TEST = 5 # Test size for each CRF (including one gag and one pol sequence)
 
 # DECODER PARAMETERS
 SLIDING_WINDOW_SIZE = 40 # Twice the size of the smallest segments possible (window centered on position)
@@ -39,15 +39,17 @@ CRF_ASSIGN_THR = 0.5 # Minimum match to assign a CRF
 PARTIAL_THR = 7000 # Threshold to consider a sequence full (>=7000nt) or partial (<7000nt)
 
 # NUCLEOTIDE TRANSFORMER PARAMETERS
-VERSION = "0.2_embedlayer-1"
-PAD_LEN =  128
+VERSION = "0.1"
+PAD_LEN = 128
 SEQ_LEN_AFTER_PAD = ((ATA_LEN // PAD_LEN) + 1) * PAD_LEN
 
 MODEL_CONFIG = {
     # Model
-    "model_name": "InstaDeepAI/NTv3_650M_pre", # zhihan1996/DNABERT-2-117M
+    "model_name": "oanoufa/sbtr_ntv3_650M", # oanoufa/sbtr_ntv3_650M oanoufa/sbtr_custom
+    "backbone": "InstaDeepAI/NTv3_650M_pre", # zhihan1996/DNABERT-2-117M InstaDeepAI/NTv3_650M_pre InstaDeepAI/nucleotide-transformer-v2-500m-multi-species
+    "tokenizer": "InstaDeepAI/NTv3_650M_pre", # /pasteur/helix/projects/mPath/oanoufa/sbtr/data/model/tokenizer/custom_hiv_tokenizer
     "checkpoint_name": f"sbtr_v{VERSION}.pt",
-    "load_checkpoint": False, # Whether to load from checkpoint to resume training or start fresh training
+    "load_checkpoint": True, # Whether to load from checkpoint to resume training or start fresh training
     "model_version": VERSION,
 
     # Data
@@ -61,18 +63,20 @@ MODEL_CONFIG = {
 
     # Training
     "batch_size": 8,
-    "num_steps_training": 1000,
+    "num_steps_training": 10000,
     # Only batch_size * num_steps_training samples will be used for training (randomly sampled from the training split)
-    "log_every_n_steps": 1500,
+    "log_every_n_steps": 1000,
     "learning_rate": 1e-4,
     "weight_decay": 0.01,
     "warmup_proportion": 0.05,  # 5% of training steps for warmup
     "grad_clip_norm": 1.0,
     "backbone_learning_rate_multiplier": 0.1, # backbone learning rate = this * main learning rate
     "tv_weight": 0.03,
+    "smooth_kernel": 5,
+    "embed_layer": -1, # Which layer of the backbone to use for embeddings
 
     # Validation
-    "validate_every_n_steps": 1000,
+    "validate_every_n_steps": 5000,
     "max_val_batches": 500,
 
     # Inference

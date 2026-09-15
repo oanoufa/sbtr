@@ -1202,7 +1202,7 @@ def plot_time_per_10k(csv_path, out_path=None):
 
 
 if __name__ == "__main__":
-    breakpoints_path = f"{workspace_path}/data/output/lanl_crf_breakpoints.csv"
+    breakpoints_path = f"{workspace_path}/data/output/lanl_crf_breakpoints_hxb2.csv"
     df_bp = pd.read_csv(breakpoints_path)
 
     df_bp.rename(columns={

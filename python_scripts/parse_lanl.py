@@ -44,35 +44,30 @@ urllib3.disable_warnings()
 ST_TO_ID_DICT = config.ST_TO_ID_DICT
 # Harmonising dict for breakpoints taken from LANL
 CRF_CANONICAL = {
-    '01':        'CRF01_AE',
-    '01_AE':     'CRF01_AE',
-    'CRF1' :     'CRF01_AE',
-    'CRF01':     'CRF01_AE',
-    'CRF_01':    'CRF01_AE',
-    'CRF01_AE':  'CRF01_AE',
-    '02':        'CRF02_AG',
-    '02_AG':     'CRF02_AG',
-    'CRF02':     'CRF02_AG',
-    'CRF_02':    'CRF02_AG',
-    'CRF02_AG':  'CRF02_AG',
-    '06':        'CRF06_cpx',
-    'CRF06':     'CRF06_cpx',
-    'CRF_06':    'CRF06_cpx',
-    '07':        'CRF07_BC',
-    '07_BC':     'CRF07_BC',
-    'CRF07':     'CRF07_BC',
-    'CRF_07':    'CRF07_BC',
-    'CRF07_BC':  'CRF07_BC',
-    '08':        'CRF08_BC',
-    '08_BC':     'CRF08_BC',
-    'CRF08':     'CRF08_BC',
-    'CRF_08':    'CRF08_BC',
-    'CRF08_BC':  'CRF08_BC',
-    'CRRF08_BC': 'CRF08_BC',
-    '55':        'CRF55_01B',
-    '55_01B':    'CRF55_01B',
-    'CRF55':     'CRF55_01B',
-    'CRF55_01B': 'CRF55_01B',
+    '01':        '01_AE',
+    'CRF1' :     '01_AE',
+    'CRF01':     '01_AE',
+    'CRF_01':    '01_AE',
+    'CRF01_AE':  '01_AE',
+    '02':        '02_AG',
+    'CRF02':     '02_AG',
+    'CRF_02':    '02_AG',
+    'CRF02_AG':  '02_AG',
+    '06':        '06_cpx',
+    'CRF06':     '06_cpx',
+    'CRF_06':    '06_cpx',
+    '07':        '07_BC',
+    'CRF07':     '07_BC',
+    'CRF_07':    '07_BC',
+    'CRF07_BC':  '07_BC',
+    '08':        '08_BC',
+    'CRF08':     '08_BC',
+    'CRF_08':    '08_BC',
+    'CRF08_BC':  '08_BC',
+    'CRRF08_BC': '08_BC',
+    '55':        '55_01B',
+    'CRF55':     '55_01B',
+    'CRF55_01B': '55_01B',
 }
 
 U_ALIASES = {'U', 'U1', 'Undetermined', 'Unsequenced', 'unknown', 'Undefined'}
@@ -125,16 +120,21 @@ def normalize_subtype(raw: str) -> str:
     if s in CRF_CANONICAL:
         return CRF_CANONICAL[s]
 
-    m = re.match(r'^(CRF|_?CRF)?[_-]?(\d+)(_\w+)?$', s, re.IGNORECASE)
-    if m:
-        prefix = m.group(1) or ''
-        num    = m.group(2)
-        suffix = m.group(3) or ''
-        if prefix:
-            return f"{prefix}{num}{suffix}"
-        else:
-            return f"CRF{num}{suffix}"
+    if s in ST_TO_ID_DICT:
+        return s
 
+    # Match optional CRF prefix, digits, and optional suffix
+    m = re.match(r'^(?:CRF)?[_-]?(\d+)(?:[_-]?(\w+))?$', s, re.IGNORECASE)
+    if m:
+        num = m.group(1).zfill(2)  # Zero-pad single digits (e.g., '3' -> '03')
+        suffix = m.group(2)
+        
+        # Omit 'CRF' prefix and enforce XX_SUFFIX formatting
+        if suffix:
+            return f"{num}_{suffix}"
+        return num
+
+    print(f"Warning: unrecognised subtype label {s!r}, returning as-is", flush=True)
     return s
 
 
@@ -250,10 +250,9 @@ def parse_breakpoints_file(filepath):
             if line.startswith('>'):
                 if current_crf and current_segs:
                     flush(current_crf, current_segs)
-                m = re.match(r'>CRF_(\d+)', line)
+                m = re.match(r'>([^\s#]+)', line)
                 if m:
-                    num = int(m.group(1))
-                    current_crf  = f"CRF{num:02d}"
+                    current_crf  = m.group(1)
                     current_segs = []
                 continue
             parts = line.split()
@@ -302,10 +301,16 @@ def scrape_and_parse_lanl_breakpoints(output_path):
                 continue
             crf_name = tgl_id[4:]
 
-            m_num = re.match(r'CRF(\d+)', crf_name, re.IGNORECASE)
+            # Capture the number AND optional suffix (e.g., '01', '01_AE', '55_01B')
+            m_num = re.match(r'CRF_?(\d+)(?:[_-]?(\w+))?', crf_name, re.IGNORECASE)
             if m_num is None:
                 continue
+
             num_str = m_num.group(1).zfill(2)
+            suffix  = m_num.group(2)
+
+            # Reconstruct into XX_XX format
+            crf_key = f"{num_str}_{suffix}" if suffix else num_str
 
             parent_td   = pre.parent
             comment_parts = []
@@ -318,7 +323,8 @@ def scrape_and_parse_lanl_breakpoints(output_path):
             m_bp         = re.search(r'(Breakpoints?\s+.*)', raw_comment, re.IGNORECASE)
             comment_line = m_bp.group(1).strip() if m_bp else ''
 
-            header_line = f">CRF_{num_str}"
+            crf_key = CRF_CANONICAL.get(crf_key, crf_key)
+            header_line = f">{crf_key}"
             if comment_line:
                 header_line += f" # {comment_line}"
 
@@ -418,10 +424,12 @@ def _crf_df_key(label: str, df_by_crf: Dict[str, pd.DataFrame]) -> Optional[str]
     'CRF01_AE' -> 'CRF01'   'CRF07_BC' -> 'CRF07'
     'CRF109_0107' -> 'CRF109'
     """
-    m = re.match(r'^CRF(\d+)', label, re.IGNORECASE)
+    m = re.match(r'^(?:CRF)?(\d+)', label, re.IGNORECASE)
     if m:
-        key = f"CRF{int(m.group(1)):02d}"
-        return key if key in df_by_crf else None
+        num_str = f"{int(m.group(1)):02d}"
+        for key in df_by_crf:
+            if key.startswith(num_str):
+                return key
     return label if label in df_by_crf else None
 
 
@@ -624,8 +632,7 @@ def build_all_crf_label_sequences(
         label_seqs[crf] = aln_labels
 
     # Sort label_seqs by CRF number (CRF01, CRF02, …) for consistent ordering in output files.
-    label_seqs = dict(sorted(label_seqs.items(), key=lambda x: int(re.match(r'CRF(\d+)', x[0]).group(1))))
-
+    label_seqs = dict(sorted(label_seqs.items(), key=lambda x: int(re.match(r'^(?:CRF)?(\d+)', x[0]).group(1))))
     # Add Pure subtypes as their own entries in label_seqs
     for pure in _PURE_ST:
         label_seqs[pure] = np.full(aln_len, pure, dtype=object)
@@ -970,10 +977,10 @@ if __name__ == "__main__":
     print(f"Total breakpoints : {len(df_breakpoints)}")
 
     df_segments.to_csv(
-        f"{WORKSPACE_PATH}/data/output/lanl_crf_segments.csv",    index=False)
+        f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_hxb2.csv",    index=False)
     df_breakpoints.to_csv(
-        f"{WORKSPACE_PATH}/data/output/lanl_crf_breakpoints.csv", index=False)
-    print("Saved lanl_crf_segments.csv and lanl_crf_breakpoints.csv\n")
+        f"{WORKSPACE_PATH}/data/output/lanl_crf_breakpoints_hxb2.csv", index=False)
+    print("Saved lanl_crf_segments_hxb2.csv and lanl_crf_breakpoints_hxb2.csv\n")
 
     # Prepare pure / CRF reference alignments
 
@@ -995,7 +1002,7 @@ if __name__ == "__main__":
     print(f"  Label-sequence archive : {seqs_path}")
 
     # Derive alignment-coord segment CSV from the label sequences
-    csv_path = f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_aln.csv"
+    csv_path = f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_brokedown_aln.csv"
     df_aln   = label_sequences_to_segments_csv(label_seqs, csv_path)
     print(f"\nAlignment-coord segments : {csv_path}  ({len(df_aln)} rows)")
     print(df_aln.head(20).to_string(index=False))

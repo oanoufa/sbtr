@@ -32,7 +32,6 @@ MODEL_CONFIG       = config.MODEL_CONFIG
 ATA_LEN            = config.ATA_LEN
 MAX_LENGTH         = config.SEQ_LEN_AFTER_PAD
 PAD_MULTIPLE_OF    = config.PAD_LEN
-VERSION            = config.VERSION
 
 import argparse
 
@@ -274,7 +273,7 @@ def process_single_sample_worker(
 
     result_line = (
         f"{sample_name},"
-        f"{crf_result['composition_str']},"
+        f"{crf_result['composition_str']}, {crf_result['active_positions']},"
         f"{crf_result['dominant_subtype']},{crf_result['dominant_fraction']:.4f},"
         f"{best_ref_crf},{best_ref_distance:.4f},{top5_ref},{crf_result['final_decision']}\n"
     )
@@ -459,7 +458,7 @@ if __name__ == "__main__":
     seq_names = [rec.id.split()[0] for rec in records_ali]
     metadata  = pd.DataFrame({
         "sequence_name": seq_names,
-        "split":         "inference",
+        "split": tag,
     })
 
     # Allocate memmaps
@@ -503,9 +502,15 @@ if __name__ == "__main__":
     del records_ali
 
     # load model + tokenizer
-    model_used = "oanoufa/sbtr_ntv3_650M"
+    model_used = MODEL_CONFIG["model_name"]
+    tokenizer_used = MODEL_CONFIG["tokenizer"]
+    backbone_used = MODEL_CONFIG["backbone"]
     tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True, revision="main")
     model = HFModelForHIVSubtyping.from_pretrained(model_used, trust_remote_code=True, revision="main")
+
+    print(f"\nModel {model_used} with architecture:\n{model}")
+    print(f"\nBackbone: {sum(p.numel() for p in model.backbone.parameters()):,} params")
+    print(f"Head:     {sum(p.numel() for p in model.subtype_head.parameters()):,} params")
 
     model = model.to(device)
     model.eval()
@@ -516,7 +521,7 @@ if __name__ == "__main__":
         seq_mm=seq_mm, lbl_mm=lbl_mm, mask_mm=mask_mm, metadata=metadata,
         tokenizer=tokenizer, n_subtypes=NUM_SUBTYPES,
         max_length=MAX_LENGTH, pad_multiple_of=PAD_MULTIPLE_OF, hxb2_to_ata=HXB2_TO_ATA,
-        split="inference",
+        split=tag,
     )
     inference_loader = DataLoader(
         inference_dataset, batch_size=batch_size, # Batch size 1 is much faster
@@ -542,7 +547,7 @@ if __name__ == "__main__":
     print(f"Loss masks after dataset memmap: {out_post_loss_path} shape={ploss_mm.shape}", flush=True)
 
     inference_rows = (
-        metadata[metadata["split"] == "inference"]
+        metadata[metadata["split"] == tag]
         .reset_index(drop=True)
     )
 
@@ -619,7 +624,7 @@ if __name__ == "__main__":
     with open(result_csv_path, 'w') as f:
         f.write(
             "sample_name,"
-            "composition,"
+            "composition,active_positions,"
             "dominant_subtype,dominant_fraction,"
             "ref_best_crf,ref_best_score,ref_top5,"
             "final_decision"
