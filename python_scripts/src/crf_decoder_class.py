@@ -1,3 +1,4 @@
+# crf_decoder_class.py
 """Decode subtype predictions against a bank of CRF references."""
 
 from __future__ import annotations
@@ -19,7 +20,9 @@ CRF_ASSIGN_THR = config.CRF_ASSIGN_THR
 PARTIAL_THR = config.PARTIAL_THR
 START_5LTR = config.START_5LTR
 NEF_3LTR = config.NEF_3LTR
+ATA_LEN = config.ATA_LEN
 LTR_LABELS = {"5'LTR", "3'LTR"}
+
 
 class CRFReferenceDecoder:
 
@@ -28,8 +31,17 @@ class CRFReferenceDecoder:
         bank_path: str = None,
     ) -> None:
 
+        # Defaults; overwritten below when a bank is actually loaded. These
+        # must always exist so the class is usable with bank_path=None
+        # (e.g. to compute num_path arrays for a bank being built).
+        self.R = 0
+        self.L = ATA_LEN
+
         if bank_path is None:
             self.has_bank = False
+            self.names = np.asarray([], dtype=object)
+            self.crf_types = []
+            self.top_k = TOP_K
             print("[CRFReferenceDecoder] No reference bank provided. Only per-position subtype calls will be returned.")
         else:
             self.has_bank = True
@@ -38,17 +50,46 @@ class CRFReferenceDecoder:
                 raise FileNotFoundError(f"Reference bank not found: {bank_path}")
 
             data       = np.load(bank_path, allow_pickle=True)
-            self.bank  = data["reference_bank"].astype(np.float32)   # (R, L, C)
+            self.bank  = data["reference_bank"].astype(np.int8)   # (R, L)
             self.names = np.asarray(data["reference_names"])          # (R,)
-            self.R, self.L, self.C = self.bank.shape
+            self.R, bank_L = self.bank.shape
+            if bank_L != self.L:
+                raise ValueError(
+                    f"Reference bank length ({bank_L}) does not match config.ATA_LEN ({self.L})."
+                )
             self.crf_types        = [self._parse_crf_type(n) for n in self.names]
             self.top_k            = TOP_K
 
+        # Base subtype vocabulary size, excluding the synthetic 'U'/LTR
+        # labels that may already have been registered by a previous
+        # instantiation of this class (ST_TO_ID_DICT is a shared, mutated
+        # global dict, so we must not let repeated calls inflate self.C).
+        self.C = len([
+            k for k in ST_TO_ID_DICT
+            if k not in ("U", "5'LTR", "3'LTR")
+        ])
         self.prob_threshold   = PROB_ZERO_THRESHOLD
         self.window_size      = SLIDING_WINDOW_SIZE
         self.crf_match_margin    = CRF_MATCH_MARGIN
         self.partial_thr = PARTIAL_THR
         self.crf_assign_thr = CRF_ASSIGN_THR
+
+        # Register synthetic labels once; reuse on subsequent instantiations.
+        ST_TO_ID_DICT.setdefault("U", self.C)
+        ST_TO_ID_DICT.setdefault("5'LTR", self.C + 1)
+        ST_TO_ID_DICT.setdefault("3'LTR", self.C + 2)
+        self.label_to_code = ST_TO_ID_DICT
+        self.code_to_label = {v: k for k, v in self.label_to_code.items()}
+
+        self.code_u    = self.label_to_code["U"]
+        self.code_5ltr = self.label_to_code["5'LTR"]
+        self.code_3ltr = self.label_to_code["3'LTR"]
+
+        if self.has_bank:
+            uninf = (self.code_u, self.code_5ltr, self.code_3ltr)
+            self.bank_informative = (
+                (self.bank != uninf[0]) & (self.bank != uninf[1]) & (self.bank != uninf[2])
+            )
 
         print(
             f"[CRFReferenceDecoder] {self.R} refs | "
@@ -171,36 +212,32 @@ class CRFReferenceDecoder:
 
     # core computations
 
-    def _intersection_scores(
-        self,
-        probs: np.ndarray,   # (L, C)
-        mask: np.ndarray,    # (L,)
-    ) -> np.ndarray:         # (R,)
-        n_valid = float(mask.sum())
-        if n_valid == 0.0:
-            return np.zeros(self.R, dtype=np.float32)
+    def _agreement_scores(self, query_codes: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        mask = mask.astype(bool)
+        uninf = (self.code_u, self.code_5ltr, self.code_3ltr)
+        query_informative = (
+            mask & (query_codes != uninf[0]) & (query_codes != uninf[1]) & (query_codes != uninf[2])
+        )
+        comparable = self.bank_informative & query_informative[None, :]
 
-        # Apply mask directly onto probability matrix to zero out gaps
-        probs_masked = probs * mask[:, None]  # (L, C)
+        n_comparable = comparable.sum(axis=1)
+        agree = ((self.bank == query_codes[None, :]) & comparable).sum(axis=1)
 
-        # Take minimum across third dimension directly
-        intersection = np.minimum(self.bank, probs_masked[None, :, :])
-        
-        # Sum along L and C simultaneously
-        scores = intersection.sum(axis=(-2, -1)) / n_valid
-        return scores.astype(np.float32)
+        scores = np.zeros(self.R, dtype=np.float32)
+        has_overlap = n_comparable > 0
+        scores[has_overlap] = agree[has_overlap] / n_comparable[has_overlap]
+        return scores
 
     def _sliding_window(
         self,
         probs: np.ndarray,   # (L, C)
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> np.ndarray:
         """
         Smooths subtype probabilities across the full aligned sequence without masking gaps.
-        
+
         Returns
         -------
-        num_path : (L,) int32 — subtype index (0 to C-1), or -1 where 'U' is predicted
-        str_path : (L,) str   — subtype name, or 'U' where no subtype is confident
+        num_path : (L,) int8 — subtype index (0 to C-1), or C where 'U' is predicted
         """
         L, C = probs.shape
 
@@ -208,12 +245,10 @@ class CRFReferenceDecoder:
         probs_thr = np.where(probs >= self.prob_threshold, probs, 0.0)
 
         # 2. Virtual 'U' channel: active (1.0) where no subtype cleared the threshold
-        # Note: If no subtype cleared threshold, this position votes 'U'
         uninformative = (probs_thr.sum(axis=-1) == 0.0).astype(np.float32)
         probs_aug = np.concatenate([probs_thr, uninformative[:, None]], axis=1)  # (L, C+1)
 
         # 3. Continuous uniform window filter over the whole aligned sequence
-        # uniform_filter1d computes moving average smoothly without needing mask division
         smoothed = uniform_filter1d(
             probs_aug, size=self.window_size, axis=0, mode="nearest"
         )  # (L, C+1)
@@ -222,23 +257,14 @@ class CRFReferenceDecoder:
         winning_channel = smoothed.argmax(axis=1)  # (L,)
 
         # 5. Build output arrays
-        num_path = np.full(L, -1, dtype=np.int32)
-        str_path = np.full(L, "U", dtype=object)
-
-        # Known subtypes are winning indices strictly less than C (index C is 'U')
-        is_subtype = winning_channel < C
+        num_path = np.full(L, C, dtype=np.int8)
+        is_subtype = winning_channel < C  # (L,) bool
         num_path[is_subtype] = winning_channel[is_subtype]
 
-        # Map subtype integer IDs to strings
-        if np.any(is_subtype):
-            str_path[is_subtype] = np.array(
-                [ID_TO_ST_DICT[i] for i in num_path[is_subtype]], dtype=object
-            )
+        return num_path
 
-        return num_path, str_path
-
-    @staticmethod
     def _trim_flanking_to_skip(
+        self,
         label_names: np.ndarray,
         mask: np.ndarray,
         skip_label: str = "U",
@@ -250,14 +276,16 @@ class CRFReferenceDecoder:
         """
         valid_idx = np.flatnonzero(mask)
         label_names = np.asarray(label_names).copy()
+        skip_code = self.label_to_code[skip_label]
+
         if len(valid_idx) == 0:
-            label_names[:] = skip_label
-            return label_names
+            label_names[:] = skip_code
+            return 0, -1, label_names
 
         first, last = valid_idx[0], valid_idx[-1]
-        label_names[:first] = skip_label
-        label_names[last + 1:] = skip_label
-        return first, last, label_names
+        label_names[:first] = skip_code
+        label_names[last + 1:] = skip_code
+        return int(first), int(last), label_names
 
     def _gen_labels_dealigned(
         self,
@@ -267,16 +295,6 @@ class CRFReferenceDecoder:
     ) -> List[str]:
         """
         Generate label_names_dealigned by inserting the removed insertions in the labels as the previous label, then applying the mask to get the final label_names_dealigned.
-
-        Parameters
-        ----------
-        mask : np.ndarray, boolean array indicating valid positions in the aligned sequence.
-        compactmapout_entry : List[Tuple[int, int, int]], the mapping of removed insertions to ata positions.
-        label_names_aligned : List[str], the labels corresponding to the aligned (ata) sequence.
-
-        Returns
-        -------
-        List[str], dealigned label names that match the length of the initial_seq.
         """
         labels = list(label_names_aligned)
         mask_list = list(mask)
@@ -315,11 +333,14 @@ class CRFReferenceDecoder:
         max_5LTR = max(START_5LTR_ATA)
         min_3LTR = min(NEF_3LTR_ATA)
 
+        code_5ltr = self.label_to_code["5'LTR"]
+        code_3ltr = self.label_to_code["3'LTR"]
+
         for i in range(0, max_5LTR + 1):
-            label_names_aligned[i] = "5'LTR"
+            label_names_aligned[i] = code_5ltr
 
         for i in range(min_3LTR, len(label_names_aligned)):
-            label_names_aligned[i] = "3'LTR"
+            label_names_aligned[i] = code_3ltr
 
         return label_names_aligned
 
@@ -393,15 +414,19 @@ class CRFReferenceDecoder:
 
         Returns
         -------
-        Dict with keys:
+        If no bank is loaded: np.ndarray (L,) int8 — num_path (aligned label
+        codes, flanks/LTR-overwritten). This is what should be stored in a
+        reference bank.
+
+        Otherwise, a Dict with keys:
             top_sequences, top_crf_types         — global intersection ranking
             label_names_aligned                  — (L,) str, 'U' at invalid/unknown pos
             label_names_dealigned                — (n_valid,) str
             regions_aligned, regions_dealigned   — breakpoint region lists
             dominant_subtype, dominant_fraction  — purity stats
-            is_candidate_pure                    — bool
             composition, composition_str         — abstract characterisation
             active_positions                     — string indicating active position range
+            final_decision                       — collapsed call string
         """
         probs = np.asarray(probs, dtype=np.float32)
         if probs.shape != (self.L, self.C):
@@ -410,25 +435,34 @@ class CRFReferenceDecoder:
         mask = np.asarray(query_mask, dtype=np.float32)
 
         # per-position label sequence
-        _, str_path = self._sliding_window(probs)       # (L,)
-        first, last, str_path = self._trim_flanking_to_skip(str_path, mask, skip_label="U")
+        num_path = self._sliding_window(probs)       # (L,)
 
+        first, last, num_path = self._trim_flanking_to_skip(num_path, mask, skip_label="U")
         active_positions = f"{str(first)}-{str(last)}" if first <= last else "none"
-        label_names_aligned = self._overwrite_LTR(
-            label_names_aligned=str_path,
+
+        num_path = self._overwrite_LTR(
+            label_names_aligned=num_path,
             hxb2_to_ata=hxb2_to_ata)
 
-        label_names_dealigned = self._gen_labels_dealigned(
+        if not self.has_bank:
+            return num_path
+
+        # Map subtype/U/LTR integer codes to strings
+        str_path_aligned = np.array(
+            [self.code_to_label[c] for c in num_path], dtype=object
+        )
+
+        str_path_dealigned = self._gen_labels_dealigned(
             mask=mask,
             compactmapout_entry=compactmapout_entry,
-            label_names_aligned=label_names_aligned)
+            label_names_aligned=str_path_aligned)
 
         # breakpoint regions
-        regions_aligned   = self._extract_breakpoints(label_names_aligned,   skip_label="U")
-        regions_dealigned = self._extract_breakpoints(label_names_dealigned, skip_label="U")
+        regions_aligned   = self._extract_breakpoints(str_path_aligned,   skip_label="U")
+        regions_dealigned = self._extract_breakpoints(str_path_dealigned, skip_label="U")
 
         # purity
-        dominant, fraction = self._purity_stats(label_names_dealigned)
+        dominant, fraction = self._purity_stats(str_path_dealigned)
 
         # composition
         total_real  = int(mask.sum())
@@ -440,22 +474,8 @@ class CRFReferenceDecoder:
             else (composition[0] if composition else "")
         )
 
-        if not self.has_bank:
-            return {
-                "label_names_aligned"   : label_names_aligned,
-                "label_names_dealigned" : label_names_dealigned,
-                "regions_aligned"       : regions_aligned,
-                "regions_dealigned"     : regions_dealigned,
-                "active_positions"      : active_positions,
-                "dominant_subtype"      : dominant,
-                "dominant_fraction"     : fraction,
-                "composition"           : composition,
-                "composition_str"       : composition_str,
-            }
-
-
         # global ranking
-        scores  = self._intersection_scores(probs, mask)
+        scores  = self._agreement_scores(num_path, mask)
         top_idx = np.argsort(scores)[::-1][: self.top_k]
 
         top_sequences = [
@@ -474,14 +494,14 @@ class CRFReferenceDecoder:
             dominant=dominant,
             composition=composition,
             top_crf_types=top_crf_types,
-            seq_len=len(label_names_dealigned),
+            seq_len=len(str_path_dealigned),
         )
 
         return {
             "top_sequences"         : top_sequences,
             "top_crf_types"         : top_crf_types,
-            "label_names_aligned"   : label_names_aligned,
-            "label_names_dealigned" : label_names_dealigned,
+            "label_names_aligned"   : str_path_aligned,
+            "label_names_dealigned" : str_path_dealigned,
             "regions_aligned"       : regions_aligned,
             "regions_dealigned"     : regions_dealigned,
             "active_positions"      : active_positions,

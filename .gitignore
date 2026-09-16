@@ -4,6 +4,7 @@ data/output/
 data/archive/
 data/trash/
 data/input/HIV1_PURE_REF.fasta
+data/input_sequences/
 
 # docker/apptainer
 *.sif

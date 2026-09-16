@@ -17,19 +17,25 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("--sbtr_results", type=str, required=True,
                     help="CSV file containing SBTR results for each sample. Sample names must be formatted as <true_subtype>.<etc>.")
+parser.add_argument("--tag", type=str, required=False, default="results",
+                    help="Name of the output file.")
 parser.add_argument("--output_figs", action="store_true",
                     help="If true, output comparison figures")
 parser.add_argument("--out_dir", type=str, required=False, default=None,
                     help="Directory to save results. Default is the parent directory of sbtr_results.")
-parser.add_argument("--breakpoints_csv", type=str,
+parser.add_argument("--seg_bd_csv", type=str,
                     default="/pasteur/helix/projects/mPath/oanoufa/sbtr/data/output/lanl_crf_segments_brokedown_aln.csv",
-                    help="LANL CRF breakpoints reference (alignment coordinate system).")
+                    help="LANL CRF segments reference (alignment coordinate system).")
+parser.add_argument("--seg_csv", type=str,
+                    default="/pasteur/helix/projects/mPath/oanoufa/sbtr/data/output/lanl_crf_segments_aln.csv",
+                    help="LANL CRF segments reference (alignment coordinate system).")
 parser.add_argument("--ci_method", choices=["wilson", "clopper-pearson"], default="wilson",
                     help="95%% CI method for sensitivity/specificity.")
 
 args = parser.parse_args()
 
 sbtr_results = Path(args.sbtr_results)
+tag = args.tag
 output_figs = args.output_figs
 if output_figs:
     print("output_figs set to True, printing figures", flush=True)
@@ -112,11 +118,10 @@ def acceptable_truth_labels(sample_name: str, active_positions, true_label: str,
                              warnings: List[str]) -> Tuple[set, bool, bool]:
     """Only called when true_label is not a pure subtype (not in ST_TO_ID_DICT).
     Returns (accepted_subtypes, excluded)."""
-    raw_token = sample_name.split('.')[0]
-    key = raw_token
+    key = sample_name.split('.')[0]
 
     if key not in segments_by_crf:
-        warnings.append(f"{sample_name}: unrecognized CRF key '{key}' (from '{raw_token}') "
+        warnings.append(f"{sample_name}: unrecognized CRF key '{key}'"
                          "- likely a URF, excluding sample from analysis")
         return set(), True
 
@@ -135,8 +140,48 @@ def acceptable_truth_labels(sample_name: str, active_positions, true_label: str,
     return accepted, False
 
 
-def process_row_results_df(row: pd.Series, segments_by_crf: Dict[str, List[Segment]],
-                            warnings: List[str]) -> pd.Series:
+def compare_true_ref_crf(
+    sample_name, active_positions, ref_best_crf: str, true_crf: str, segments_by_crf: Dict[str, List[Segment]],
+    ) -> Tuple[set, bool, bool]:
+    """Only called when true_label is a CRF and ref_best_crf is a different CRF"""
+
+    m = ACTIVE_POS_RE.match(str(active_positions)) if pd.notna(active_positions) else None
+    if m:
+        start, end = int(m.group(1)), int(m.group(2))
+    else:
+        warnings.append(f"{sample_name}: missing/unparseable active_positions - using full window")
+        start, end = 1, ATA_LEN
+
+    ref_best_crf_seq = []
+    true_crf_seq = []
+    # Reconstruct both subtype sequences (BBBBBBBBCCCCCCCBBBBBB...) then cut to active positions and compare
+    for seg in segments_by_crf[ref_best_crf]:
+        ref_best_crf_seq.extend('/'.join(seg.subtypes) for i in range(seg.start, seg.end + 1))
+
+    for seg in segments_by_crf[true_crf]:
+        true_crf_seq.extend('/'.join(seg.subtypes) for i in range(seg.start, seg.end + 1))
+
+    ref_best_crf_seq = ref_best_crf_seq[start - 1:end]
+    true_crf_seq = true_crf_seq[start - 1:end]
+
+    for i, (ref_subtype, true_subtype) in enumerate(zip(ref_best_crf_seq, true_crf_seq), start=start):
+        # Check if both are lists of one element (can also be a position wiht uncertainty, e.g. 'A1/B' or 'AE/B')
+        if '/' in ref_subtype or '/' in true_subtype:
+            ref_subtypes = set(ref_subtype.split('/'))
+            true_subtypes = set(true_subtype.split('/'))
+            if not ref_subtypes.intersection(true_subtypes):
+                print(f"{sample_name}: WRONG position {i} true {true_subtypes} != ref_best {ref_subtypes} ")
+                return False
+
+    print(f"{sample_name}: CORRECT {true_crf} matches {ref_best_crf} in active positions {active_positions}")
+    return True
+
+
+def process_row_results_df(
+    row: pd.Series,
+    segments_by_crf_bd: Dict[str, List[Segment]],
+    segments_by_crf: Dict[str, List[Segment]],
+    warnings: List[str]) -> pd.Series:
     sample_name = row.sample_name
     final_decision = row.final_decision
     active_positions = row.active_positions
@@ -156,7 +201,7 @@ def process_row_results_df(row: pd.Series, segments_by_crf: Dict[str, List[Segme
         accepted, excluded = {true_label}, False
     else:
         accepted, excluded = acceptable_truth_labels(
-            sample_name, active_positions, true_label, segments_by_crf, warnings
+            sample_name, active_positions, true_label, segments_by_crf_bd, warnings
         )
 
     if excluded:
@@ -185,6 +230,7 @@ def process_row_results_df(row: pd.Series, segments_by_crf: Dict[str, List[Segme
     if status == 'recombinant':
         if true_label in ST_TO_ID_DICT:
             correct = False
+            print(f"{sample_name}: WRONG {true_label} is pure subtype but predicted recombinant {predicted}")
         
         else:
             # Parse predicted CRFs or composition constituents
@@ -194,9 +240,13 @@ def process_row_results_df(row: pd.Series, segments_by_crf: Dict[str, List[Segme
             if true_label in pred_crfs:
                 correct = True
                 print(f"{sample_name}: CORRECT {true_label} in {pred_crfs}")
+
+            elif length == 'full':
+                correct = False
+                print(f"{sample_name}: WRONG {true_label} not in {pred_crfs} and {length}")
             else:
-                # Check if any predicted CRF resolves to an identical subtype set 
-                # in this active window (e.g., 32_06A6 is identical to 06_cpx on 2127-9719 in HXB2 coordinates)
+                # Compare true crf and ref_best_crf in active_positions.
+                correct = compare_true_ref_crf(sample_name, active_positions, ref_best_crf, true_label, segments_by_crf)
 
     return pd.Series({
         "true_label": true_label, "predicted_label": predicted, "status": status,
@@ -247,28 +297,30 @@ def compute_stats(results_df: pd.DataFrame, ci_fn) -> pd.DataFrame:
                 else:
                     tn += 1
 
-        sens = tp / (tp + fn) if (tp + fn) else np.nan
-        spec = tn / (tn + fp) if (tn + fp) else np.nan
-        sens_lo, sens_hi = ci_fn(tp, tp + fn) if (tp + fn) else (np.nan, np.nan)
-        spec_lo, spec_hi = ci_fn(tn, tn + fp) if (tn + fp) else (np.nan, np.nan)
+        sens = round(tp / (tp + fn) * 100, 1) if (tp + fn) else np.nan
+        spec = round(tn / (tn + fp) * 100, 1) if (tn + fp) else np.nan
+
+        sens_lo, sens_hi = np.round(np.array(ci_fn(tp, tp + fn)) * 100, 1) if (tp + fn) else (np.nan, np.nan)
+        spec_lo, spec_hi = np.round(np.array(ci_fn(tn, tn + fp)) * 100, 1) if (tn + fp) else (np.nan, np.nan)
 
         rows.append({
-            "class": cls, "n_truth": tp + fn, "TP": tp, "FN": fn, "TN": tn, "FP": fp,
-            "n_excluded_ambiguous": excluded,
+            "class": cls, "n": tp + fn, "TP": tp, "FP": fp, "FN": fn, "TN": tn,
             "sensitivity": sens, "sens_CI_lo": sens_lo, "sens_CI_hi": sens_hi,
             "specificity": spec, "spec_CI_lo": spec_lo, "spec_CI_hi": spec_hi,
         })
+    print(f"Total excluded samples: {excluded}")
     return pd.DataFrame(rows)
 
 
 if __name__ == "__main__":
 
-    segments_by_crf = load_breakpoints(args.breakpoints_csv)
+    segments_by_crf_bd = load_breakpoints(args.seg_bd_csv)
+    segments_by_crf = load_breakpoints(args.seg_csv)
     sbtr_results_df = pd.read_csv(sbtr_results)
 
     warnings: List[str] = []
     processed = sbtr_results_df.apply(
-        lambda row: process_row_results_df(row, segments_by_crf, warnings), axis=1
+        lambda row: process_row_results_df(row, segments_by_crf_bd, segments_by_crf, warnings), axis=1
     )
     results_df = pd.concat([sbtr_results_df, processed], axis=1)
 
@@ -281,7 +333,7 @@ if __name__ == "__main__":
     ci_fn = wilson_ci if args.ci_method == "wilson" else clopper_pearson_ci
     stats_df = compute_stats(results_df, ci_fn)
 
-    stats_path = out_dir / "sens_spec_by_class.csv"
+    stats_path = out_dir / f"{tag}.csv"
     stats_df.to_csv(stats_path, index=False)
     print(stats_df.to_string(index=False))
 

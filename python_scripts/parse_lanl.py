@@ -1,3 +1,4 @@
+# "parse_lanl.py"
 """Clean and split LANL HIV reference sequences by subtype."""
 
 import re
@@ -383,6 +384,59 @@ def _build_crf26_a5u_a_mask() -> np.ndarray:
     return mask
 
 
+# HXB2 <-> ATA alignment coordinate projection helpers
+def build_hxb2_pos_to_aln_col(hxb2_gapped: str) -> np.ndarray:
+    """Build a 1-indexed lookup: HXB2 position (1..hxb2_len) -> ATA alignment
+    column (1-based).
+
+    Index 0 is unused padding, so the returned array has length
+    ``hxb2_len + 1`` and ``mapping[p]`` gives the alignment column for HXB2
+    position ``p``.
+
+    Parameters
+    ----------
+    hxb2_gapped : the (possibly gapped) HXB2 row from the final ATA alignment
+                  (i.e. ``pure_result[hxb2_id]``).
+    """
+    arr = np.frombuffer(hxb2_gapped.encode(), dtype=np.uint8)
+    # 0-based alignment columns that carry an actual HXB2 base
+    base_cols = np.where(arr != ord('-'))[0]
+    mapping = np.zeros(len(base_cols) + 1, dtype=np.int64)
+    mapping[1:] = base_cols + 1   # store as 1-based alignment columns
+    return mapping
+
+
+def convert_hxb2_df_to_aln(
+    df: pd.DataFrame,
+    hxb2_pos_to_aln: np.ndarray,
+    pos_cols: Tuple[str, ...],
+) -> pd.DataFrame:
+    """Project HXB2 1-based coordinate column(s) of *df* onto ATA alignment
+    1-based column coordinates using *hxb2_pos_to_aln*
+    (see :func:`build_hxb2_pos_to_aln_col`).
+
+    If the resulting frame still has both 'start' and 'end' columns, 'length'
+    is recomputed as ``end - start + 1`` to reflect the (potentially larger,
+    due to insertion columns present in the alignment but absent from HXB2)
+    alignment span.
+    """
+    if df.empty:
+        return df.copy()
+
+    out = df.copy()
+    max_pos = len(hxb2_pos_to_aln) - 1
+    for col in pos_cols:
+        out[col] = out[col].apply(
+            lambda p: int(hxb2_pos_to_aln[int(p)])
+            if 0 <= int(p) <= max_pos else p
+        )
+
+    if 'start' in out.columns and 'end' in out.columns:
+        out['length'] = out['end'] - out['start'] + 1
+
+    return out
+
+
 # Record classification helpers
 def _extract_subtype(record_id: str) -> Optional[str]:
     parts = record_id.split(".")
@@ -455,6 +509,9 @@ def _pure_set_of(
         for part in label.split('/'):
             out |= _pure_set_of(part.strip(), df_by_crf, seen, depth)
         return frozenset(out)
+
+    if label == '0708_mix':
+        return frozenset({'B', 'C'})
 
     key = _crf_df_key(label, df_by_crf)
     if key and key not in seen:
@@ -990,6 +1047,28 @@ if __name__ == "__main__":
 
     # Build per-position label sequences (HXB2 -> alignment)
     hxb2_gapped = pure_result[hxb2_id]
+
+    # Project the HXB2-coordinate segments/breakpoints tables onto ATA
+    # alignment coordinates (same data, expressed as alignment column
+    # indices instead of raw HXB2 genome positions).
+    print("Projecting HXB2-coordinate segments/breakpoints onto ATA alignment coordinates …")
+    hxb2_pos_to_aln = build_hxb2_pos_to_aln_col(hxb2_gapped)
+
+    df_segments_aln = convert_hxb2_df_to_aln(
+        df_segments, hxb2_pos_to_aln, pos_cols=("start", "end")
+    )
+    df_breakpoints_aln = convert_hxb2_df_to_aln(
+        df_breakpoints, hxb2_pos_to_aln, pos_cols=("position",)
+    )
+
+    segments_aln_path    = f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_aln.csv"
+    breakpoints_aln_path = f"{WORKSPACE_PATH}/data/output/lanl_crf_breakpoints_aln.csv"
+    df_segments_aln.to_csv(segments_aln_path, index=False)
+    df_breakpoints_aln.to_csv(breakpoints_aln_path, index=False)
+    print(
+        f"Saved {os.path.basename(segments_aln_path)} and "
+        f"{os.path.basename(breakpoints_aln_path)}\n"
+    )
 
     print("Building CRF label sequences …")
     label_seqs = build_all_crf_label_sequences(df_segments, hxb2_gapped)

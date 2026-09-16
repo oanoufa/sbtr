@@ -1,3 +1,4 @@
+# build_crf_ref_bank.py
 """Build a reference bank of HIV sequences for CRF comparisons."""
 
 import gzip
@@ -13,17 +14,18 @@ from transformers import AutoTokenizer
 from tqdm import tqdm
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqIO.FastaIO import FastaWriter
-from huggingface_hub import login, HfApi
+from huggingface_hub import login
 
 from src.mutator_class import SequenceMutator
 from src import config
 from src.dataset_class import HIVSequenceDataset
 from src.model_class import HFModelForHIVSubtyping
+from src.crf_decoder_class import CRFReferenceDecoder
 
 TOKEN_PATH = config.TOKEN_PATH
 with open(TOKEN_PATH, 'r') as f:
@@ -39,6 +41,7 @@ ATA_LEN            = config.ATA_LEN
 PAD_MULTIPLE_OF    = config.PAD_LEN
 PURE_REF_PATH      = config.PURE_REF_PATH
 VERSION            = config.VERSION
+SEED               = MODEL_CONFIG["seed"]
 
 import argparse
 
@@ -49,19 +52,16 @@ parser.add_argument('--crf_file_path', type=str, required=True,
                     help='FASTA file of CRF aligned to the HIV1 subtype reference alignment.')
 args = parser.parse_args()
 
-
-
-
-
 CRF_FILE_PATH = Path(args.crf_file_path)
-out_dir = Path(WORKSPACE_PATH) / "data" / "model" / "reference_bank"
+out_dir = Path(WORKSPACE_PATH) / "data" / "reference_bank"
 out_dir.mkdir(parents=True, exist_ok=True)
 
 GAG_HXB2 = (790, 2292)
 POL_HXB2 = (2085, 5096)
 PCT_PER_CRF_BANK = config.PCT_PER_CRF_BANK # Adaptive bank size depending on the number of sequences of the CRF
 MIN_PER_CRF_BANK = config.MIN_PER_CRF_BANK # Min bank size for each CRF
-N_TEST           = config.N_TEST # Min test size for each CRF (including one gag and one pol sequence)
+N_TEST           = config.N_TEST # Min test size for each CRF (including one gag and one pol sequence)
+
 
 def _crop_record(rec: SeqRecord, ata_start: int, ata_end: int, suffix: str) -> SeqRecord:
     cropped = rec[ata_start:ata_end]
@@ -69,14 +69,188 @@ def _crop_record(rec: SeqRecord, ata_start: int, ata_end: int, suffix: str) -> S
     cropped.description = ""
     return cropped
 
+
+def _pairwise_hamming_distance(
+    num_paths: np.ndarray,             # (n, L) int8
+    uninformative_codes: Tuple[int, ...],
+) -> np.ndarray:
+    """
+    All-pairs distance matrix over num_path arrays.
+
+    distance(i, j) = 1 - (agreement fraction), computed only over positions
+    informative in *both* sequences (i.e. not U / 5'LTR / 3'LTR in either),
+    mirroring CRFReferenceDecoder._agreement_scores. Pairs with no
+    comparable positions get a fallback distance of 1.0 (treated as
+    maximally divergent) so they don't artificially collapse the
+    farthest-point search.
+    """
+    n, L = num_paths.shape
+    informative = ~np.isin(num_paths, uninformative_codes)  # (n, L) bool
+
+    dist = np.zeros((n, n), dtype=np.float32)
+    for i in range(n - 1):
+        comparable = informative[i][None, :] & informative[i + 1:]                 # (n-i-1, L)
+        agree      = (num_paths[i + 1:] == num_paths[i][None, :]) & comparable      # (n-i-1, L)
+        n_comp     = comparable.sum(axis=1)
+        n_agree    = agree.sum(axis=1)
+
+        d = np.ones(n - i - 1, dtype=np.float32)  # fallback = maximally divergent
+        has_overlap = n_comp > 0
+        d[has_overlap] = 1.0 - (n_agree[has_overlap] / n_comp[has_overlap])
+
+        dist[i, i + 1:] = d
+        dist[i + 1:, i] = d
+
+    return dist
+
+
+def _farthest_point_sampling(
+    dist: np.ndarray,
+    k: int,
+    seed: int = SEED,
+) -> List[int]:
+    """
+    Greedy max-min (farthest-point) sampling over a precomputed distance
+    matrix: iteratively pick the point maximizing its minimum distance to
+    the already-chosen set, so the selection spans maximum divergence.
+    """
+    n = dist.shape[0]
+    if k <= 0:
+        return []
+    if k >= n:
+        return list(range(n))
+
+    rng = random.Random(seed)
+    selected = [rng.randrange(n)]
+    min_dist = dist[selected[0]].copy()
+    min_dist[selected[0]] = -np.inf
+
+    for _ in range(k - 1):
+        nxt = int(np.argmax(min_dist))
+        selected.append(nxt)
+        min_dist = np.minimum(min_dist, dist[nxt])
+        min_dist[selected] = -np.inf
+
+    return selected
+
+
+def _compute_num_paths_for_pool(
+    records: List[SeqRecord],
+    model,
+    tokenizer,
+    device,
+    decoder: CRFReferenceDecoder,
+    hxb2_to_ata: np.ndarray,
+    ata_len: int,
+    n_packed: int,
+    num_subtypes: int,
+    max_length: int,
+    pad_multiple_of: int,
+    num_workers: int,
+    tmp_dir: Path,
+) -> np.ndarray:
+    """
+    Run the subtyping model over `records` and decode each prediction into a
+    per-position label path (num_path) via `decoder.query(...)` (no bank
+    loaded on `decoder`, so it returns the raw num_path array).
+
+    Returns
+    -------
+    np.ndarray, shape (len(records), ata_len), dtype int8 — index-aligned
+    with `records`.
+    """
+    N = len(records)
+    tmp_seqs  = tmp_dir / "_tmp_pool_sequences.npy"
+    tmp_lbls  = tmp_dir / "_tmp_pool_labels.npy"
+    tmp_masks = tmp_dir / "_tmp_pool_masks.npy"
+
+    seq_mm  = np.lib.format.open_memmap(str(tmp_seqs),  mode="w+", dtype=np.uint8,
+                                         shape=(N, ata_len))
+    lbl_mm  = np.lib.format.open_memmap(str(tmp_lbls),  mode="w+", dtype=np.uint8,
+                                         shape=(N, ata_len, n_packed))
+    mask_mm = np.lib.format.open_memmap(str(tmp_masks), mode="w+", dtype=bool,
+                                         shape=(N, ata_len))
+
+    zero_lbl_packed = np.zeros((ata_len, n_packed), dtype=np.uint8)
+    zero_mask = np.ones(ata_len, dtype=bool)
+
+    is_real_list: List[np.ndarray] = []
+    names: List[str] = []
+    for i, rec in enumerate(records):
+        raw = str(rec.seq).upper()
+        is_real = np.array([c != '-' for c in raw], dtype=bool)
+        is_real_list.append(is_real)
+        names.append(rec.id)
+
+        arr = np.frombuffer(raw.encode(), dtype=np.uint8).copy()
+        arr[arr == ord("-")] = ord("N")
+        seq_mm[i]  = arr
+        lbl_mm[i]  = zero_lbl_packed
+        mask_mm[i] = zero_mask
+
+    seq_mm.flush()
+    lbl_mm.flush()
+    mask_mm.flush()
+
+    metadata = pd.DataFrame({"sequence_name": names, "split": "crf_pool"})
+    pool_dataset = HIVSequenceDataset(
+        seq_mm=seq_mm, lbl_mm=lbl_mm, mask_mm=mask_mm, metadata=metadata,
+        tokenizer=tokenizer, n_subtypes=num_subtypes, hxb2_to_ata=hxb2_to_ata,
+        max_length=max_length, pad_multiple_of=pad_multiple_of, split="crf_pool",
+    )
+    pool_loader = DataLoader(
+        pool_dataset, batch_size=1, shuffle=False, num_workers=num_workers,
+    )
+
+    num_paths = np.zeros((N, ata_len), dtype=np.int8)
+    with torch.no_grad():
+        for i, batch in tqdm(
+            enumerate(pool_loader), total=len(pool_loader),
+            mininterval=30, desc="Scoring CRF pool for diversity selection",
+        ):
+            logits = model(
+                batch["input_ids"].to(device),
+                attention_mask=batch["attention_mask"].to(device),
+            )["subtype_logits"]
+            pred_probs = torch.sigmoid(logits).squeeze(0).cpu().numpy()
+            probs = pred_probs[:ata_len]
+            probs = probs / (probs.sum(axis=-1, keepdims=True) + 1e-9)
+
+            num_path = decoder.query(
+                sample_name=names[i],
+                probs=probs,
+                compactmapout_entry=[],
+                hxb2_to_ata=hxb2_to_ata,
+                query_mask=is_real_list[i],
+            )
+            num_paths[i] = num_path
+
+    del seq_mm, lbl_mm, mask_mm
+    os.remove(tmp_seqs)
+    os.remove(tmp_lbls)
+    os.remove(tmp_masks)
+
+    return num_paths
+
+
 def build_crf_reference_bank(
-    crf_ref_path: str,
-    pct_per_crf:  float = 0.10,
-    min_per_crf:  int = 3,
-    n_test:       int = 5,
-    seed:         int = 42,
-    mutator:      Optional[SequenceMutator] = None,
-    hxb2_to_ata:  Optional[np.ndarray] = None) -> tuple:
+    crf_ref_path:    str,
+    model,
+    tokenizer,
+    device,
+    hxb2_to_ata:     np.ndarray,
+    ata_len:         int,
+    num_subtypes:    int,
+    max_length:      int,
+    pad_multiple_of: int,
+    num_workers:     int,
+    tmp_dir:         Path,
+    pct_per_crf:     float = 0.10,
+    min_per_crf:     int = 1,
+    n_test:          int = 5,
+    seed:            int = SEED,
+    mutator:         Optional[SequenceMutator] = None,
+) -> tuple:
     """
     Build a CRF reference bank from a FASTA file.
 
@@ -86,29 +260,28 @@ def build_crf_reference_bank(
          - ``Ref.01_AE.CN.05.FJ051.DQ859178``    (with ``Ref.`` prefix)
          - ``01_AE.TH.2007.AA028a_wg7.JX447031``  (without prefix)
     3. Group by CRF type; deduplicate on accession (first occurrence kept).
-    4. Retain round(pct_per_crf * n_unique) sequences per CRF (floored at
-       min_per_crf), computed on the unaugmented unique count, by random
-       sampling.
-
-    Parameters
-    crf_ref_path : str
-        Path to the CRF reference FASTA file.
-    pct_per_crf : float
-        Fraction of each CRF's unique (pre-augmentation) sequence count to
-        retain in the bank (default 0.10).
-    min_per_crf : int
-        Minimum number of sequences to retain per CRF type, regardless of
-        percentage (default 3).
-    seed : int
-        Random seed for reproducibility (default 42).
+    4. Augment each CRF's pool (if needed) so it has >= n_bank_target + n_test
+       sequences. n_bank_target = round(pct_per_crf * n_unique), floored at
+       min_per_crf, computed on the unaugmented unique count.
+    5. Score every pool sequence with the subtyping model and decode it
+       (no bank attached) into a per-position label path (num_path), using
+       CRFReferenceDecoder so bank entries are generated with exactly the
+       same logic used at inference time.
+    6. For each CRF, greedily select n_bank_target bank sequences via
+       farthest-point sampling over num_path Hamming distance (ignoring
+       U/LTR positions), so the bank spans maximum observed divergence.
+       Remaining ("leftover") sequences are randomly split into a test set,
+       unchanged from the previous behaviour.
 
     Returns
-    list[SeqRecord]
-        Randomly sampled CRF reference sequences.
+    -------
+    reference_bank  : np.ndarray (R, ata_len) int8 — num_path per bank entry.
+    reference_names : np.ndarray (R,) str
+    test_set        : list[SeqRecord]
     """
 
     #  1. Load sequences
-    random.seed(seed)
+    random.seed(SEED)
     print(f"\nBuilding CRF reference bank from: {crf_ref_path}")
     all_records: list[SeqRecord] = list(SeqIO.parse(crf_ref_path, "fasta"))
     if not all_records:
@@ -118,15 +291,10 @@ def build_crf_reference_bank(
     #  2. Parse CRF type + accession
     _REF_PREFIX = re.compile(r"^Ref\.")
 
-    def parse_id(record_id: str) -> tuple[str, str]:
+    def parse_id(record_id: str) -> tuple[str, str, str]:
         """
         Strip the optional ``Ref.`` prefix, then return
-        (first field, last field) as (crf_type, accession).
-
-        Examples
-        --------
-        ``'Ref.01_AE.CN.05.FJ051.DQ859178'``    -> ``('01_AE', 'DQ859178')``
-        ``'01_AE.TH.2007.AA028a_wg7.JX447031'`` -> ``('01_AE', 'JX447031')``
+        (clean_id, first field, last field) as (clean, crf_type, accession).
         """
         clean = _REF_PREFIX.sub("", record_id)
         parts = clean.split(".")
@@ -149,13 +317,9 @@ def build_crf_reference_bank(
     for crf, acc_map in crf_groups.items():
         print(f"    {crf:<12s}: {len(acc_map):3d} unique sequence(s)")
 
-    #  4. Random sampling - dynamic count per CRF (pct_per_crf, min_per_crf)
-    bank:     list[SeqRecord] = []
-    test_set: list[SeqRecord] = []
-
-    if hxb2_to_ata is not None:
-        gag_ata_start, gag_ata_end = int(hxb2_to_ata[GAG_HXB2[0]]), int(hxb2_to_ata[GAG_HXB2[1]])
-        pol_ata_start, pol_ata_end = int(hxb2_to_ata[POL_HXB2[0]]), int(hxb2_to_ata[POL_HXB2[1]])
+    #  4. Build (possibly augmented) pools + dynamic bank-size targets
+    crf_pool_records:     Dict[str, List[SeqRecord]] = {}
+    n_bank_target_by_crf: Dict[str, int] = {}
 
     for crf_type, acc_map in crf_groups.items():
         records = list(acc_map.values())
@@ -171,37 +335,94 @@ def build_crf_reference_bank(
                 records, target_count=target_total, subtype_key='avg'
             )
 
-        chosen   = random.sample(records, min(n_bank_target, len(records)))
-        leftover = [r for r in records if r.id not in {r2.id for r2 in chosen}]
-        test     = random.sample(leftover, min(n_test, len(leftover)))
+        crf_pool_records[crf_type]     = records
+        n_bank_target_by_crf[crf_type] = n_bank_target
 
-        bank.extend(chosen)
+    #  5. Flatten pools (index-aligned, not id-keyed, to avoid any risk of
+    #     accession collisions across CRF groups) and score with the model.
+    all_pool_records: List[SeqRecord] = []
+    crf_index_ranges: Dict[str, Tuple[int, int]] = {}
+    for crf_type, records in crf_pool_records.items():
+        start = len(all_pool_records)
+        all_pool_records.extend(records)
+        crf_index_ranges[crf_type] = (start, len(all_pool_records))
+
+    n_packed = int(np.ceil(num_subtypes / 8))
+    decoder  = CRFReferenceDecoder(bank_path=None)
+    uninformative_codes = (decoder.code_u, decoder.code_5ltr, decoder.code_3ltr)
+
+    print(
+        f"\n  Scoring {len(all_pool_records)} pool sequence(s) across "
+        f"{len(crf_pool_records)} CRF type(s) for diversity-based selection..."
+    )
+    pool_num_paths = _compute_num_paths_for_pool(
+        all_pool_records, model=model, tokenizer=tokenizer, device=device,
+        decoder=decoder, hxb2_to_ata=hxb2_to_ata, ata_len=ata_len,
+        n_packed=n_packed, num_subtypes=num_subtypes, max_length=max_length,
+        pad_multiple_of=pad_multiple_of, num_workers=num_workers, tmp_dir=tmp_dir,
+    )
+
+    #  6. Diversity-based bank selection (farthest-point sampling) + random
+    #     test-set selection from the leftover pool (unchanged behaviour).
+    bank_names:     List[str] = []
+    bank_num_paths: List[np.ndarray] = []
+    test_set:       List[SeqRecord]  = []
+
+    gag_ata_start, gag_ata_end = int(hxb2_to_ata[GAG_HXB2[0]]), int(hxb2_to_ata[GAG_HXB2[1]])
+    pol_ata_start, pol_ata_end = int(hxb2_to_ata[POL_HXB2[0]]), int(hxb2_to_ata[POL_HXB2[1]])
+
+    for crf_type, records in crf_pool_records.items():
+        start, end    = crf_index_ranges[crf_type]
+        num_paths     = pool_num_paths[start:end]                  # (n_pool, L)
+        n_bank_target = n_bank_target_by_crf[crf_type]
+        n_bank        = min(n_bank_target, len(records))
+
+        if n_bank > 0:
+            dist = _pairwise_hamming_distance(num_paths, uninformative_codes)
+            chosen_idx = _farthest_point_sampling(dist, n_bank, seed=seed)
+        else:
+            chosen_idx = []
+
+        chosen_ids = {records[i].id for i in chosen_idx}
+        for i in chosen_idx:
+            bank_names.append(records[i].id)
+            bank_num_paths.append(num_paths[i])
+
+        leftover = [r for r in records if r.id not in chosen_ids]
+        test     = random.sample(leftover, min(n_test, len(leftover)))
 
         test_full = test[:3]
         test_set.extend(test_full)
 
-        if hxb2_to_ata is not None:
-            if len(test) >= 4:
-                test_set.append(_crop_record(test[3], gag_ata_start, gag_ata_end, "gag"))
-            if len(test) >= 5:
-                test_set.append(_crop_record(test[4], pol_ata_start, pol_ata_end, "pol"))
-        else:
-            test_set.extend(test[3:])
+        if len(test) >= 4:
+            test_set.append(_crop_record(test[3], gag_ata_start, gag_ata_end, "gag"))
+        if len(test) >= 5:
+            test_set.append(_crop_record(test[4], pol_ata_start, pol_ata_end, "pol"))
 
-        print(f"    {crf_type:<12s}: bank {len(chosen)}/{len(records)}, test {len(test)}/{len(leftover)} leftover")
+        print(
+            f"    {crf_type:<12s}: bank {len(chosen_idx)}/{len(records)} "
+            f"(diversity-selected), test {len(test)}/{len(leftover)} leftover"
+        )
+
+    reference_bank = (
+        np.stack(bank_num_paths, axis=0).astype(np.int8)
+        if bank_num_paths else np.zeros((0, ata_len), dtype=np.int8)
+    )
+    reference_names = np.array(bank_names)
 
     print(
-        f"\n  CRF reference bank ready : {len(bank)} sequences "
-        f"({len(crf_groups)} CRF type(s), {pct_per_crf:.0%} per type, min {min_per_crf})"
+        f"\n  CRF reference bank ready : {len(bank_names)} sequences "
+        f"({len(crf_groups)} CRF type(s), {pct_per_crf:.0%} per type, min {min_per_crf}, "
+        f"diversity-selected via farthest-point sampling)"
     )
     print(
         f"  CRF test set ready       : {len(test_set)} sequences "
         f"({len(crf_groups)} CRF type(s), ≤{n_test} per type)"
     )
-    return bank, test_set
+    return reference_bank, reference_names, test_set
+
 
 if __name__ == "__main__":
-    n_packed = int(np.ceil(NUM_SUBTYPES / 8))
 
     # Load HXB2 reference
     print(f"Loading HXB2 reference from: {PURE_REF_PATH}")
@@ -232,112 +453,36 @@ if __name__ == "__main__":
     model.eval()
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
-    # CRF reference bank
-    # Tokenize each CRF reference sequence directly (no HIVSequenceDataset wrapper needed).  We construct the attention mask ourselves from pad_token_id so we never rely on the tokenizer returning it.
+    # CRF reference bank (diversity-selected) + test set
     print(f"\nBuilding CRF reference bank from: {CRF_FILE_PATH}", flush=True)
-    sequence_bank, test_set = build_crf_reference_bank(
-            crf_ref_path=CRF_FILE_PATH,
-            pct_per_crf=PCT_PER_CRF_BANK,
-            min_per_crf=MIN_PER_CRF_BANK,
-            n_test=N_TEST,
-            mutator=mutator,
-            hxb2_to_ata=hxb2_to_ata,
-        )
-    N = len(sequence_bank)
-
-    seq_names = [rec.id for rec in sequence_bank]
-    metadata  = pd.DataFrame({
-        "sequence_name": seq_names,
-        "split":         "crf_bank",
-    })
-    generated_meta_path = out_dir / f"metadata.tsv"
-    metadata_df = (
-        metadata[metadata["split"] == "crf_bank"]
-        .reset_index(drop=True)
+    reference_bank, reference_names, test_set = build_crf_reference_bank(
+        crf_ref_path=CRF_FILE_PATH,
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        hxb2_to_ata=hxb2_to_ata,
+        ata_len=ATA_LEN,
+        num_subtypes=NUM_SUBTYPES,
+        max_length=MAX_LENGTH,
+        pad_multiple_of=PAD_MULTIPLE_OF,
+        num_workers=MODEL_CONFIG["num_workers"],
+        tmp_dir=out_dir,
+        pct_per_crf=PCT_PER_CRF_BANK,
+        min_per_crf=MIN_PER_CRF_BANK,
+        n_test=N_TEST,
+        mutator=mutator,
     )
+
+    print(f"  Reference bank  : {reference_bank.shape}  dtype={reference_bank.dtype}")
+
+    # Record keeping
+    metadata = pd.DataFrame({"sequence_name": reference_names, "split": "crf_bank"})
+    generated_meta_path = out_dir / "metadata.tsv"
     metadata.to_csv(generated_meta_path, sep="\t", index=False)
     print(f"\nGenerated: {generated_meta_path}")
 
-    # Allocate memmaps
-    out_seqs  = out_dir / f"sequences_v{VERSION}.npy"
-    out_lbls  = out_dir / f"labels_v{VERSION}.npy"
-    out_masks = out_dir / f"loss_masks_v{VERSION}.npy"
-
-    seq_mm  = np.lib.format.open_memmap(str(out_seqs),  mode="w+", dtype=np.uint8,
-                                         shape=(N, ATA_LEN))
-    lbl_mm  = np.lib.format.open_memmap(str(out_lbls),  mode="w+", dtype=np.uint8,
-                                         shape=(N, ATA_LEN, n_packed))
-    mask_mm = np.lib.format.open_memmap(str(out_masks), mode="w+", dtype=bool,
-                                         shape=(N, ATA_LEN))
-
-    print(f"\nAllocated memmaps:")
-    print(f"  sequences  : {out_seqs}   shape={seq_mm.shape}")
-    print(f"  labels     : {out_lbls}  shape={lbl_mm.shape}")
-    print(f"  loss_masks : {out_masks} shape={mask_mm.shape}")
-
-    # Fill memmaps
-    zero_lbl_packed = np.zeros((ATA_LEN, n_packed), dtype=np.uint8)
-    zero_mask = np.ones(ATA_LEN,             dtype=bool)
-    gap_masks = {}
-
-    for i, rec in enumerate(sequence_bank):
-        raw = str(rec.seq).upper()
-        
-        is_real = np.array([c != '-' for c in raw], dtype=bool)
-        gap_masks[rec.id.split()[0]] = is_real
-
-        arr = np.frombuffer(raw.encode(), dtype=np.uint8).copy()
-        arr[arr == ord("-")] = ord("N")
-        seq_mm[i] = arr
-        lbl_mm[i]  = zero_lbl_packed
-        mask_mm[i] = zero_mask
-
-    seq_mm.flush()
-    lbl_mm.flush()
-    mask_mm.flush()
-
-    bank_dataset = HIVSequenceDataset(
-        seq_mm=seq_mm, lbl_mm=lbl_mm, mask_mm=mask_mm, metadata=metadata,
-        tokenizer=tokenizer, n_subtypes=NUM_SUBTYPES,
-        max_length=MAX_LENGTH, pad_multiple_of=PAD_MULTIPLE_OF, split="crf_bank",
-    )
-    bank_loader = DataLoader(
-        bank_dataset, batch_size=1,
-        shuffle=False, num_workers=MODEL_CONFIG["num_workers"],
-    )
-    print(f"Bank samples: {len(bank_dataset)}")
-
-    crf_names:    List[str]        = []
-    crf_profiles: List[np.ndarray] = []   # each (MAX_LENGTH, NUM_SUBTYPES) float32
-
-    # Store the number of times the crf was seen so that each CRF is only computed at most X times
-
-    with torch.no_grad():
-        for i, batch in tqdm(
-            enumerate(bank_loader),
-            total=len(bank_loader),
-            mininterval=30,
-            desc="Generating CRF bank",
-        ):
-
-            sample_name = metadata_df.iloc[i]["sequence_name"]
-            # Forward pass
-            logits     = model(batch["input_ids"].to(device), attention_mask=batch["attention_mask"].to(device))["subtype_logits"]
-            pred_probs = torch.sigmoid(logits).squeeze(0).cpu().numpy()  # (MAX_LENGTH, NUM_SUBTYPES)
-            # Trim to ATA length and decode
-            probs    = pred_probs[:ATA_LEN]
-            probs = probs / (probs.sum(axis=-1, keepdims=True) + 1e-9)
-            is_real  = gap_masks[sample_name]
-            probs = probs * is_real[:, None]
-            crf_names.append(sample_name)
-            crf_profiles.append(probs.astype(np.float32))
-
-    reference_bank = np.stack(crf_profiles, axis=0).astype(np.float16)  # (R, ATA_LEN, NUM_SUBTYPES)
-    reference_names = np.array(crf_names)
-    print(f"  Reference bank  : {reference_bank.shape}  "
-          f"dtype={reference_bank.dtype}")
-
-    # Save the reference bank to a compressed file for later use in inference.
+    # Save the reference bank (num_path per sequence) to a compressed file
+    # for later use in inference.
     out_path = out_dir / "crf_reference_bank.npz"
     if out_path.exists():
         os.remove(out_path)
@@ -360,30 +505,3 @@ if __name__ == "__main__":
             record.id = str(record.id).replace("Ref.", "")
             writer.write_record(record)
     print(f"\nSaved test set to: {out_path_test}")
-
-
-    os.remove(out_seqs)
-    os.remove(out_lbls)
-    os.remove(out_masks)
-
-    print(f"Uploading crf_ref_bank to HF")
-    api = HfApi()
-
-    # Upload a single file
-    api.upload_file(
-        path_or_fileobj=out_path,
-        path_in_repo="crf_reference_bank.npz",
-        repo_id="oanoufa/sbtr_necessary_data",
-        repo_type="dataset",
-    )
-
-    HIV1_COMBINED_REF = config.COMBINED_REF_PATH
-    with open(HIV1_COMBINED_REF, "rb") as f_in:
-        compressed_buffer = io.BytesIO(gzip.compress(f_in.read()))
-
-    api.upload_file(
-        path_or_fileobj=compressed_buffer,
-        path_in_repo="HIV1_COMBINED_REF.fasta.gz",  # Use .gz extension
-        repo_id="oanoufa/sbtr_necessary_data",
-        repo_type="dataset",
-    )

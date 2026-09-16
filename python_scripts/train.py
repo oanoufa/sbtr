@@ -256,7 +256,7 @@ model_to_save = model.module if isinstance(model, torch.nn.DataParallel) else mo
 model_to_save.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
 tokenizer.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
 
-# print(f"\nPushing model to HuggingFace")
-# push to Hugging Face repository
-# tokenizer.push_to_hub("oanoufa/sbtr_ntv3_650M")
-# model.push_to_hub("oanoufa/sbtr_ntv3_650M")
+print(f"\nPushing model to HuggingFace")
+push to Hugging Face repository
+tokenizer.push_to_hub("oanoufa/sbtr_ntv3_650M")
+model.push_to_hub("oanoufa/sbtr_ntv3_650M")

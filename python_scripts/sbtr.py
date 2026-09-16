@@ -129,17 +129,22 @@ device = "cuda" if torch.cuda.is_available() and gpu else "cpu"
 print(f"Using device: {device}", flush=True)
 device = torch.device(device) if isinstance(device, str) else device
 
-# Import reference FASTA file from hf dataset
-_combined_ref_gz = hf_hub_download(
-    repo_id="oanoufa/sbtr_necessary_data",
-    filename="HIV1_COMBINED_REF.fasta.gz",
-    repo_type="dataset",
-)
-COMBINED_REF_PATH = Path(_combined_ref_gz).with_suffix("")
-if not COMBINED_REF_PATH.exists():
-    with gzip.open(_combined_ref_gz, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
-        f_out.write(f_in.read())
+# # Import reference FASTA file from hf dataset
+# _combined_ref_gz = hf_hub_download(
+#     repo_id="oanoufa/sbtr_necessary_data",
+#     filename="HIV1_COMBINED_REF.fasta.gz",
+#     repo_type="dataset",
+# )
+# COMBINED_REF_PATH = Path(_combined_ref_gz).with_suffix("")
+# if not COMBINED_REF_PATH.exists():
+#     with gzip.open(_combined_ref_gz, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
+#         f_out.write(f_in.read())
+COMBINED_REF_PATH = Path(config.COMBINED_REF_PATH)
+gz_path = COMBINED_REF_PATH.with_name(COMBINED_REF_PATH.name + ".gz")
 
+if not COMBINED_REF_PATH.exists():
+    with gzip.open(gz_path, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
+        f_out.write(f_in.read())
 
 def parse_compactmapout(
     compactmapout_path: Path,
@@ -438,6 +443,8 @@ if __name__ == "__main__":
             if rec.id not in reference_ids
         ]
 
+    # Delete
+    COMBINED_REF_PATH.unlink()
     # Clean the potential info added at the beginning of the rec id (r_B+K+A3_2015 became 4ins:5192g-5197a,etc|r_B+K+A3_2015) but stay robust to the eventual presence of other |
     for rec in records_ali:
         rec.id = ''.join(rec.id.split('|')[1:]) if 'ins:' in rec.id else rec.id
@@ -551,11 +558,13 @@ if __name__ == "__main__":
         .reset_index(drop=True)
     )
 
-    bank_path = hf_hub_download(
-        repo_id="oanoufa/sbtr_necessary_data",
-        filename="crf_reference_bank.npz",
-        repo_type="dataset",
-    )
+    # bank_path = hf_hub_download(
+    #     repo_id="oanoufa/sbtr_necessary_data",
+    #     filename="crf_reference_bank.npz",
+    #     repo_type="dataset",
+    # )
+
+    bank_path = f"{WORKSPACE_PATH}/data/reference_bank/crf_reference_bank.npz"
 
     crf_decoder = CRFReferenceDecoder(bank_path=bank_path)
     # Model forward pass

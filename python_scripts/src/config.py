@@ -7,11 +7,11 @@ from typing import Tuple
 WORKSPACE_PATH = "/pasteur/helix/projects/mPath/oanoufa/sbtr"
 PURE_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_PURE_REF.fasta"
 CRF_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_CRF_REF.fasta"
-COMBINED_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_COMBINED_REF.fasta"
+COMBINED_REF_PATH = f"{WORKSPACE_PATH}/data/HIV1_COMBINED_REF.fasta"
 TOKEN_PATH = f"{WORKSPACE_PATH}/hftoken.txt"
 
 # SEQUENCE GENERATION PARAMETERS
-N_SEQ = 1000000
+N_SEQ = 2000000
 RP = 0.95
 TEST_SET_SIZE = 1000
 MAX_YEAR = 2028
@@ -20,14 +20,14 @@ MIN_SEG_LEN = 50 # Min length of segments of a subtype in a recombinant sequence
 MAX_SUBTYPES = 7
 MAX_BREAKPOINTS = 10
 PARTIAL_FRAC = 0.30 # Fraction of sequences that are partial (i.e., not full-length)
-MIN_FRAG_LEN = 400 # Min length of a partial sequence
+MIN_FRAG_LEN = 300 # Min length of a partial sequence (prot is around 300bp)
 DIV_WINDOW_SIZE = 200
 MIN_DIV = 15
 MAX_RETRIES = 50
 
 # CRF REF BANK PARAMETERS
-PCT_PER_CRF_BANK = 0.10 # Adaptive bank size depending on the number of sequences of the CRF
-MIN_PER_CRF_BANK = 3 # Min bank size for each CRF
+PCT_PER_CRF_BANK = 0.30 # Adaptive bank size depending on the number of sequences of the CRF
+MIN_PER_CRF_BANK = 2 # Min bank size for each CRF
 N_TEST = 5 # Test size for each CRF (including one gag and one pol sequence)
 
 # DECODER PARAMETERS
@@ -63,7 +63,7 @@ MODEL_CONFIG = {
 
     # Training
     "batch_size": 8,
-    "num_steps_training": 10000,
+    "num_steps_training": 100000,
     # Only batch_size * num_steps_training samples will be used for training (randomly sampled from the training split)
     "log_every_n_steps": 1000,
     "learning_rate": 1e-4,

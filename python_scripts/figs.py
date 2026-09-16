@@ -14,8 +14,9 @@ import sys
 import re
 import os
 from collections import defaultdict
-from itertools import groupby
+from itertools import groupby, product
 import plotly.io as pio
+import plotly.colors as pc
 import matplotlib.patches as mpatches
 pio.defaults.default_format = "png"
 from src import config
@@ -1201,6 +1202,102 @@ def plot_time_per_10k(csv_path, out_path=None):
     fig.write_html(out_path)
 
 
+def load_subtyping_csv(path, tool_name):
+    """Load one tool's per-subtype confusion-matrix CSV into a tidy dataframe."""
+    df = pd.read_csv(path, skiprows=2, header=None)
+    df.columns = [
+        "class", "n", "TP", "FP", "FN", "TN",
+        "sensitivity", "sens_CI_lo", "sens_CI_hi",
+        "specificity", "spec_CI_lo", "spec_CI_hi",
+    ]
+    df["Tool"] = tool_name
+    return df
+
+
+def wilson_ci(k, n, z=1.96):
+    """Wilson score interval for a proportion (in %). Not in the raw CSV, so we
+    compute it ourselves for precision (PPV)."""
+    if n == 0:
+        return np.nan, np.nan
+    p = k / n
+    denom = 1 + z**2 / n
+    centre = p + z**2 / (2 * n)
+    adj = z * np.sqrt((p * (1 - p) + z**2 / (4 * n)) / n)
+    return (centre - adj) / denom * 100, (centre + adj) / denom * 100
+
+
+def add_precision(df):
+    """Add PPV (precision, %) and its Wilson 95% CI to a tool dataframe."""
+    df = df.copy()
+    denom = df["TP"] + df["FP"]
+    df["precision"] = np.where(denom > 0, df["TP"] / denom * 100, np.nan)
+    ci = df.apply(lambda r: wilson_ci(r["TP"], r["TP"] + r["FP"]), axis=1)
+    df["prec_CI_lo"] = [c[0] for c in ci]
+    df["prec_CI_hi"] = [c[1] for c in ci]
+    return df
+
+def forest_plot(tool_dfs, metric="sensitivity", title=None, order_by="n"):
+    """
+    tool_dfs : dict {tool_name: dataframe}
+        Each dataframe needs class, n, and <metric>/<metric[:4]>_CI_lo/<metric[:4]>_CI_hi
+        columns (from load_subtyping_csv, plus add_precision if metric="precision").
+    metric   : "sensitivity", "specificity", or "precision"
+    order_by : "n" (descending, default) or "name" (alphabetical)
+
+    Returns a plotly Figure: one dot per tool per subtype, dodged horizontally,
+    with vertical 95% CI whiskers. x-axis labels include each subtype's n.
+    """
+    combined = pd.concat(tool_dfs.values(), ignore_index=True)
+    tools = list(tool_dfs.keys())
+
+    n_per_subtype = combined.drop_duplicates("class").set_index("class")["n"]
+    subtypes = (
+        n_per_subtype.sort_values(ascending=False).index.tolist()
+        if order_by == "n"
+        else sorted(n_per_subtype.index.tolist())
+    )
+    x_pos = {s: i for i, s in enumerate(subtypes)}
+
+    n_tools = len(tools)
+    dodge_width = 0.9
+    offset_step = dodge_width / max(n_tools - 1, 1)
+    palette = pc.qualitative.Plotly if n_tools <= 10 else pc.qualitative.Alphabet
+
+    low_col, high_col = f"{metric[:4]}_CI_lo", f"{metric[:4]}_CI_hi"
+
+    fig = go.Figure()
+    for i, tool in enumerate(tools):
+        df = tool_dfs[tool].set_index("class").reindex(subtypes)
+        offset = (i - (n_tools - 1) / 2) * offset_step
+        fig.add_trace(
+            go.Scatter(
+                x=[x_pos[s] + offset for s in subtypes],
+                y=df[metric].values,
+                mode="markers",
+                marker=dict(size=8, color=palette[i % len(palette)]),
+                error_y=dict(
+                    type="data", symmetric=False,
+                    array=(df[high_col] - df[metric]).values,
+                    arrayminus=(df[metric] - df[low_col]).values,
+                    thickness=1.5, width=3,
+                ),
+                name=tool,
+            )
+        )
+
+    fig.update_xaxes(
+        tickmode="array", tickvals=list(range(len(subtypes))),
+        ticktext=[f"{s} - {n_per_subtype[s]}" for s in subtypes],
+        title_text="Subtype (n)",
+    )
+    fig.update_yaxes(range=[0, 105], title_text=f"{metric} (%)")
+    fig.update_layout(
+        legend_title_text="Tool",
+        title=title or f"{metric} comparison across tools",
+        margin=dict(l=40, r=80, t=70, b=40),
+    )
+    return fig
+
 if __name__ == "__main__":
     breakpoints_path = f"{workspace_path}/data/output/lanl_crf_breakpoints_hxb2.csv"
     df_bp = pd.read_csv(breakpoints_path)
@@ -1208,13 +1305,16 @@ if __name__ == "__main__":
     df_bp.rename(columns={
         'position' : 'pos'
     }, inplace=True)
-    df_bp.sort_values(by=['crf'],
-                    key=lambda s: s.str.extract(r'CRF(\d+)', expand=False).astype(int),
-                    inplace=True,
-                    ascending=False)
-    
-    visualize_breakpoints(df_bp,
-                          save_path=f"{workspace_path}/figs/breakpoint_distribution_with_genes.html")
+    df_bp.sort_values(
+        by=['crf'],
+        key=lambda s: s.str.extract(r'^(\d+)', expand=False).astype(int),
+        inplace=True,
+        ascending=False
+    )
+        
+    visualize_breakpoints(
+        df_bp,
+        save_path=f"{workspace_path}/figs/breakpoint_distribution_with_genes.html")
     
     st_to_seq_dict = defaultdict(list)
     ref_fasta_path = (f"{workspace_path}/data/output/HIV1_PURE_REF.fasta")
@@ -1241,8 +1341,9 @@ if __name__ == "__main__":
 
     save_path_ref_dist = f"{workspace_path}/figs/reference_subtype_distribution_with_year.html"
 
-    fig = plot_reference_distribution_with_year(subtype_data,
-                                      save_path=save_path_ref_dist)
+    fig = plot_reference_distribution_with_year(
+        subtype_data,
+        save_path=save_path_ref_dist)
 
     # rate array for diversity
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)
@@ -1250,7 +1351,7 @@ if __name__ == "__main__":
     names = subtypes_with_data + ['avg']
     diversity_arrays = {}
     for name in names:
-        rate_array_path = f"{workspace_path}/data/input/diversity/site_rates_{name}.npy"
+        rate_array_path = f"{workspace_path}/data/diversity/site_rates_{name}.npy"
         diversity_array = np.load(rate_array_path)
         diversity_arrays[name] = diversity_array
 
@@ -1269,3 +1370,25 @@ if __name__ == "__main__":
     processing_times = f"{workspace_path}/data/processing_times.csv"
     save_path_time = f"{workspace_path}/figs/processing_time_per_10k.html"
     plot_time_per_10k(processing_times, save_path_time)
+
+    # subtyping results comparison
+    tools=['comet', 'regav3', 'jphmm', 'sbtr']
+    genes=['full', 'prot', 'rt']
+    base_path = f"{workspace_path}/data/input_sequences/regav3_testset"
+
+    tool_paths = {
+        f"{tool}_{gene}": f"{base_path}/{tool}_{gene}_results.csv" 
+        for tool, gene in product(tools, genes)
+    }
+
+    tool_dfs = {name: load_subtyping_csv(path, name) for name, path in tool_paths.items()}
+
+    save_path = f"{workspace_path}/figs/sensitivity_comparison.html"
+    fig_sens = forest_plot(tool_dfs, metric="sensitivity", title="Sensitivity by subtype and tool")
+    fig_sens.write_html(save_path)
+
+    save_path = f"{workspace_path}/figs/precision_comparison.html"
+    tool_dfs_ppv = {name: add_precision(df) for name, df in tool_dfs.items()}
+    fig_ppv = forest_plot(tool_dfs_ppv, metric="precision", title="Precision by subtype and tool")
+    fig_ppv.write_html(save_path)
+    print('Sensitivity and precision comparison output')

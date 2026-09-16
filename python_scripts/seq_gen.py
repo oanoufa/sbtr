@@ -62,6 +62,7 @@ MIN_DIV       = config.MIN_DIV
 MAX_RETRIES   = config.MAX_RETRIES
 TEST_SET_SIZE = config.TEST_SET_SIZE
 VERSION       = config.VERSION
+GENES_RAW     = config.GENES_RAW
 
 out_dir    = f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}"
 out_seqs   = f"{out_dir}/sequences_{N_SEQ}_{RP}.npy"
@@ -100,7 +101,7 @@ GENES_HXB2 = config.GENES_RAW
 # Initialize uuid with SEED
 random.seed(SEED)
 
-# Sequence Class used to store both the sequence and some metadata
+# Sequence class used to store both the sequence and some metadata
 class Sequence:
     def __init__(self,
                  seq: str,
@@ -516,11 +517,16 @@ def place_breakpoints(seg_subtypes, parents, ata_len,
         return breakpoints
 
 # Fragment cropping
-def sample_fragment_window(ata_len: int, min_frag_len: int, rng) -> tuple[int, int]:
+def sample_fragment_window(
+    ata_len: int,
+    min_frag_len: int,
+    rng,
+    hxb2_to_ata,
+    ) -> tuple[int, int]:
     """
     Sample a (start, end) fragment window.
 
-    Start is sampled uniformly in [0, ata_len - min_frag_len].
+    Start is sampled uniformly in [5'LTR end, ata_len - (3'LTR_start + min_frag_len)].
     Length is then sampled log-uniformly in [min_frag_len, ata_len - start].
 
     Returns
@@ -528,8 +534,13 @@ def sample_fragment_window(ata_len: int, min_frag_len: int, rng) -> tuple[int, i
     (start, end) : int, int
         Half-open interval [start, end) in ATA coordinates.
     """
-    max_start = ata_len - min_frag_len
-    start = int(rng.integers(0, max_start + 1)) if max_start > 0 else 0
+    LTR5_end_hxb2 = GENES_RAW["5'LTR"][1]
+    LTR3_start_hxb2 = GENES_RAW["3'LTR"][0]
+    LTR5_end_ata = hxb2_to_ata[LTR5_end_hxb2]
+    LTR3_start_ata = hxb2_to_ata[LTR3_start_hxb2]
+
+    max_start = LTR3_start_ata - min_frag_len
+    start = int(rng.integers(LTR5_end_ata, max_start + 1)) if max_start > 0 else 0
     max_len = ata_len - start
     log_len = rng.uniform(
         np.log(min_frag_len),
@@ -555,6 +566,7 @@ def _worker(cfg):
     ns         = params["n_subtypes"]
     min_seg    = params["min_seg_len"]
     st_id      = cfg["pure_st_to_id_dict"]
+    hxb2_to_ata= cfg["hxb2_to_ata"]
     n_st_total = len(st_id)
     ata_len    = cfg["ata_len"]
     site_rates_dict = cfg["site_rates_dict"]
@@ -692,7 +704,7 @@ def _worker(cfg):
         # contribute nothing to the loss.
         frag_start, frag_end = 0, ata_len
         if partial_frac > 0.0 and py_rng.random() < partial_frac:
-            frag_start, frag_end = sample_fragment_window(ata_len, min_frag_len, rng)
+            frag_start, frag_end = sample_fragment_window(ata_len, min_frag_len, rng, hxb2_to_ata)
 
             # Zero out everything outside the window
             seq_row[:frag_start]  = ord("-")
@@ -819,7 +831,7 @@ if __name__ == "__main__":
         dict(worker_id=wid, row_start=int(c[0]), row_end=int(c[-1])+1,
              worker_seed=seeds[wid], out_seqs=out_seqs, out_labels=out_labels, out_masks=out_masks,
              st_to_seq_dict=dict(st_to_seq_dict), pure_st_list=pure_st_list,
-             pure_st_to_id_dict=ST_TO_ID_DICT, params=params,
+             pure_st_to_id_dict=ST_TO_ID_DICT, hxb2_to_ata=hxb2_to_ata, params=params,
              site_rates_dict=site_rates_dict,
              sub_probs_dict=sub_probs_dict,
              ata_len=ata_len,

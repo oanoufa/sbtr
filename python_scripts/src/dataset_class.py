@@ -107,9 +107,14 @@ class HIVSequenceDataset(Dataset):
         
         # Mask 5', 3' and DRMs
         drm_mask = torch.ones(self.max_length, dtype=torch.long)
-        for hxb2_pos in config.MASKED_POSITIONS_HXB2:
+        sorted_positions = sorted(config.MASKED_POSITIONS_HXB2)
+        for i, hxb2_pos in enumerate(sorted_positions):
             ata_pos = self.hxb2_to_ata[hxb2_pos]
             drm_mask[ata_pos] = 0
+            if i + 1 < len(sorted_positions) and sorted_positions[i + 1] == hxb2_pos + 1:
+                next_ata_pos = self.hxb2_to_ata[sorted_positions[i + 1]]
+                if next_ata_pos - ata_pos > 1:
+                    drm_mask[ata_pos + 1:next_ata_pos] = 0
 
 
         # Mask N tokens
