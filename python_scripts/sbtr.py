@@ -129,17 +129,12 @@ device = "cuda" if torch.cuda.is_available() and gpu else "cpu"
 print(f"Using device: {device}", flush=True)
 device = torch.device(device) if isinstance(device, str) else device
 
-# # Import reference FASTA file from hf dataset
-# _combined_ref_gz = hf_hub_download(
-#     repo_id="oanoufa/sbtr_necessary_data",
-#     filename="HIV1_COMBINED_REF.fasta.gz",
-#     repo_type="dataset",
-# )
-# COMBINED_REF_PATH = Path(_combined_ref_gz).with_suffix("")
-# if not COMBINED_REF_PATH.exists():
-#     with gzip.open(_combined_ref_gz, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
-#         f_out.write(f_in.read())
-COMBINED_REF_PATH = Path(config.COMBINED_REF_PATH)
+# Points to the directory where this python file is located
+SCRIPT_DIR = Path(__file__).resolve().parent
+WORKSPACE_PATH = SCRIPT_DIR.parents[0]
+
+BANK_PATH = Path(f"{WORKSPACE_PATH}/data/reference_bank/crf_reference_bank.npz")
+COMBINED_REF_PATH = Path(f"{WORKSPACE_PATH}/data/HIV1_COMBINED_REF.fasta")
 gz_path = COMBINED_REF_PATH.with_name(COMBINED_REF_PATH.name + ".gz")
 
 if not COMBINED_REF_PATH.exists():
@@ -275,12 +270,18 @@ def process_single_sample_worker(
     )
     best_ref_crf = crf_result["top_sequences"][0]["name"]
     best_ref_distance = crf_result["top_crf_types"][0]["max_score"]
+    active_site_equivalents = [
+        eq["crf_type"]
+        for eq in crf_result.get("active_site_equivalents", [])
+    ]
+    active_site_equivalents_str = '+'.join(active_site_equivalents)
 
     result_line = (
         f"{sample_name},"
         f"{crf_result['composition_str']}, {crf_result['active_positions']},"
         f"{crf_result['dominant_subtype']},{crf_result['dominant_fraction']:.4f},"
-        f"{best_ref_crf},{best_ref_distance:.4f},{top5_ref},{crf_result['final_decision']}\n"
+        f"{best_ref_crf},{best_ref_distance:.4f},{top5_ref},{active_site_equivalents_str},"
+        f"{crf_result['final_decision']}\n"
     )
 
     # 3. Region output formatting
@@ -395,7 +396,6 @@ def global_results(
     print(f"Summary JSON      {summary_json_path}", flush=True)
 
 
-
 if __name__ == "__main__":
 
     n_packed = int(np.ceil(NUM_SUBTYPES / 8))
@@ -444,7 +444,8 @@ if __name__ == "__main__":
         ]
 
     # Delete
-    COMBINED_REF_PATH.unlink()
+    if COMBINED_REF_PATH.exists():
+        COMBINED_REF_PATH.unlink()
     # Clean the potential info added at the beginning of the rec id (r_B+K+A3_2015 became 4ins:5192g-5197a,etc|r_B+K+A3_2015) but stay robust to the eventual presence of other |
     for rec in records_ali:
         rec.id = ''.join(rec.id.split('|')[1:]) if 'ins:' in rec.id else rec.id
@@ -558,15 +559,8 @@ if __name__ == "__main__":
         .reset_index(drop=True)
     )
 
-    # bank_path = hf_hub_download(
-    #     repo_id="oanoufa/sbtr_necessary_data",
-    #     filename="crf_reference_bank.npz",
-    #     repo_type="dataset",
-    # )
 
-    bank_path = f"{WORKSPACE_PATH}/data/reference_bank/crf_reference_bank.npz"
-
-    crf_decoder = CRFReferenceDecoder(bank_path=bank_path)
+    crf_decoder = CRFReferenceDecoder(bank_path=BANK_PATH)
     # Model forward pass
     print("\nRunning model inference...", flush=True)
 
@@ -636,6 +630,7 @@ if __name__ == "__main__":
             "composition,active_positions,"
             "dominant_subtype,dominant_fraction,"
             "ref_best_crf,ref_best_score,ref_top5,"
+            "active_site_equivalents,"
             "final_decision"
             "\n"
         )

@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from scipy.ndimage import uniform_filter1d
-
+import csv
 import numpy as np
 from . import config
 
@@ -22,7 +22,7 @@ START_5LTR = config.START_5LTR
 NEF_3LTR = config.NEF_3LTR
 ATA_LEN = config.ATA_LEN
 LTR_LABELS = {"5'LTR", "3'LTR"}
-
+CRF_SEGMENTS_BD_ATA = config.CRF_SEGMENTS_BD_ATA
 
 class CRFReferenceDecoder:
 
@@ -59,6 +59,7 @@ class CRFReferenceDecoder:
                 )
             self.crf_types        = [self._parse_crf_type(n) for n in self.names]
             self.top_k            = TOP_K
+            self._load_crf_segment_matrix(config.CRF_SEGMENTS_BD_ATA)
 
         # Base subtype vocabulary size, excluding the synthetic 'U'/LTR
         # labels that may already have been registered by a previous
@@ -156,6 +157,89 @@ class CRFReferenceDecoder:
                 start, current = i, label_names[i]
         regions.append((start + 1, len(label_names), str(current)))
         return regions
+
+
+    def _load_crf_segment_matrix(self, csv_path: str) -> None:
+        rows = []
+        with open(csv_path, newline="") as fh:
+            rows = list(csv.DictReader(fh))
+
+        crfs = list(dict.fromkeys(row["crf"] for row in rows))
+        crf_to_idx = {crf: i for i, crf in enumerate(crfs)}
+
+        # Split ambiguous labels: "A1/B" -> {"A1", "B"}.
+        # Labels without "/" remain singleton sets.
+        atomic_subtypes = sorted({
+            part
+            for row in rows
+            if row["subtype"] != "U"
+            for part in row["subtype"].split("/")
+        })
+        atomic_to_bit = {
+            subtype: (1 << i)
+            for i, subtype in enumerate(atomic_subtypes)
+        }
+
+        def subtype_to_mask(subtype: str) -> np.uint32:
+            if subtype == "U":
+                return np.uint32(0)
+
+            mask = 0
+            for part in subtype.split("/"):
+                mask |= atomic_to_bit[part]
+
+            return np.uint32(mask)
+
+        # uint32 is sufficient unless you have >32 atomic subtype labels.
+        matrix = np.zeros((len(crfs), self.L), dtype=np.uint32)
+
+        for row in rows:
+            i = crf_to_idx[row["crf"]]
+            start = int(row["start"]) - 1
+            end = int(row["end"])
+            matrix[i, start:end] = subtype_to_mask(row["subtype"])
+
+        self.segment_crfs = np.asarray(crfs, dtype=object)
+        self.segment_crf_to_idx = crf_to_idx
+        self.segment_matrix = matrix
+
+    def _active_site_equivalents(
+        self,
+        best_crf_type: str,
+        query_mask: np.ndarray,
+        min_agreement: float = 1.0,
+    ) -> List[Dict]:
+        best_idx = self.segment_crf_to_idx.get(best_crf_type)
+        if best_idx is None:
+            return []
+
+        best_masks = self.segment_matrix[best_idx]
+        active = np.asarray(query_mask, dtype=bool).copy()
+
+        # Mask 0 represents CSV subtype U.
+        active &= (best_masks != 0)
+
+        n_active = int(active.sum())
+        if n_active == 0:
+            return []
+
+        # Compatible if subtype sets overlap:
+        # e.g. A1/B & A1 != 0, and A1/B & B != 0.
+        compatible = (
+            (self.segment_matrix & best_masks[None, :]) != 0
+        )
+
+        agreement = compatible[:, active].mean(axis=1)
+
+        return [
+            {
+                "crf_type": str(self.segment_crfs[i]),
+                "agreement": float(score),
+                "n_active_informative": n_active,
+            }
+            for i, score in enumerate(agreement)
+            if i != best_idx and score >= min_agreement
+        ]
 
     def _purity_stats(
         self,
@@ -360,7 +444,7 @@ class CRFReferenceDecoder:
           "recombinant.<comp>.<partial/full>.<len>.unassigned"                          recombinant with no CRF match over crf_assign_thr
         """
 
-        is_pure = len(composition) <= 1
+        is_pure = len(composition) <= 1 and 'AE' not in composition
         is_partial =  seq_len < self.partial_thr
         comp_str = "+".join(composition)
         crf_candidates = [
@@ -490,6 +574,13 @@ class CRFReferenceDecoder:
 
         top_crf_types = self._aggregate_by_type(self.crf_types, scores, self.top_k)
 
+        best_crf_type = top_crf_types[0]["crf_type"]
+        active_site_equivalents = self._active_site_equivalents(
+            best_crf_type=best_crf_type,
+            query_mask=mask,
+            min_agreement=1.0, # complete match
+        )
+
         final_decision = self._final_decision(
             dominant=dominant,
             composition=composition,
@@ -500,6 +591,7 @@ class CRFReferenceDecoder:
         return {
             "top_sequences"         : top_sequences,
             "top_crf_types"         : top_crf_types,
+            "active_site_equivalents": active_site_equivalents,
             "label_names_aligned"   : str_path_aligned,
             "label_names_dealigned" : str_path_dealigned,
             "regions_aligned"       : regions_aligned,

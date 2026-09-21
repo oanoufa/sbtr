@@ -40,6 +40,7 @@ for table_idx, dataset_type in tables_map.items():
                 tool_slug = re.sub(r'[^a-zA-Z0-9]', '', current_tool.lower())
                 print(f"Found {tool_slug}", flush=True)
                 df = pd.DataFrame(rows_data, columns=columns)
+                df['class'] = df['class'].str.replace('CRF', '', regex=False)
                 df.to_csv(f"{WORKSPACE_PATH}/data/input_sequences/regav3_testset/{tool_slug}_{dataset_type}_results.csv", index=False)
                 rows_data = []
             current_tool = cells[1].strip()
@@ -57,4 +58,5 @@ for table_idx, dataset_type in tables_map.items():
     if current_tool and rows_data:
         tool_slug = re.sub(r'[^a-zA-Z0-9]', '', current_tool.lower())
         df = pd.DataFrame(rows_data, columns=columns)
+        df['class'] = df['class'].str.replace('CRF', '', regex=False)
         df.to_csv(f"{WORKSPACE_PATH}/data/input_sequences/regav3_testset/{tool_slug}_{dataset_type}_results.csv", index=False)

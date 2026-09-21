@@ -4,7 +4,9 @@ import torch
 import pandas as pd
 import os
 import sys
+import gzip
 from Bio import SeqIO
+from pathlib import Path
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
@@ -43,13 +45,20 @@ os.makedirs(MODEL_CONFIG["metrics_dir"], exist_ok=True)
 
 if __name__ == "__main__":
 
-    print(f"Loading combined reference from: {COMBINED_REF_PATH}", flush=True)
+    combined_ref_path = Path(COMBINED_REF_PATH)
+    if combined_ref_path.suffix != ".gz":
+        combined_ref_path = combined_ref_path.with_suffix(combined_ref_path.suffix + ".gz")
+
+    print(f"Loading combined reference from: {combined_ref_path}", flush=True)
     hxb2_ata_seq = None
-    for i, rec in enumerate(SeqIO.parse(str(COMBINED_REF_PATH), "fasta")):
-        if i == 0:
-            hxb2_ata_seq = str(rec.seq).upper()
-            print(f"  HXB2 record id : {rec.id}")
-            break
+
+    with gzip.open(combined_ref_path, "rt") as gz_file:
+        for i, rec in enumerate(SeqIO.parse(gz_file, "fasta")):
+            if i == 0:
+                hxb2_ata_seq = str(rec.seq).upper()
+                print(f"  HXB2 record id : {rec.id}")
+                break
+
     if hxb2_ata_seq is None:
         sys.exit("ERROR: combined reference FASTA is empty.")
 
@@ -166,7 +175,9 @@ if __name__ == "__main__":
             map_location=device,
             weights_only=True,
         )
-        load_result = model.load_state_dict(checkpoint["model_state_dict"]) # ,strict=False)
+        state_dict = checkpoint["model_state_dict"]
+        state_dict = {k: v for k, v in state_dict.items() if "rotary_embedding.cos_cached" not in k and "rotary_embedding.sin_cached" not in k}
+        load_result = model.load_state_dict(state_dict) # ,strict=False)
         if load_result.missing_keys or load_result.unexpected_keys:
             print(f"  WARNING - missing keys: {load_result.missing_keys}")
             print(f"  WARNING - unexpected keys: {load_result.unexpected_keys}")
@@ -175,6 +186,8 @@ if __name__ == "__main__":
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         best_val_f1 = checkpoint.get("val_f1", 0.0)
         last_step = checkpoint["step"]
+        curr_train_df = pd.read_csv(train_metrics_dir, sep='\t')
+        last_step = curr_train_df['step'].max()
         print(f"Loaded checkpoint and resuming at step {last_step} (best_val_f1={best_val_f1:.4f})", flush=True)
     else:
         last_step = 0
@@ -256,7 +269,7 @@ model_to_save = model.module if isinstance(model, torch.nn.DataParallel) else mo
 model_to_save.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
 tokenizer.save_pretrained(MODEL_CONFIG["checkpoint_dir"])
 
+# push to Hugging Face repository
 print(f"\nPushing model to HuggingFace")
-push to Hugging Face repository
 tokenizer.push_to_hub("oanoufa/sbtr_ntv3_650M")
 model.push_to_hub("oanoufa/sbtr_ntv3_650M")

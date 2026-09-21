@@ -1236,67 +1236,62 @@ def add_precision(df):
     df["prec_CI_hi"] = [c[1] for c in ci]
     return df
 
-def forest_plot(tool_dfs, metric="sensitivity", title=None, order_by="n"):
+def forest_grid(tool_dfs, tools, genes, save_path, metrics=("sensitivity", "precision"), order_by="n", subtypes=None):
     """
-    tool_dfs : dict {tool_name: dataframe}
-        Each dataframe needs class, n, and <metric>/<metric[:4]>_CI_lo/<metric[:4]>_CI_hi
-        columns (from load_subtyping_csv, plus add_precision if metric="precision").
-    metric   : "sensitivity", "specificity", or "precision"
-    order_by : "n" (descending, default) or "name" (alphabetical)
+    tool_dfs : dict {f"{tool}_{gene}": dataframe}
+    tools    : tool names, in display/legend/color order
+    genes    : gene names, one column per gene
+    metrics  : one row per metric
+    subtypes : optional list of subtype labels to keep; None = plot every subtype found
 
-    Returns a plotly Figure: one dot per tool per subtype, dodged horizontally,
-    with vertical 95% CI whiskers. x-axis labels include each subtype's n.
+    Returns rows=metrics x cols=genes, grouped bars (no CI) per tool per subtype.
     """
-    combined = pd.concat(tool_dfs.values(), ignore_index=True)
-    tools = list(tool_dfs.keys())
 
-    n_per_subtype = combined.drop_duplicates("class").set_index("class")["n"]
-    subtypes = (
-        n_per_subtype.sort_values(ascending=False).index.tolist()
-        if order_by == "n"
-        else sorted(n_per_subtype.index.tolist())
+    n_colors = len(tools)
+    palette = COLOR_SCHEME if n_colors <= len(COLOR_SCHEME) else pc.qualitative.Alphabet
+    color = {tool: palette[i % len(palette)] for i, tool in enumerate(tools)}
+
+    fig = make_subplots(
+        rows=len(metrics), cols=len(genes), shared_xaxes=True, shared_yaxes=True,
+        subplot_titles=[f"{metric} - {gene}" for metric in metrics for gene in genes],
+        vertical_spacing=0.1, horizontal_spacing=0.04,
     )
-    x_pos = {s: i for i, s in enumerate(subtypes)}
 
-    n_tools = len(tools)
-    dodge_width = 0.9
-    offset_step = dodge_width / max(n_tools - 1, 1)
-    palette = pc.qualitative.Plotly if n_tools <= 10 else pc.qualitative.Alphabet
+    for row, metric in enumerate(metrics, start=1):
+        for col, gene in enumerate(genes, start=1):
+            gene_tool_dfs = {tool: tool_dfs[f"{tool}_{gene}"] for tool in tools}
+            combined = pd.concat(gene_tool_dfs.values(), ignore_index=True)
+            n_per_subtype = combined.drop_duplicates("class").set_index("class")["n"]
 
-    low_col, high_col = f"{metric[:4]}_CI_lo", f"{metric[:4]}_CI_hi"
-
-    fig = go.Figure()
-    for i, tool in enumerate(tools):
-        df = tool_dfs[tool].set_index("class").reindex(subtypes)
-        offset = (i - (n_tools - 1) / 2) * offset_step
-        fig.add_trace(
-            go.Scatter(
-                x=[x_pos[s] + offset for s in subtypes],
-                y=df[metric].values,
-                mode="markers",
-                marker=dict(size=8, color=palette[i % len(palette)]),
-                error_y=dict(
-                    type="data", symmetric=False,
-                    array=(df[high_col] - df[metric]).values,
-                    arrayminus=(df[metric] - df[low_col]).values,
-                    thickness=1.5, width=3,
-                ),
-                name=tool,
+            available = n_per_subtype.index.tolist()
+            keep = [s for s in subtypes if s in available] if subtypes else available
+            ordered = (
+                n_per_subtype.loc[keep].sort_values(ascending=False).index.tolist()
+                if order_by == "n" else sorted(keep)
             )
-        )
+            x_labels = [f"{s} - {n_per_subtype[s]}" for s in ordered]
 
-    fig.update_xaxes(
-        tickmode="array", tickvals=list(range(len(subtypes))),
-        ticktext=[f"{s} - {n_per_subtype[s]}" for s in subtypes],
-        title_text="Subtype (n)",
-    )
-    fig.update_yaxes(range=[0, 105], title_text=f"{metric} (%)")
+            for i, tool in enumerate(tools):
+                df = gene_tool_dfs[tool].set_index("class").reindex(ordered)
+                fig.add_trace(
+                    go.Bar(
+                        x=x_labels, y=df[metric].values,
+                        marker_color=color[tool],
+                        name=tool, legendgroup=tool, showlegend=(row == 1 and col == 1),
+                    ),
+                    row=row, col=col,
+                )
+            fig.update_yaxes(range=[0, 105], row=row, col=col)
+
     fig.update_layout(
-        legend_title_text="Tool",
-        title=title or f"{metric} comparison across tools",
+        barmode="group",
+        height=350 * len(metrics), width=450 * len(genes),
+        legend_title_text="Tool", title="Subtyping tool comparison",
         margin=dict(l=40, r=80, t=70, b=40),
     )
-    return fig
+
+    print(f"Grid metrics comparison saved at {save_path}")
+    fig.write_html(save_path)
 
 if __name__ == "__main__":
     breakpoints_path = f"{workspace_path}/data/output/lanl_crf_breakpoints_hxb2.csv"
@@ -1380,15 +1375,13 @@ if __name__ == "__main__":
         f"{tool}_{gene}": f"{base_path}/{tool}_{gene}_results.csv" 
         for tool, gene in product(tools, genes)
     }
+    subtypes=['A1', 'B', 'C', '01_AE', '02_AG', '06_cpx', '14_BG']
+    save_path = f"{workspace_path}/figs/metrics_comparison_grid.html"
+    tool_dfs = {
+        name: add_precision(load_subtyping_csv(path, name))
+        for name, path in tool_paths.items()
+    }
 
-    tool_dfs = {name: load_subtyping_csv(path, name) for name, path in tool_paths.items()}
-
-    save_path = f"{workspace_path}/figs/sensitivity_comparison.html"
-    fig_sens = forest_plot(tool_dfs, metric="sensitivity", title="Sensitivity by subtype and tool")
-    fig_sens.write_html(save_path)
-
-    save_path = f"{workspace_path}/figs/precision_comparison.html"
-    tool_dfs_ppv = {name: add_precision(df) for name, df in tool_dfs.items()}
-    fig_ppv = forest_plot(tool_dfs_ppv, metric="precision", title="Precision by subtype and tool")
-    fig_ppv.write_html(save_path)
-    print('Sensitivity and precision comparison output')
+    forest_grid(
+        tool_dfs, tools=tools, genes=genes, save_path=save_path,
+        metrics=["sensitivity", "precision"], subtypes=subtypes)

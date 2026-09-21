@@ -221,16 +221,17 @@ def process_row_results_df(
     # 2. Evaluate correctness
     correct = False
 
-    if status == 'pure':
+    if status == 'pure' or predicted == 'AE':
         # Pure predictions are correct if predicted subtype is in accepted set
         # (e.g., pred 'A1' in accepted {'AE', 'A1'} for partial 01_AE gag)
         correct = (predicted in accepted)
-        print(f"{sample_name}: CORRECT {predicted} in {accepted}")
+        decision = 'CORRECT' if correct else 'WRONG'
+        print(f"{sample_name}: {decision} - Predicted {predicted} while accepted is {accepted}")
 
-    if status == 'recombinant':
+    elif status == 'recombinant':
         if true_label in ST_TO_ID_DICT:
             correct = False
-            print(f"{sample_name}: WRONG {true_label} is pure subtype but predicted recombinant {predicted}")
+            print(f"{sample_name}: WRONG - {true_label} is pure subtype but predicted recombinant {predicted}")
         
         else:
             # Parse predicted CRFs or composition constituents
@@ -239,11 +240,11 @@ def process_row_results_df(
             # Check direct match on true label
             if true_label in pred_crfs:
                 correct = True
-                print(f"{sample_name}: CORRECT {true_label} in {pred_crfs}")
+                print(f"{sample_name}: CORRECT - {true_label} in {pred_crfs}")
 
             elif length == 'full':
                 correct = False
-                print(f"{sample_name}: WRONG {true_label} not in {pred_crfs} and {length}")
+                print(f"{sample_name}: WRONG - {true_label} not in {pred_crfs} and {length}")
             else:
                 # Compare true crf and ref_best_crf in active_positions.
                 correct = compare_true_ref_crf(sample_name, active_positions, ref_best_crf, true_label, segments_by_crf)
@@ -332,6 +333,8 @@ if __name__ == "__main__":
 
     ci_fn = wilson_ci if args.ci_method == "wilson" else clopper_pearson_ci
     stats_df = compute_stats(results_df, ci_fn)
+    # rename AE to 01_AE
+    stats_df['class'] = stats_df['class'].replace('AE', '01_AE')
 
     stats_path = out_dir / f"{tag}.csv"
     stats_df.to_csv(stats_path, index=False)

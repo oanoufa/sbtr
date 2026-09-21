@@ -9,9 +9,10 @@ PURE_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_PURE_REF.fasta"
 CRF_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_CRF_REF.fasta"
 COMBINED_REF_PATH = f"{WORKSPACE_PATH}/data/HIV1_COMBINED_REF.fasta"
 TOKEN_PATH = f"{WORKSPACE_PATH}/hftoken.txt"
+CRF_SEGMENTS_BD_ATA=f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_brokedown_aln.csv"
 
 # SEQUENCE GENERATION PARAMETERS
-N_SEQ = 2000000
+N_SEQ = 1000000
 RP = 0.95
 TEST_SET_SIZE = 1000
 MAX_YEAR = 2028
@@ -19,7 +20,7 @@ ATA_LEN = 11561 # max length of sequences in the dataset is (11954) (NOW 16980) 
 MIN_SEG_LEN = 50 # Min length of segments of a subtype in a recombinant sequence (in ATA positions)
 MAX_SUBTYPES = 7
 MAX_BREAKPOINTS = 10
-PARTIAL_FRAC = 0.30 # Fraction of sequences that are partial (i.e., not full-length)
+PARTIAL_FRAC = 0.70 # Fraction of sequences that are partial (i.e., not full-length)
 MIN_FRAG_LEN = 300 # Min length of a partial sequence (prot is around 300bp)
 DIV_WINDOW_SIZE = 200
 MIN_DIV = 15
@@ -65,7 +66,7 @@ MODEL_CONFIG = {
     "batch_size": 8,
     "num_steps_training": 100000,
     # Only batch_size * num_steps_training samples will be used for training (randomly sampled from the training split)
-    "log_every_n_steps": 1000,
+    "log_every_n_steps": 10000,
     "learning_rate": 1e-4,
     "weight_decay": 0.01,
     "warmup_proportion": 0.05,  # 5% of training steps for warmup
@@ -76,7 +77,7 @@ MODEL_CONFIG = {
     "embed_layer": -1, # Which layer of the backbone to use for embeddings
 
     # Validation
-    "validate_every_n_steps": 5000,
+    "validate_every_n_steps": 50000,
     "max_val_batches": 500,
 
     # Inference
@@ -194,7 +195,7 @@ GENE_COLORS = {
     "tat1": "#f7b6d2", "tat2": "#f7b6d2", "rev1": "#dbdb8d", "rev2": "#dbdb8d"
 }
 
-COLOR_SCHEME = ['#072C4B', '#F28089', '#71cddd']
+COLOR_SCHEME = ['#072C4B', '#F28089','#71cddd', "#E69F00"]
 
 
 # DRM and LTR masks

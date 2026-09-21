@@ -70,17 +70,24 @@ def _mask_from_regions(regions: List[Tuple[int, int, str]], length: int) -> np.n
 def compare_regions(region_dict_1: Dict[str, List[Tuple[int, int, str]]],
                     region_dict_2: Dict[str, List[Tuple[int, int, str]]],
                     ltr_regions_dict: Dict[str, List[Tuple[int, int, str]]]
-                    ) -> Tuple[Dict[str, float], Dict[str, bool]]:
+                    ) -> Tuple[Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Dict[str, int]]]:
     """
-    Compare two dicts of regions and output a matching score (ratio of matching positions) for each sample.
+    Compare two dicts of regions and output a matching score (ratio of matching positions) for each sample,
+    plus per-subtype confusion counts aggregated over all samples.
+
+    region_dict_2 is treated as the reference ("true") labels and region_dict_1 as the predicted labels
+    for the purpose of the per-subtype TP/FP/FN/TN counts (1 count = 1 position).
 
     Returns:
         matching_scores: sample_name -> matching_score (0.0 to 1.0)
         is_full: sample_name -> True if the sequence is full-length (> FULL_LENGTH_THRESHOLD), else False
+        is_pure: sample_name -> True if the sample name indicates a pure (non-recombinant) sample
+        confusion: subtype -> {"TP": int, "FP": int, "FN": int, "TN": int}, aggregated over all samples
     """
     matching_scores = {}
     is_full = {}
     is_pure = {}
+    confusion: Dict[str, Dict[str, int]] = {}
     for sample_name in region_dict_1:
         if sample_name not in region_dict_2:
             print(f"No regions for sample {sample_name} in second dict", flush=True)
@@ -111,7 +118,20 @@ def compare_regions(region_dict_1: Dict[str, List[Tuple[int, int, str]]],
             is_full[sample_name] = seq_len > FULL_LENGTH_THRESHOLD
             is_pure[sample_name] = 'p_' in sample_name
 
-    return matching_scores, is_full, is_pure
+            # Per-subtype confusion counts (region_dict_2 = reference, region_dict_1 = predicted)
+            pred = seq_1[:n][valid]
+            true = seq_2[:n][valid]
+            subtypes_here = set(np.unique(true)) | set(np.unique(pred))
+            for subtype in subtypes_here:
+                is_t = (true == subtype)
+                is_p = (pred == subtype)
+                c = confusion.setdefault(subtype, {"TP": 0, "FP": 0, "FN": 0, "TN": 0})
+                c["TP"] += int(np.sum(is_t & is_p))
+                c["FP"] += int(np.sum(~is_t & is_p))
+                c["FN"] += int(np.sum(is_t & ~is_p))
+                c["TN"] += int(np.sum(~is_t & ~is_p))
+
+    return matching_scores, is_full, is_pure, confusion
 
 def compute_stats(scores: List[float]) -> Tuple[float, float, float, float, float]:
     """Return avg, median, std, ci_low, ci_high for a list of scores."""
@@ -220,6 +240,29 @@ def merge_ltr_regions(
 
     return merged_dict
 
+def compute_subtype_metrics(confusion: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, float]]:
+    """
+    Compute sensitivity (recall) and precision for each subtype from aggregated TP/FP/FN/TN counts.
+    Returns NaN for a metric when its denominator is 0 (subtype never present as reference/prediction).
+    """
+    metrics = {}
+    for subtype, c in confusion.items():
+        tp, fp, fn = c["TP"], c["FP"], c["FN"]
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
+        precision = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
+        metrics[subtype] = {"sensitivity": sensitivity, "precision": precision}
+    return metrics
+
+def write_subtype_rows(f, method_name: str, confusion: Dict[str, Dict[str, int]]):
+    """Write one row per subtype with confusion counts and derived sensitivity/precision."""
+    metrics = compute_subtype_metrics(confusion)
+    for subtype in sorted(confusion):
+        c = confusion[subtype]
+        m = metrics[subtype]
+        sens = "NA" if np.isnan(m["sensitivity"]) else f"{m['sensitivity']:.4f}"
+        prec = "NA" if np.isnan(m["precision"]) else f"{m['precision']:.4f}"
+        f.write(f"{method_name},{subtype},{c['TP']},{c['FP']},{c['FN']},{c['TN']},{sens},{prec}\n")
+
 def write_general_row(f, method_name: str, scores: Dict[str, float], is_full: Dict[str, bool], is_pure: Dict[str, bool]):
     row = [method_name]
     for i, wanted_bool in enumerate((None, True, False, True, False)):
@@ -262,21 +305,23 @@ if __name__ == "__main__":
     if true_regions:
         compare_to_true = True
         true_regions_dict = get_regions_dict(true_regions)
-        matching_scores_sbtr_true, is_full_sbtr_true, is_pure_sbtr_true = compare_regions(
+        matching_scores_sbtr_true, is_full_sbtr_true, is_pure_sbtr_true, confusion_sbtr_true = compare_regions(
             sbtr_regions_dict, true_regions_dict, merged_ltr_regions_dict)
-        matching_scores_jphmm_true, is_full_jphmm_true, is_pure_jphmm_true = compare_regions(
+        matching_scores_jphmm_true, is_full_jphmm_true, is_pure_jphmm_true, confusion_jphmm_true = compare_regions(
             jphmm_regions_dict, true_regions_dict, merged_ltr_regions_dict)
     else:
         print(f"True labels were not given, only comparing match between sbtr and jphmm", flush=True)
         compare_to_true = False
 
-    matching_scores_sbtr_jphmm, is_full_sbtr_jphmm, is_pure_sbtr_jphmm = compare_regions(
+    matching_scores_sbtr_jphmm, is_full_sbtr_jphmm, is_pure_sbtr_jphmm, confusion_sbtr_jphmm = compare_regions(
         sbtr_regions_dict, jphmm_regions_dict,merged_ltr_regions_dict)
 
     print(f"Comparing {len(matching_scores_sbtr_jphmm.keys())} samples", flush=True)
     # csv files path
     ms_per_sample_path = out_dir / "matching_scores_per_sample.csv"
     ms_general_path = out_dir / "matching_scores_general.csv"
+    ms_per_subtype_path = out_dir / "matching_scores_per_subtype.csv"
+    subtype_header = "methods_compared,subtype,TP,FP,FN,TN,sensitivity,precision\n"
 
     # header shared by both branches, extended with full/partial breakdown columns
     general_header = (
@@ -297,6 +342,12 @@ if __name__ == "__main__":
             f.write(general_header)
             write_general_row(f, "SBTR_jpHMM", matching_scores_sbtr_jphmm, is_full_sbtr_jphmm, is_pure_sbtr_jphmm)
             print(f"Wrote general scores in {ms_per_sample_path}", flush=True)
+        with open(ms_per_subtype_path, 'w') as f:
+            f.write(subtype_header)
+            # No true labels available: jpHMM is used as the reference here, so read these
+            # metrics as "how well SBTR agrees with jpHMM per subtype", not as ground-truth accuracy.
+            write_subtype_rows(f, "SBTR_jpHMM", confusion_sbtr_jphmm)
+            print(f"Wrote per-subtype scores in {ms_per_subtype_path}", flush=True)
         # Visualization sbtr - jphmm
         if output_figs:
             print('Printing composition comparison', flush=True)
@@ -338,6 +389,13 @@ if __name__ == "__main__":
             write_general_row(f, "SBTR_True", matching_scores_sbtr_true, is_full_sbtr_true, is_pure_sbtr_true)
             write_general_row(f, "jpHMM_True", matching_scores_jphmm_true, is_full_jphmm_true, is_pure_jphmm_true)
             print(f"Wrote general scores in {ms_per_sample_path}", flush=True)
+
+        with open(ms_per_subtype_path, 'w') as f:
+            f.write(subtype_header)
+            write_subtype_rows(f, "SBTR_jpHMM", confusion_sbtr_jphmm)
+            write_subtype_rows(f, "SBTR_True", confusion_sbtr_true)
+            write_subtype_rows(f, "jpHMM_True", confusion_jphmm_true)
+            print(f"Wrote per-subtype scores in {ms_per_subtype_path}", flush=True)
 
         # Visualize the comparison between our model and true regions
         if output_figs:
