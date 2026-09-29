@@ -1,1 +1,1 @@
-"""Shared SBTR model and data utilities."""
+"""Shared sbtr model and data utilities."""

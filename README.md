@@ -2,7 +2,7 @@
 # A novel HIV-1 fine-grain subtyping tool leveraging genomic language models
 
 
-<img src="figs/readme/logo_full.png" width="10000">
+<img src="figs/readme/sbtr_full.svg" width="10000">
 
 <!-- <img src="figs/readme/logo_small.png" width="130" align="left"> -->
 

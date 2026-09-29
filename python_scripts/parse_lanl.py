@@ -14,7 +14,7 @@ from Bio import SeqIO
 import tempfile
 from argparse import ArgumentParser
 
-from src import config
+from python_scripts.src import config
 
 WORKSPACE_PATH = config.WORKSPACE_PATH
 ATA_LEN = config.ATA_LEN

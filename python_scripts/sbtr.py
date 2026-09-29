@@ -1,4 +1,4 @@
-"""Run SBTR to predict HIV-1 subtypes across input sequences."""
+"""Run sbtr to predict HIV-1 subtypes across input sequences."""
 
 import numpy as np
 import torch
@@ -20,11 +20,11 @@ from typing import Dict, List, Set, Tuple
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 
-from figs import visualize_sample_probs
-from src import config
-from src.dataset_class import HIVSequenceDataset
-from src.model_class import HFModelForHIVSubtyping
-from src.crf_decoder_class import CRFReferenceDecoder
+from python_scripts.figs import visualize_sample_probs
+from python_scripts.src import config
+from python_scripts.src.dataset_class import HIVSequenceDataset
+from python_scripts.src.model_class import HFModelForHIVSubtyping
+from python_scripts.src.crf_decoder_class import CRFReferenceDecoder
 
 ST_TO_ID_DICT      = config.ST_TO_ID_DICT
 NUM_SUBTYPES       = len(ST_TO_ID_DICT)
@@ -511,8 +511,6 @@ if __name__ == "__main__":
 
     # load model + tokenizer
     model_used = MODEL_CONFIG["model_name"]
-    tokenizer_used = MODEL_CONFIG["tokenizer"]
-    backbone_used = MODEL_CONFIG["backbone"]
     tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True, revision="main")
     model = HFModelForHIVSubtyping.from_pretrained(model_used, trust_remote_code=True, revision="main")
 
@@ -619,8 +617,9 @@ if __name__ == "__main__":
             results_buffer.append(res_line)
             regions_buffer.extend(reg_lines)
 
+
     results_buffer = sorted(results_buffer, key=lambda x: x.split(',')[0].lower())
-    regions_buffer = sorted(regions_buffer, key=lambda x: x.lower())
+    regions_buffer = sorted(regions_buffer, key=lambda x: (x.split(',')[0].lower(), int(x.split(',')[1])))
 
     # Write results out in bulk
     result_csv_path = out_dir / f"results_{tag}.csv"

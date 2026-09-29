@@ -22,6 +22,9 @@ figs/sample_vis_*
 # shell_scripts
 shell_scripts/
 
+# local python scripts
+python_scripts/local/
+
 # logs
 slurm_logs/
 

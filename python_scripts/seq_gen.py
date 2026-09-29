@@ -64,18 +64,18 @@ TEST_SET_SIZE = config.TEST_SET_SIZE
 VERSION       = config.VERSION
 GENES_RAW     = config.GENES_RAW
 
-out_dir    = f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}"
-out_seqs   = f"{out_dir}/sequences_{N_SEQ}_{RP}.npy"
-out_labels = f"{out_dir}/labels_{N_SEQ}_{RP}.npy"
-out_masks  = f"{out_dir}/loss_masks_{N_SEQ}_{RP}.npy"
-out_meta   = f"{out_dir}/metadata_{N_SEQ}_{RP}.tsv"
-os.makedirs(out_dir, exist_ok=True)
-
 MIN_SEG_LEN = config.MIN_SEG_LEN
 MAX_SUBTYPES = config.MAX_SUBTYPES
 MAX_BREAKPOINTS = config.MAX_BREAKPOINTS
 PARTIAL_FRAC  = config.PARTIAL_FRAC
 MIN_FRAG_LEN  = config.MIN_FRAG_LEN
+
+out_dir    = f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}_{PARTIAL_FRAC}"
+out_seqs   = f"{out_dir}/sequences_{N_SEQ}_{RP}_{PARTIAL_FRAC}.npy"
+out_labels = f"{out_dir}/labels_{N_SEQ}_{RP}_{PARTIAL_FRAC}.npy"
+out_masks  = f"{out_dir}/loss_masks_{N_SEQ}_{RP}_{PARTIAL_FRAC}.npy"
+out_meta   = f"{out_dir}/metadata_{N_SEQ}_{RP}_{PARTIAL_FRAC}.tsv"
+os.makedirs(out_dir, exist_ok=True)
 
 SUBTYPE_GROUPS = {
     "A1": 0, "A2": 0, "A3": 0, "A4": 0, "A5": 0, "A6": 0, "A7": 0, "A8": 0, "AE": 0,
@@ -363,7 +363,8 @@ def compare_generated_vs_real(
             bargap=0.15
         )
         fig.write_html(path)
-
+        path = Path(path)
+        fig.write_image(path.with_suffix(".svg"))
     # Print
     print(f"\n  === Distribution comparison: {len(real_n_bp)} real CRFs  vs  "
           f"{len(rec_indices)} generated recombinants ===")
@@ -902,8 +903,8 @@ if __name__ == "__main__":
     test_labels = np.load(out_labels, mmap_mode="r")[test_indices]
     test_dir = Path(WORKSPACE_PATH) / "data" / "output" / "test" /f"syn_v{VERSION}"
     os.makedirs(test_dir, exist_ok=True)
-    out_test_fasta = f"{test_dir}/test_sequences_{N_SEQ}_{RP}.fasta"
-    out_test_labels = f"{test_dir}/test_labels_{N_SEQ}_{RP}.csv"
+    out_test_fasta = f"{test_dir}/test_sequences_{N_SEQ}_{RP}_{PARTIAL_FRAC}.fasta"
+    out_test_labels = f"{test_dir}/test_labels_{N_SEQ}_{RP}_{PARTIAL_FRAC}.csv"
     ID_TO_ST_DICT = {v: k for k, v in ST_TO_ID_DICT.items()}
 
     with open(out_test_fasta, "w") as f:

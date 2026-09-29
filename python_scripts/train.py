@@ -1,4 +1,4 @@
-"""Train the SBTR model and upload completed checkpoints."""
+"""Train the sbtr model and upload completed checkpoints."""
 
 import torch
 import pandas as pd

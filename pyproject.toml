@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "sbtr"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = "==3.11.*"
 dependencies = [
     "biopython==1.87",
@@ -14,6 +18,7 @@ dependencies = [
     "torchmetrics==1.9.0",
     "tqdm==4.67.3",
     "transformers==5.6.1",
+    "uv==0.12.20",
 ]
 
 [tool.uv.sources]
@@ -23,3 +28,6 @@ torch = { index = "pytorch-cu128" }
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+[tool.setuptools.packages.find]
+include = ["python_scripts*"]

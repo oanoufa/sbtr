@@ -299,9 +299,9 @@ class SequenceMutator:
         except (IndexError, ValueError):
             print(
                 f"  WARNING: could not extract year from '{record_id}', "
-                f"defaulting to 2000."
+                f"defaulting to 2020."
             )
-            return 2000
+            return 2020
 
         if year_int < 100:
             return 2000 + year_int if year_int < 40 else 1900 + year_int

@@ -37,9 +37,14 @@ RUN curl -fsSL https://github.com/oanoufa/sbtr/archive/refs/heads/main.tar.gz | 
     tar -xzf - -C /app --strip-components=1
 
 # Install dependencies from the project metadata.
-
 COPY --from=uv /uv /usr/local/bin/uv
-RUN uv pip install --system --no-cache -r pyproject.toml
+
+ENV UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+RUN uv sync --locked --no-cache
+
+ENV PATH="/app/.venv/bin:$PATH"
 
 # Setup writable temporary directories in standard /tmp
 ENV TMPDIR=/tmp \

@@ -20,7 +20,7 @@ ATA_LEN = 11561 # max length of sequences in the dataset is (11954) (NOW 16980) 
 MIN_SEG_LEN = 50 # Min length of segments of a subtype in a recombinant sequence (in ATA positions)
 MAX_SUBTYPES = 7
 MAX_BREAKPOINTS = 10
-PARTIAL_FRAC = 0.70 # Fraction of sequences that are partial (i.e., not full-length)
+PARTIAL_FRAC = 0.50 # Fraction of sequences that are partial (i.e., not full-length)
 MIN_FRAG_LEN = 300 # Min length of a partial sequence (prot is around 300bp)
 DIV_WINDOW_SIZE = 200
 MIN_DIV = 15
@@ -40,7 +40,7 @@ CRF_ASSIGN_THR = 0.5 # Minimum match to assign a CRF
 PARTIAL_THR = 7000 # Threshold to consider a sequence full (>=7000nt) or partial (<7000nt)
 
 # NUCLEOTIDE TRANSFORMER PARAMETERS
-VERSION = "0.1"
+VERSION = "0.2"
 PAD_LEN = 128
 SEQ_LEN_AFTER_PAD = ((ATA_LEN // PAD_LEN) + 1) * PAD_LEN
 
@@ -54,10 +54,10 @@ MODEL_CONFIG = {
     "model_version": VERSION,
 
     # Data
-    "labels_path": f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}/labels_{N_SEQ}_{RP}.npy",
-    "sequences_path": f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}/sequences_{N_SEQ}_{RP}.npy",
-    "loss_masks_path": f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}/loss_masks_{N_SEQ}_{RP}.npy",
-    "metadata_path": f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}/metadata_{N_SEQ}_{RP}.tsv",
+    "labels_path": f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}_{PARTIAL_FRAC}/labels_{N_SEQ}_{RP}_{PARTIAL_FRAC}.npy",
+    "sequences_path": f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}_{PARTIAL_FRAC}/sequences_{N_SEQ}_{RP}_{PARTIAL_FRAC}.npy",
+    "loss_masks_path": f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}_{PARTIAL_FRAC}/loss_masks_{N_SEQ}_{RP}_{PARTIAL_FRAC}.npy",
+    "metadata_path": f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}_{PARTIAL_FRAC}/metadata_{N_SEQ}_{RP}_{PARTIAL_FRAC}.tsv",
     "data_cache_dir": f"{WORKSPACE_PATH}/data/model",
     "checkpoint_dir": f"{WORKSPACE_PATH}/data/model/checkpoints/v{VERSION}",
     "metrics_dir": f"{WORKSPACE_PATH}/data/model/metrics",
@@ -142,6 +142,7 @@ ST_COLORS = {
     'D':   '#BA7517',
     # AE - coral/pink blend
     'AE':  '#F0997B',
+    '01_AE': '#F0997B',
     # F family - purple
     'F':   '#7F77DD',
     'F1':  '#534AB7',
@@ -164,11 +165,24 @@ ST_COLORS = {
     'P':   '#2EA885',
     # U - neutral gray
     'U':   '#788496',
+    # CPZ - olive/brown (SIVcpz, chimpanzee origin)
+    'CPZ': '#8C6E3A',
+    # GOR - muted brown (SIVgor, gorilla origin)
+    'GOR': '#6E5039',
+    # MAC - olive-tan/khaki (SIVmac, rhesus macaque origin)
+    'MAC': '#9E824C',
+    # SMM - warm clay/taupe-brown (SIVsmm, sooty mangabey origin)
+    'SMM': '#82563B',
+    # AG - blue/green recombinant (A + G blend)
+    '02_AG': '#072C4B',
+    # BC - coral/teal recombinant (B + C blend)
+    '07_BC': '#7A7C52',
     # LTR sequence features & insertions - white / off-white
     "5'LTR":         '#E8E8E8',  # Pure white
     "5'-Insertion":  '#E8E8E8',  # Pure white
     "3'LTR":         '#E8E8E8',  # Light off-white / light gray
     "3'-Insertion":  '#E8E8E8',  # Light off-white / light gray
+    "Other CRFs / URF": '#A6A6A6',
 }
 
 # GENE MAP BACKGROUND
@@ -195,7 +209,7 @@ GENE_COLORS = {
     "tat1": "#f7b6d2", "tat2": "#f7b6d2", "rev1": "#dbdb8d", "rev2": "#dbdb8d"
 }
 
-COLOR_SCHEME = ['#072C4B', '#F28089','#71cddd', "#E69F00"]
+COLOR_SCHEME = ['#072C4B', '#F28089','#71cddd', "a07a99", "#E69F00"]
 
 
 # DRM and LTR masks

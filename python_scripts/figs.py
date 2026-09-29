@@ -19,9 +19,16 @@ import plotly.io as pio
 import plotly.colors as pc
 import matplotlib.patches as mpatches
 pio.defaults.default_format = "png"
-from src import config
 from collections import Counter
+from pathlib import Path
+import random
+import warnings
+import math
+from matplotlib.colors import LinearSegmentedColormap
 
+from python_scripts.src import config
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 workspace_path = config.WORKSPACE_PATH
 
@@ -29,6 +36,8 @@ GENES_RAW = config.GENES_RAW
 GENE_COLORS = config.GENE_COLORS
 COLOR_SCHEME = config.COLOR_SCHEME
 ST_COLORS = config.ST_COLORS
+METRICS_DIR = config.MODEL_CONFIG["metrics_dir"]
+VERSION = config.VERSION
 
 JPHMM_TO_SBTR_LTR = {
     "5'-Insertion":"5'LTR",
@@ -102,25 +111,19 @@ def visualize_breakpoints(
         # yaxis=dict(range=[0, df_bp['pos'].value_counts().max() * 1.5]) 
     )
 
-    # Download the figure as a high quality PNG image
     # Set image length and width to 1200x800 for better quality
     fig.update_layout(width=1200, height=500)
-    if save_path:
-        if save_path.endswith('.html'):
-            fig.write_html(save_path)
-        elif save_path.endswith('.png'):
-            fig.write_image(save_path, scale=2)
-        else:
-            png_path = save_path + '.png'
-            html_path = save_path + '.html'
-            fig.write_html(html_path)
-            fig.write_image(png_path, scale=2)
-        print(f"Breakpoints visualization saved to: {save_path}", flush=True)
+    fig.write_html(save_path)
+    path = Path(save_path)
+    fig.write_image(path.with_suffix(".svg"))
+    print(f"Breakpoints visualization saved to: {save_path}", flush=True)
 
 
 def visualize_diversity(
     diversity_arrays: dict,
     hxb2_to_ata: np.ndarray,
+    st_to_print=['avg'],
+    types_to_print=['smoothed'],
     window_size=100,
     save_path=f"{workspace_path}/figs/diversity_rate_profile.html"):
     """
@@ -176,7 +179,7 @@ def visualize_diversity(
 
     for frame, (y0, y1) in frame_lanes.items():
         fig.add_annotation(
-            x=-0.02, y=frame_pos_axis[frame],
+            x=1.02, y=frame_pos_axis[frame],
             xref="paper", yref="y",
             text=f"<b>F{frame}</b>", showarrow=False,
             font=dict(size=12, color="black"),
@@ -203,22 +206,23 @@ def visualize_diversity(
         diversity_array /= diversity_array.sum()
         smoothed_rates = np.convolve(diversity_array, kernel, mode='same')
         mean_rate      = np.mean(diversity_array)
-
-        fig.add_trace(go.Scatter(
-            x=x_positions, y=diversity_array,
-            mode='lines', line=dict(color=color, width=1),
-            opacity=0.3, name=f'{name} raw',
-        ), row=1, col=1)
-
-        fig.add_trace(go.Scatter(
-            x=x_positions, y=smoothed_rates,
-            mode='lines', line=dict(color=color, width=2),
-            name=f'{name} smoothed',
-        ), row=1, col=1)
+        if name in st_to_print:
+            if 'raw' in types_to_print:
+                fig.add_trace(go.Scatter(
+                    x=x_positions, y=diversity_array,
+                    mode='lines', line=dict(color=color, width=1),
+                    opacity=0.3, name=f'{name} raw',
+                ), row=1, col=1)
+            if 'smoothed' in types_to_print:
+                fig.add_trace(go.Scatter(
+                    x=x_positions, y=smoothed_rates,
+                    mode='lines', line=dict(color=color, width=2),
+                    name=f'{name} smoothed',
+                ), row=1, col=1)
 
     fig.add_hline(
         y=mean_rate, line_dash="dash", line_color='#000000', opacity=0.8,
-        annotation_text=f"mean: {mean_rate:.3f}",
+        annotation_text=f"mean: {mean_rate:.1e}",
         annotation_position="top right",
         layer="above", row=1, col=1
     )
@@ -235,15 +239,11 @@ def visualize_diversity(
     fig.update_xaxes(title_text="ATA Alignment Position (bp)", range=[0, ata_len], row=1, col=1)
     fig.update_yaxes(title_text="diversity", range=[0, y_max], row=1, col=1)
 
-    if save_path:
-        if save_path.endswith('.html'):
-            fig.write_html(save_path)
-        elif save_path.endswith('.png'):
-            fig.write_image(save_path, scale=2)
-        else:
-            fig.write_html(save_path + '.html')
-            fig.write_image(save_path + '.png', scale=2)
-        print(f"Diversity visualization saved to: {save_path}", flush=True)
+    fig.write_html(save_path)
+    path = Path(save_path)
+    fig.write_image(path.with_suffix(".svg"))
+    
+    print(f"Diversity visualization saved to: {save_path}", flush=True)
 
 def visualize_sample_probs(
     preds_slice: np.ndarray,
@@ -276,6 +276,18 @@ def visualize_sample_probs(
         Output PNG path.
     """
 
+    custom_cmap = LinearSegmentedColormap.from_list(
+        "custom_two_color",
+        ["#072C4B", "#F28089"],  # couleur basse -> couleur haute
+        N=256,
+    )
+
+    CMAP_CHOICES = [
+        # "viridis", "plasma",
+        "magma",
+        # "cividis", "turbo", 
+        # custom_cmap,
+        ]
     # Only load this one sample from disk.
     loss_mask = np.asarray(ploss_slice)
     labels = np.asarray(preds_slice)
@@ -284,45 +296,47 @@ def visualize_sample_probs(
     n_real = int(real_loss_mask.sum())
     n_total = len(real_loss_mask)
 
+    EXCLUDED_SUBTYPES = {"U", "5'LTR", "3'LTR"}
+
     id_to_st = {v: k for k, v in pure_st_to_id_dict.items()}
-    subtype_names = [
-        id_to_st[i]
-        for i in range(len(pure_st_to_id_dict))
+    keep_ids = [
+        i for i in range(len(pure_st_to_id_dict))
+        if id_to_st[i] not in EXCLUDED_SUBTYPES
     ]
+    subtype_names = [id_to_st[i] for i in keep_ids]
     n_subtypes = len(subtype_names)
 
     # (n_subtypes, n_total)
-    full_labels = labels.T
+    full_labels = labels.T[keep_ids, :]
 
     # Figure setup
     gene_track_h = 2.4
 
     fig = plt.figure(
-        figsize=(14, 2 + 2 * gene_track_h + 0.3 * n_subtypes)
+        figsize=(14, 2 + gene_track_h + 0.3 * n_subtypes)
     )
 
     gs = fig.add_gridspec(
-        4,
+        3,
         2,
-        height_ratios=[1, gene_track_h, n_subtypes, gene_track_h],
+        height_ratios=[1, n_subtypes, gene_track_h],
         width_ratios=[40, 1],
         hspace=0.10,
         wspace=0.03,
     )
 
     ax_mask = fig.add_subplot(gs[0, 0])
-    ax_gene = fig.add_subplot(gs[1, 0], sharex=ax_mask)
-    ax_lab = fig.add_subplot(gs[2, 0], sharex=ax_mask)
-    ax_st = fig.add_subplot(gs[3, 0], sharex=ax_mask)
-    ax_cb = fig.add_subplot(gs[2, 1])
+    ax_lab = fig.add_subplot(gs[1, 0], sharex=ax_mask)
+    ax_st = fig.add_subplot(gs[2, 0], sharex=ax_mask)
+    ax_cb = fig.add_subplot(gs[1, 1])
 
     frame_lanes = {
-        3: (0.67, 1.0),
+        1: (0.67, 1.0),
         2: (0.33, 0.66),
-        1: (0.0, 0.33),
+        3: (0.0, 0.33),
     }
 
-    # Row 0: loss mask
+    # Row 1: loss mask
     ax_mask.imshow(
         real_loss_mask[np.newaxis, :],
         aspect="auto",
@@ -344,67 +358,13 @@ def visualize_sample_probs(
 
     plt.setp(ax_mask.get_xticklabels(), visible=False)
 
-    # Row 1: Gene track
-    ax_gene.set_xlim(0, n_total)
-    ax_gene.set_ylim(0, 1)
-    ax_gene.axis("off")
-
-    gene_bars = defaultdict(list)
-
-    for gene, (start_hxb2, end_hxb2, frame) in GENES_RAW.items():
-        start_ata = hxb2_to_ata[start_hxb2]
-        end_ata = hxb2_to_ata[end_hxb2]
-
-        y0, y1 = frame_lanes[frame]
-        color = GENE_COLORS.get(gene, "grey")
-        width = max(end_ata - start_ata, 1)
-
-        gene_bars[
-            (color, y0 + 0.02, (y1 - y0) - 0.04)
-        ].append((start_ata, width))
-
-        if width > n_total * 0.025:
-            ax_gene.text(
-                start_ata + width / 2,
-                (y0 + y1) / 2,
-                gene,
-                ha="center",
-                va="center",
-                fontsize=6.5,
-                color="black",
-                bbox=dict(
-                    boxstyle="round,pad=0.1",
-                    fc="white",
-                    ec="none",
-                    alpha=0.6,
-                ),
-            )
-
-    for (color, y_bottom, height), xranges in gene_bars.items():
-        ax_gene.broken_barh(
-            xranges,
-            (y_bottom, height),
-            facecolors=color,
-            alpha=0.40,
-            linewidths=0,
-        )
-
-    for frame, (y0, y1) in frame_lanes.items():
-        ax_gene.text(
-            -n_total * 0.005,
-            (y0 + y1) / 2,
-            f"F{frame}",
-            ha="right",
-            va="center",
-            fontsize=7,
-            color="grey",
-        )
-
     # Row 2: Subtype probability heatmap
+    cmap_choice = random.choice(CMAP_CHOICES)
+
     im = ax_lab.imshow(
         full_labels,
         aspect="auto",
-        cmap="viridis",
+        cmap=cmap_choice,
         vmin=0,
         vmax=1,
         interpolation="nearest",
@@ -507,9 +467,20 @@ def visualize_sample_probs(
             linewidths=0,
         )
 
-    present_subtypes = sorted(
-        st for st in set(subtype_arr)
-        if st != ""
+    LTR5 = "5'LTR"
+    LTR3 = "3'LTR"
+
+    seen_order = []
+    for val in subtype_arr:
+        if val != "" and val not in seen_order:
+            seen_order.append(val)
+
+    middle = [st for st in seen_order if st not in (LTR5, LTR3)]
+
+    present_subtypes = (
+        ([LTR5] if LTR5 in seen_order else [])
+        + middle
+        + ([LTR3] if LTR3 in seen_order else [])
     )
 
     if present_subtypes:
@@ -530,6 +501,7 @@ def visualize_sample_probs(
             fontsize=7,
             ncol=min(len(legend_handles), 6),
             loc="upper left",
+            bbox_to_anchor=(0.0, 0.78),
             frameon=True,
             framealpha=0.85,
             borderpad=0.6,
@@ -542,9 +514,14 @@ def visualize_sample_probs(
         label="score",
     )
 
+    fig.patch.set_alpha(0.0)
+    for ax in (ax_mask, ax_lab, ax_st, ax_cb):
+        ax.patch.set_alpha(0.0)
+
     fig.savefig(
         path,
         dpi=100,
+        transparent=True,
     )
 
     plt.close(fig)
@@ -681,9 +658,6 @@ def visualize_metrics(save_path_loss,
                       save_path_evol):
     # Generate figures showing the evolution of the scores during training
 
-    METRICS_DIR = config.MODEL_CONFIG["metrics_dir"]
-    VERSION = config.VERSION
-
     train_metrics_df = pd.read_csv(os.path.join(METRICS_DIR, f"train_metrics_v{VERSION}.tsv"), sep='\t')
     val_metrics_df = pd.read_csv(os.path.join(METRICS_DIR, f"val_metrics_v{VERSION}.tsv"), sep='\t')
 
@@ -722,15 +696,9 @@ def visualize_metrics(save_path_loss,
 
     fig_loss.update_layout(hovermode="x unified")
     fig_loss.update_layout(width=1200, height=600)
-    if save_path_loss.endswith('.html'):
-        fig_loss.write_html(save_path_loss)
-    elif save_path_loss.endswith('.png'):
-        fig_loss.write_image(save_path_loss, scale=2)
-    else:
-        fig_loss.write_html(save_path_loss + '.html')
-        fig_loss.write_image(save_path_loss + '.png', scale=2)
-        print(f"Loss visualization saved to: {save_path_loss}", flush=True)
-
+    fig_loss.write_html(save_path_loss)
+    path = Path(save_path_loss)
+    fig_loss.write_image(path.with_suffix(".svg"))
 
     # 3. Visualize Performance Metrics (F1, Precision, Recall)
     # Melt the dataframe to long format for metric-based coloring
@@ -760,13 +728,10 @@ def visualize_metrics(save_path_loss,
     fig_perf.update_yaxes(range=[0, 1.05]) # Since metrics are usually [0, 1]
     fig_perf.update_layout(hovermode="x unified")
     fig_perf.update_layout(width=1200, height=600)
-    if save_path_evol.endswith('.html'):
-        fig_perf.write_html(save_path_evol)
-    elif save_path_evol.endswith('.png'):
-        fig_perf.write_image(save_path_evol, scale=2)
-    else:
-        fig_perf.write_html(save_path_evol + '.html')
-        fig_perf.write_image(save_path_evol + '.png', scale=2)
+    fig_perf.write_html(save_path_evol)
+    path = Path(save_path_evol)
+    fig_perf.write_image(path.with_suffix(".svg"))
+
     print(f"Performance evolution saved to: {save_path_evol}", flush=True)
 
 def visualize_confusion_matrix(
@@ -867,16 +832,11 @@ def visualize_confusion_matrix(
 
     fig.update_xaxes(title_text="True subtype", tickangle=45)
     fig.update_yaxes(title_text="Predicted subtype")
+    fig.write_html(save_path)
+    path = Path(save_path)
+    fig.write_image(path.with_suffix(".svg"))
 
-    if save_path:
-        if save_path.endswith(".html"):
-            fig.write_html(save_path)
-        elif save_path.endswith(".png"):
-            fig.write_image(save_path, scale=2)
-        else:
-            fig.write_html(save_path + ".html")
-            fig.write_image(save_path + ".png", scale=2)
-        print(f"Confusion matrix saved to: {save_path}", flush=True)
+    print(f"Confusion matrix saved to: {save_path}", flush=True)
 
     return fig
 
@@ -996,7 +956,9 @@ def plot_reference_distribution_with_year(subtype_data,
                       gridcolor="rgba(0,0,0,0.07)", zeroline=False, row=2, col=1)
 
     fig.write_html(save_path, include_plotlyjs="cdn")
-    print(f"\nPlot saved at {save_path} (.html/.png/.pdf)")
+    path = Path(save_path)
+    fig.write_image(path.with_suffix(".svg"))
+    print(f"\nPlot saved at {save_path} (.html/.svg)")
 
     return fig
 
@@ -1133,8 +1095,10 @@ def plot_fragment_length_distribution(
         width=1100,
         bargap=0.1,
     )
-    fig.write_html(path)
 
+    fig.write_html(path)
+    path = Path(path)
+    fig.write_image(path.with_suffix(".svg"))
 
 def plot_time_per_10k(csv_path, out_path=None):
     """
@@ -1199,12 +1163,14 @@ def plot_time_per_10k(csv_path, out_path=None):
     fig.update_xaxes(showline=True, linecolor="black", ticks="outside")
     fig.update_yaxes(showline=True, linecolor="black", ticks="outside")
 
-    fig.write_html(out_path)
 
+    fig.write_html(out_path)
+    path = Path(out_path)
+    fig.write_image(path.with_suffix(".svg"))
 
 def load_subtyping_csv(path, tool_name):
     """Load one tool's per-subtype confusion-matrix CSV into a tidy dataframe."""
-    df = pd.read_csv(path, skiprows=2, header=None)
+    df = pd.read_csv(path, skiprows=1, header=None)
     df.columns = [
         "class", "n", "TP", "FP", "FN", "TN",
         "sensitivity", "sens_CI_lo", "sens_CI_hi",
@@ -1265,17 +1231,13 @@ def forest_grid(tool_dfs, tools, genes, save_path, metrics=("sensitivity", "prec
 
             available = n_per_subtype.index.tolist()
             keep = [s for s in subtypes if s in available] if subtypes else available
-            ordered = (
-                n_per_subtype.loc[keep].sort_values(ascending=False).index.tolist()
-                if order_by == "n" else sorted(keep)
-            )
-            x_labels = [f"{s} - {n_per_subtype[s]}" for s in ordered]
+            x_labels = [f"{s} - {n_per_subtype[s]}" for s in keep]
 
             for i, tool in enumerate(tools):
-                df = gene_tool_dfs[tool].set_index("class").reindex(ordered)
+                df = gene_tool_dfs[tool].set_index("class")
                 fig.add_trace(
                     go.Bar(
-                        x=x_labels, y=df[metric].values,
+                        x=x_labels, y=df.loc[keep, metric].values,
                         marker_color=color[tool],
                         name=tool, legendgroup=tool, showlegend=(row == 1 and col == 1),
                     ),
@@ -1284,14 +1246,411 @@ def forest_grid(tool_dfs, tools, genes, save_path, metrics=("sensitivity", "prec
             fig.update_yaxes(range=[0, 105], row=row, col=col)
 
     fig.update_layout(
-        barmode="group",
-        height=350 * len(metrics), width=450 * len(genes),
-        legend_title_text="Tool", title="Subtyping tool comparison",
-        margin=dict(l=40, r=80, t=70, b=40),
-    )
+            template="plotly_white",
+            barmode="group",
+            bargap=0.35,
+            bargroupgap=0.05,
+            height=350 * len(metrics), 
+            width=450 * len(genes),
+            legend_title_text="Tool",
+            title="Subtyping tool comparison",
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            margin=dict(l=40, r=80, t=70, b=40),
+            legend=dict(
+                x=0.13, y=0.01, xanchor="right", yanchor="bottom",
+                bgcolor="rgba(255,255,255,0.9)", bordercolor="rgba(0,0,0,0.2)", borderwidth=1,
+            ),
+        )
 
     print(f"Grid metrics comparison saved at {save_path}")
     fig.write_html(save_path)
+    path = Path(save_path)
+    fig.write_image(path.with_suffix(".svg"))
+
+def per_subtype_per_position_graph(tool_dfs, tools, save_path, metrics=("sensitivity", "precision"),
+                 order_by=None, subtypes=None):
+    """
+    tool_dfs : dict {tool: dataframe}, one dataframe per tool, each with a "subtype"
+               column and one column per metric (e.g. sensitivity, precision)
+    tools    : tool names, in display/legend/color order
+    metrics  : one row per metric
+    order_by : optional column name in the dataframes to sort subtypes by (descending);
+               None keeps the natural order of appearance
+    subtypes : optional list of subtype labels to keep; None = plot every subtype found.
+               Subtype "U" is always dropped, whether or not it's in this list.
+ 
+    Returns rows=metrics x 1 col, grouped bars (no CI) per tool per subtype.
+    Writes both an interactive HTML and a static SVG to save_path.
+    """
+    n_colors = len(tools)
+    palette = COLOR_SCHEME if n_colors <= len(COLOR_SCHEME) else pc.qualitative.Alphabet
+    color = {tool: palette[i % len(palette)] for i, tool in enumerate(tools)}
+ 
+    combined = pd.concat(tool_dfs.values(), ignore_index=True)
+    available = [s for s in combined["subtype"].unique() if s != "U"]
+ 
+    keep = [s for s in subtypes if s in available] if subtypes else available
+ 
+    if order_by and order_by in combined.columns:
+        order_vals = combined.drop_duplicates("subtype").set_index("subtype")[order_by]
+        keep = sorted(keep, key=lambda s: order_vals.get(s, 0), reverse=True)
+ 
+    fig = make_subplots(
+        rows=len(metrics), cols=1, shared_xaxes=True,
+        subplot_titles=list(metrics),
+        vertical_spacing=0.08,
+    )
+ 
+    for row, metric in enumerate(metrics, start=1):
+        for tool in tools:
+            df = tool_dfs[tool].set_index("subtype")
+            fig.add_trace(
+                go.Bar(
+                    x=keep, y=df.reindex(keep)[metric].astype(float).values,
+                    marker_color=color[tool],
+                    name=tool, legendgroup=tool, showlegend=(row == 1),
+                ),
+                row=row, col=1,
+            )
+        fig.update_yaxes(range=[0, 1.05], row=row, col=1)
+ 
+    fig.update_layout(
+        template="plotly_white",
+        barmode="group",
+        bargap=0.35,
+        bargroupgap=0.05,
+        height=350 * len(metrics),
+        width=max(900, 45 * len(keep)),
+        legend_title_text="Tool",
+        title="Subtyping tool comparison",
+        margin=dict(l=40, r=80, t=70, b=40),
+        legend=dict(
+            x=0.99, y=0.01, xanchor="right", yanchor="bottom",
+            bgcolor="rgba(255,255,255,0.5)", bordercolor="rgba(0,0,0,0.2)", borderwidth=1,
+        ),
+    )
+ 
+    fig.write_html(save_path)
+    path = Path(save_path)
+    fig.write_image(path.with_suffix(".svg"))
+    print(f"Grid metrics comparison saved at {save_path}")
+
+def pie_infections_sequences_dist(plot_df_path, xlsx_path, save_path):
+
+    def get_global_2020_24_counts(xlsx_path, sheet_name="Table2"):
+        """Pulls Table 2 / Global / 2020-24 and groups it like classify_subtype()."""
+        t2 = pd.read_excel(xlsx_path, sheet_name=sheet_name, header=2)
+        t2['Region'] = t2['Region'].ffill()  # region name is only written on each block's first row
+        row = t2[(t2['Region'] == 'Global') & (t2['Period'] == '2020-24')]
+        if row.empty:
+            raise ValueError("Could not find Global / 2020-24 in the Table2 sheet")
+        row = row.iloc[0]
+
+        direct_cols = {'A':'A','B':'B','C':'C','D':'D','F':'F','G':'G','H':'H','J':'J','K':'K','L':'L',
+                    'CRF01_AE':'01_AE','CRF02_AG':'02_AG','CRF07_BC':'07_BC'}
+        other_cols = ['Other CRFs', 'URFs', 'Unspecified recombinants']
+
+        records = [{'Subtype Group': grp, 'Count': row[col]} for col, grp in direct_cols.items()]
+        records.append({'Subtype Group': 'Other CRFs / URF', 'Count': sum(row[c] for c in other_cols)})
+        counts_df = pd.DataFrame(records)
+
+        base_order = ['A','B','C','D','F','G','H','J','K','L','O','N','P','01_AE','02_AG','07_BC']
+        desired_order = ['Other CRFs / URF'] + base_order
+        counts_df['Subtype Group'] = pd.Categorical(counts_df['Subtype Group'], categories=desired_order, ordered=True)
+        return counts_df.sort_values('Subtype Group').dropna().reset_index(drop=True)
+
+    def classify_subtype(st):
+        st = str(st).strip().upper()
+        sub_map = {'A1':'A','A2':'A','A3':'A','A4':'A','A6':'A','A7':'A','A8':'A','F1':'F','F2':'F'}
+        if st in sub_map:
+            st = sub_map[st]
+        pure_clades = {'A','B','C','D','F','G','H','J','K','L','O','N','P','01_AE','02_AG','07_BC'}
+        return st if st in pure_clades else 'Other CRFs / URF'
+
+    # left panel: sequence-level data
+    plot_df = pd.read_csv(plot_df_path, sep='\t')
+    plot_df['pure_or_crf'] = plot_df['Subtype'].apply(classify_subtype)
+
+    # Exclude 'O', 'N', 'P' from the dataframe
+    plot_df = plot_df[~plot_df['pure_or_crf'].isin(['O', 'N', 'P'])]
+
+    left_counts = plot_df['pure_or_crf'].value_counts().reset_index()
+    left_counts.columns = ['Subtype Group', 'Count']
+
+    # Updated base_order
+    base_order = ['A','B','C','D','F','G','H','J','K','L','01_AE','02_AG','07_BC']
+    desired_order = ['Other CRFs / URF'] + base_order
+
+    left_counts['Subtype Group'] = pd.Categorical(left_counts['Subtype Group'], categories=desired_order, ordered=True)
+    left_counts = left_counts.sort_values('Subtype Group').dropna().reset_index(drop=True)
+    n_total_left = left_counts['Count'].sum()
+    # right panel: Table2, Global, 2020-24, from Khalid et al 2026
+    right_counts = get_global_2020_24_counts(xlsx_path)
+
+    colour_map = ST_COLORS
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        specs=[[{'type': 'domain'}, {'type': 'domain'}]],
+        subplot_titles=(
+            f"LANL HIV Database Sequences ({n_total_left:,} sequences)",
+            "Global infections, 2020–24<br><sup>Khalid et al., 2026</sup>"
+        )
+    )
+
+    fig.add_trace(go.Pie(
+        labels=left_counts['Subtype Group'], values=left_counts['Count'], sort=False,
+        marker=dict(colors=[colour_map.get(l, '#a6a6a6') for l in left_counts['Subtype Group']],
+                    line=dict(color='#FFFFFF', width=0.5)),
+        # texttemplate="<b>%{label}</b><br>%{value:,}<br>(%{percent})",
+        texttemplate="<b>%{label}</b><br>(%{percent})",
+        textposition='auto',
+        hole=0.3,
+        # insidetextorientation='auto',
+        # rotation=140,
+        hovertemplate="<b>%{label}</b><br>Count: %{value:,}<br>Percentage: %{percent}<extra></extra>",
+        legendgroup="subtype", showlegend=True,
+    ), row=1, col=1)
+
+    fig.add_trace(go.Pie(
+        labels=right_counts['Subtype Group'], values=right_counts['Count'], sort=False,
+        marker=dict(colors=[colour_map.get(l, '#a6a6a6') for l in right_counts['Subtype Group']],
+                    line=dict(color='#FFFFFF', width=0.5)),
+        texttemplate="<b>%{label}</b><br>%{percent}",
+        textposition='auto',
+        hole=0.3,
+        # insidetextorientation='auto',
+        # rotation=140,
+        hovertemplate="<b>%{label}</b><br>Percentage: %{percent}<extra></extra>",
+        legendgroup="subtype", showlegend=False,  # left panel's legend already covers every group
+    ), row=1, col=2)
+
+    fig.update_layout(
+        template="plotly_white",
+        title_text='<b>Distribution of HIV-1 subtypes</b>',
+        legend=dict(title="<b>Sequence group</b>", orientation="v",
+                    yanchor="middle", y=0.5, xanchor="left", x=1.02,
+                    bgcolor="rgba(255,255,255,0.8)", bordercolor="lightgray", borderwidth=1),
+        margin=dict(t=120, b=40, l=40, r=160),
+        width=1500, height=650,
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+    )
+
+    fig.write_html(save_path)
+    path = Path(save_path)
+    fig.write_image(path.with_suffix(".svg"))
+    print(f"Pie comparison saved at {save_path}")
+
+
+def infection_map(xlsx_path, save_path, max_pie_diameter=0.28, min_pie_diameter=0.045):
+
+    SUBTYPE_ORDER = ['A', 'B', 'C', 'D', 'F', 'G', 'H', 'J', 'K', 'L',
+                    '01_AE', '02_AG', '07_BC', 'Other CRFs / URF']
+
+    # Region -> approximate centroid (lon, lat) used to place each pie.
+    REGION_CENTROIDS = {
+        'North America': (-100, 48),
+        'Caribbean': (-64, 14),
+        'Latin America': (-62, -18),
+        'Western and central Europe': (10, 50),
+        'Eastern Europe and central Asia': (60, 52),
+        'South Asia': (78, 21),
+        'Southeast Asia': (108, 8),
+        'East Asia': (112, 33),
+        'Oceania': (145, -27),
+        'Middle East and north Africa': (25, 27),
+        'West Africa': (-8, 10),
+        'East Africa': (35, -1),
+        'Ethiopia, Eritrea, and Djibouti': (42, 11),
+        'Central Africa': (20, -3),
+        'Southern Africa': (26, -27),
+    }
+
+    # Region -> countries (ISO-3) from Khalid et al appendix.
+
+    REGION_COUNTRIES = {
+        'North America': ['CAN', 'USA'],
+        'Caribbean': ['ATG', 'ABW', 'BHS', 'BRB', 'BLZ', 'BMU', 'CYM', 'CUB',
+                    'CUW', 'DMA', 'DOM', 'GRD', 'GLP', 'HTI', 'JAM', 'MTQ',
+                    'PRI', 'SXM', 'KNA', 'LCA', 'VCT', 'TTO', 'TCA', 'VGB',
+                    'VIR'],
+        'Latin America': ['ARG', 'BOL', 'BRA', 'CHL', 'COL', 'CRI', 'ECU',
+                        'SLV', 'GUF', 'GTM', 'GUY', 'HND', 'MEX', 'NIC',
+                        'PAN', 'PRY', 'PER', 'SUR', 'URY', 'VEN'],
+        'Western and central Europe': ['AND', 'AUT', 'BEL', 'BGR', 'HRV',
+                                        'CYP', 'CZE', 'DNK', 'EST', 'FIN',
+                                        'FRA', 'DEU', 'GIB', 'GRC', 'GRL',
+                                        'HUN', 'ISL', 'IRL', 'IMN', 'ISR',
+                                        'ITA', 'LVA', 'LIE', 'LTU', 'LUX',
+                                        'MLT', 'MCO', 'NLD', 'NOR', 'POL',
+                                        'PRT', 'ROU', 'SMR', 'SRB', 'SVK',
+                                        'SVN', 'ESP', 'SWE', 'CHE', 'TUR',
+                                        'GBR'],
+        'Eastern Europe and central Asia': ['ALB', 'ARM', 'AZE', 'BLR', 'BIH',
+                                            'GEO', 'KAZ', 'XKX', 'KGZ', 'MDA',
+                                            'MNE', 'MKD', 'RUS', 'TJK', 'TKM',
+                                            'UKR', 'UZB'],
+        'South Asia': ['AFG', 'BGD', 'BTN', 'IND', 'IRN', 'MDV', 'NPL', 'PAK',
+                        'LKA'],
+        'Southeast Asia': ['BRN', 'KHM', 'IDN', 'LAO', 'MYS', 'MMR', 'PHL',
+                            'SGP', 'THA', 'TLS', 'VNM'],
+        'East Asia': ['CHN', 'HKG', 'JPN', 'MNG', 'PRK', 'KOR', 'TWN'],
+        'Oceania': ['ASM', 'AUS', 'FJI', 'PYF', 'GUM', 'KIR', 'FSM', 'NRU',
+                    'NCL', 'NZL', 'MNP', 'PLW', 'PNG', 'WSM', 'SLB', 'TON',
+                    'TUV', 'VUT'],
+        'Middle East and north Africa': ['DZA', 'BHR', 'EGY', 'IRQ', 'JOR',
+                                        'KWT', 'LBN', 'LBY', 'MAR', 'OMN',
+                                        'PSE', 'QAT', 'SAU', 'SDN', 'SYR',
+                                        'TUN', 'ARE', 'YEM'],
+        'West Africa': ['BEN', 'BFA', 'CPV', 'CMR', 'CIV', 'GMB', 'GHA',
+                        'GIN', 'GNB', 'LBR', 'MLI', 'MRT', 'NER', 'NGA',
+                        'STP', 'SEN', 'SLE', 'TGO'],
+        'East Africa': ['BDI', 'COM', 'KEN', 'MDG', 'MUS', 'RWA', 'SYC',
+                        'SOM', 'SSD', 'TZA', 'UGA'],
+        'Ethiopia, Eritrea, and Djibouti': ['DJI', 'ERI', 'ETH'],
+        'Central Africa': ['AGO', 'CAF', 'TCD', 'COD', 'GNQ', 'GAB', 'COG'],
+        'Southern Africa': ['BWA', 'SWZ', 'LSO', 'MWI', 'MOZ', 'NAM', 'ZAF',
+                            'ZMB', 'ZWE'],
+    }
+
+    LON_RANGE = (-170, 190)
+    LAT_RANGE = (-58, 82)
+    GEO_DOMAIN = {'x': (0.0, 1.0), 'y': (0.0, 1.0)}
+
+
+    def lonlat_to_domain(lon, lat):
+        # Equirectangular: linear map (lon, lat) to the geo subplot's (x, y) domain fraction.
+        fx = (lon - LON_RANGE[0]) / (LON_RANGE[1] - LON_RANGE[0])
+        fy = (lat - LAT_RANGE[0]) / (LAT_RANGE[1] - LAT_RANGE[0])
+        x0, x1 = GEO_DOMAIN['x']
+        y0, y1 = GEO_DOMAIN['y']
+        return x0 + fx * (x1 - x0), y0 + fy * (y1 - y0)
+
+    def load_table1_plhiv_2020_24(xlsx_path):
+        """{region: number of people living with HIV, 2020-24} from Table1."""
+        t1 = pd.read_excel(xlsx_path, sheet_name='Table1', header=None)
+        header_row = next(i for i, v in t1.iloc[:, 0].items()
+                        if isinstance(v, str) and v.strip() == 'Period')
+        regions = t1.iloc[header_row, 1:17].tolist()
+        row_idx = next(i for i in t1.index
+                        if i > header_row and t1.iloc[i, 0] == '2020-24')
+        values = t1.iloc[row_idx, 1:17].tolist()
+        return dict(zip(regions, values))
+
+
+    def load_table2_region_period(xlsx_path, region, period):
+        """{subtype_group: fraction} for one region/period from Table2."""
+        t2 = pd.read_excel(xlsx_path, sheet_name='Table2', header=2)
+        t2['Region'] = t2['Region'].ffill()
+        row = t2[(t2['Region'] == region) & (t2['Period'] == period)].iloc[0]
+        direct = {'A': 'A', 'B': 'B', 'C': 'C', 'D': 'D', 'F': 'F', 'G': 'G',
+                'H': 'H', 'J': 'J', 'K': 'K', 'L': 'L',
+                'CRF01_AE': '01_AE', 'CRF02_AG': '02_AG', 'CRF07_BC': '07_BC'}
+        other_cols = ['Other CRFs', 'URFs', 'Unspecified recombinants']
+        out = {grp: row[col] for col, grp in direct.items()}
+        out['Other CRFs / URF'] = sum(row[c] for c in other_cols)
+        return out
+
+    plhiv = load_table1_plhiv_2020_24(xlsx_path)
+    max_plhiv = max(plhiv[r] for r in REGION_CENTROIDS)
+
+    def pie_diameter(region):
+        frac = plhiv[region] / max_plhiv
+        return min_pie_diameter + (max_pie_diameter - min_pie_diameter) * math.sqrt(frac)
+
+    fig = go.Figure()
+    labels = SUBTYPE_ORDER
+
+    # world map, region shading
+    region_names = list(REGION_COUNTRIES.keys())
+    region_index = {r: i for i, r in enumerate(region_names)}
+    locations, z = [], []
+    for region, isos in REGION_COUNTRIES.items():
+        for iso in isos:
+            locations.append(iso)
+            z.append(region_index[region])
+    region_palette = [
+        # Grey-blues
+        '#9ea8b6', '#b0b8c4', '#c2c9d2', '#6b778d', '#8693a4',
+        # Neutral greys
+        '#adb5bd', '#cfd4da', '#8d99ae', '#6c757d', '#d6dbdf',
+        # Grey-pinks
+        # '#d8b4b8', '#c79d9e', '#e2c2c6', '#b5838d', '#e9d5d8'
+    ]
+    n = len(region_names)
+    colorscale = []
+    for i in range(n):
+        colorscale.append([i / n, region_palette[i % len(region_palette)]])
+        colorscale.append([(i + 1) / n, region_palette[i % len(region_palette)]])
+
+    fig.add_trace(go.Choropleth(
+            locations=locations, z=z, locationmode='ISO-3',
+            colorscale=colorscale, zmin=0, zmax=n, showscale=False,
+            marker_line_color='white', marker_line_width=0.3,
+            hoverinfo='skip', geo='geo',
+        ))
+
+    # one pie per region, sized by PLHIV, placed on the map
+    for region, (lon, lat) in REGION_CENTROIDS.items():
+        x, y = lonlat_to_domain(lon, lat)
+        d = pie_diameter(region)
+        vals_dict = load_table2_region_period(xlsx_path, region, '2020-24')
+        vals = [vals_dict[g] for g in labels]
+        fig.add_trace(go.Pie(
+            labels=labels, values=vals, sort=False,
+            opacity=0.8,  # Sets transparency for pie charts (0.0 = fully transparent, 1.0 = fully opaque)
+            domain={'x': [max(x - d / 2, 0), min(x + d / 2, 1)],
+                    'y': [max(y - d / 2, 0), min(y + d / 2, 1)]},
+            marker=dict(colors=[ST_COLORS.get(g, '#a6a6a6') for g in labels], line=dict(color='white', width=0.1)),
+            textinfo='none',
+            hovertemplate=f'<b>{region}</b><br>' + '%{label}: %{percent}<extra></extra>',
+            legendgroup='subtype', showlegend=(region == 'Southern Africa'), name=region,
+        ))
+        fig.add_annotation(
+            x=x, y=min(y + d / 2 + 0.015, 1.0),
+            xref='paper', yref='paper',
+            text=f'<b>{region}</b>',  # Made text bold for extra clarity
+            showarrow=False,
+            xanchor='center', yanchor='bottom',
+            font=dict(size=10, color='black'),  # Increased font size and explicitly forced pure black
+        )
+
+    fig.update_layout(
+        template='plotly_white', width=1400, height=900,
+        margin=dict(t=60, b=20, l=20, r=200),
+        legend=dict(title='<b>HIV-1 variant</b>', x=1.02, y=0.5, yanchor='middle'),
+        geo=dict(
+            domain=GEO_DOMAIN, projection_type='equirectangular',
+            lonaxis=dict(range=list(LON_RANGE)), lataxis=dict(range=list(LAT_RANGE)),
+            showcountries=True, countrycolor='white',
+            showframe=False, showcoastlines=False, bgcolor='rgba(0,0,0,0)',
+        ),
+        title=dict(text='<b>Regional distribution of HIV-1 variants, 2020-24</b>', x=0.5),
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+    )
+
+    fig.write_html(save_path)
+    path = Path(save_path)
+    # fig.write_image(path.with_suffix('.svg'))
+    # Save as JSON format and convert to svg locally
+    with open(path.with_suffix('.json'), 'w') as f:
+        f.write(fig.to_json())
+    print(f'Map saved at {save_path}')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 if __name__ == "__main__":
     breakpoints_path = f"{workspace_path}/data/output/lanl_crf_breakpoints_hxb2.csv"
@@ -1353,8 +1712,19 @@ if __name__ == "__main__":
     visualize_diversity(
         diversity_arrays,
         hxb2_to_ata,
+        st_to_print=names,
+        types_to_print=['raw', 'smoothed'],
         window_size=100, 
         save_path=f"{workspace_path}/figs/empirical_diversity.html"
+    )
+
+    visualize_diversity(
+        diversity_arrays,
+        hxb2_to_ata,
+        st_to_print=['avg'],
+        types_to_print=['smoothed'],
+        window_size=100, 
+        save_path=f"{workspace_path}/figs/empirical_diversity_avg_smoothed.html"
     )
     
     save_path_loss = f"{workspace_path}/figs/loss_evolution.html"
@@ -1367,21 +1737,63 @@ if __name__ == "__main__":
     plot_time_per_10k(processing_times, save_path_time)
 
     # subtyping results comparison
-    tools=['comet', 'regav3', 'jphmm', 'sbtr']
-    genes=['full', 'prot', 'rt']
+    tools=['comet', 'regav3', 'sbtr']
+    genes=['full', 'prot']
     base_path = f"{workspace_path}/data/input_sequences/regav3_testset"
 
     tool_paths = {
         f"{tool}_{gene}": f"{base_path}/{tool}_{gene}_results.csv" 
         for tool, gene in product(tools, genes)
     }
-    subtypes=['A1', 'B', 'C', '01_AE', '02_AG', '06_cpx', '14_BG']
+    subtypes=['A', 'B', 'C', '01_AE', '02_AG', '06_cpx', '07_BC', '12_BF', '14_BG']
     save_path = f"{workspace_path}/figs/metrics_comparison_grid.html"
+
+    # add 'add_precision' if needed
     tool_dfs = {
-        name: add_precision(load_subtyping_csv(path, name))
+        name: load_subtyping_csv(path, name)
         for name, path in tool_paths.items()
     }
+    tool_dfs = {
+        name: (df if "precision" in df.columns else add_precision(df))
+        for name, df in tool_dfs.items()
+    }
+
+    for name, df in tool_dfs.items():
+        if name == 'sbtr_prot':
+            print(df)
 
     forest_grid(
         tool_dfs, tools=tools, genes=genes, save_path=save_path,
         metrics=["sensitivity", "precision"], subtypes=subtypes)
+
+
+    path_to_results=f'/pasteur/helix/projects/mPath/oanoufa/sbtr/data/output/test/syn_v{VERSION}/matching_scores_per_subtype.csv'
+    df = pd.read_csv(path_to_results)
+
+    tool_dfs = {
+        "sbtr": df[df["methods_compared"] == "sbtr_True"],
+        "jpHMM": df[df["methods_compared"] == "jpHMM_True"],
+    }
+
+    save_path=f"{workspace_path}/figs/per_subtype_per_position_comparison.html"
+    per_subtype_per_position_graph(
+        tool_dfs,
+        tools=["sbtr", "jpHMM"],
+        save_path=save_path,
+        metrics=("sensitivity", "precision"),
+    )
+
+    lanl_full_md_path='/pasteur/helix/projects/mPath/oanoufa/sbtr/data/input_sequences/lanl_full/metadata_FULL.tsv'
+    khalid_et_al_data='/pasteur/helix/projects/mPath/oanoufa/sbtr/data/input_sequences/lanl_full/Khalid_2026_HIV1_Tables1_2.xlsx'
+    save_path=f"{workspace_path}/figs/pie_subtype_infections.html"
+    pie_infections_sequences_dist(
+        plot_df_path=lanl_full_md_path,
+        xlsx_path=khalid_et_al_data,
+        save_path=save_path)
+
+    save_path=f"{workspace_path}/figs/infection_map.html"
+    infection_map(
+        xlsx_path=khalid_et_al_data,
+        save_path=save_path,
+        max_pie_diameter=0.25,
+        min_pie_diameter=0.03)

@@ -40,22 +40,46 @@ class HIVSubtypingConfig(PretrainedConfig):
         self.custom_dropout = custom_dropout
         self.custom_pad_token_id = custom_pad_token_id
 
-class HIVClassificationHead(nn.Module):
-    def __init__(self, embed_dim: int, num_subtypes: int, smooth_kernel: int = 5):
+class DilatedSmoother(nn.Module):
+    def __init__(self, num_subtypes: int, kernel_size: int = 5, dilations=(1, 2, 4, 8)):
         super().__init__()
+        self.layers = nn.ModuleList([
+            nn.Conv1d(
+                num_subtypes, num_subtypes, kernel_size=kernel_size,
+                padding=(kernel_size - 1) * d // 2, dilation=d,
+                groups=num_subtypes
+            )
+            for d in dilations
+        ])
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [batch, num_subtypes, seq_len]
+        for conv in self.layers:
+            x = x + self.act(conv(x))   # residual so raw logits aren't fully overwritten
+        return x
+
+class HIVClassificationHead(nn.Module):
+    def __init__(self, embed_dim: int, num_subtypes: int, hidden_dim: int = None,
+                 smooth_kernel: int = 5, dropout: float = 0.1):
+        super().__init__()
+        hidden_dim = hidden_dim or embed_dim // 2
         self.layer_norm = nn.LayerNorm(embed_dim)
-        self.head = nn.Linear(embed_dim, num_subtypes)
-        self.smooth = nn.Conv1d(
-            num_subtypes, num_subtypes, kernel_size=smooth_kernel,
-            padding=smooth_kernel // 2, groups=num_subtypes
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_subtypes),
         )
+        self.smooth = DilatedSmoother(
+            num_subtypes, kernel_size=5, dilations=(1, 2, 4, 8))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.layer_norm(x)
-        logits = self.head(x)              # [batch, seq_len, num_subtypes]
-        logits = logits.transpose(1, 2)    # [batch, num_subtypes, seq_len]
+        logits = self.mlp(x)
+        logits = logits.transpose(1, 2)
         logits = self.smooth(logits)
-        return logits.transpose(1, 2)      # [batch, seq_len, num_subtypes]
+        return logits.transpose(1, 2)
 
 class HFModelForHIVSubtyping(PreTrainedModel):
     """Backbone + HIV subtype classification head"""

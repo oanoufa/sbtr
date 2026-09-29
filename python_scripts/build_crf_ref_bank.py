@@ -21,11 +21,11 @@ from Bio.SeqRecord import SeqRecord
 from Bio.SeqIO.FastaIO import FastaWriter
 from huggingface_hub import login
 
-from src.mutator_class import SequenceMutator
-from src import config
-from src.dataset_class import HIVSequenceDataset
-from src.model_class import HFModelForHIVSubtyping
-from src.crf_decoder_class import CRFReferenceDecoder
+from python_scripts.src.mutator_class import SequenceMutator
+from python_scripts.src import config
+from python_scripts.src.dataset_class import HIVSequenceDataset
+from python_scripts.src.model_class import HFModelForHIVSubtyping
+from python_scripts.src.crf_decoder_class import CRFReferenceDecoder
 
 TOKEN_PATH = config.TOKEN_PATH
 with open(TOKEN_PATH, 'r') as f:

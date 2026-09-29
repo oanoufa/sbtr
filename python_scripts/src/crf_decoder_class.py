@@ -550,7 +550,9 @@ class CRFReferenceDecoder:
 
         # composition
         total_real  = int(mask.sum())
-        composition = self._composition_from_regions(regions_dealigned, total_len=total_real)
+        composition = self._composition_from_regions(
+            regions_dealigned, total_len=total_real, min_region_fraction=0,
+            )
         if not composition:
             composition = [dominant] if dominant else []
         composition_str = (
