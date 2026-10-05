@@ -25,7 +25,12 @@ import random
 import warnings
 import math
 from matplotlib.colors import LinearSegmentedColormap
+from html import escape
+import matplotlib.patheffects as pe
+from matplotlib.patches import Rectangle
 
+
+from python_scripts.src.mutator_class import parse_iqtree_rates
 from python_scripts.src import config
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -38,11 +43,17 @@ COLOR_SCHEME = config.COLOR_SCHEME
 ST_COLORS = config.ST_COLORS
 METRICS_DIR = config.MODEL_CONFIG["metrics_dir"]
 VERSION = config.VERSION
+ATA_LEN = config.ATA_LEN
 
 JPHMM_TO_SBTR_LTR = {
     "5'-Insertion":"5'LTR",
     "3'-Insertion":"3'LTR",
 }
+
+FRAME_LANES = {1: (0.67, 1.0), 2: (0.33, 0.66), 3: (0.0, 0.33)}
+PAD = 0.015
+MULTI_EXON = ("tat", "rev")
+
 
 
 def visualize_breakpoints(
@@ -157,6 +168,9 @@ def visualize_diversity(
     }
 
     for i, (gene, (start_hxb2, end_hxb2, frame)) in enumerate(GENES_RAW.items()):
+        if 'LTR' in gene:
+            # Only showing genes
+            continue
         start_ata = hxb2_to_ata[start_hxb2]
         end_ata   = hxb2_to_ata[end_hxb2]
         y0, y1    = frame_lanes[frame]
@@ -193,16 +207,9 @@ def visualize_diversity(
         "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
     ]
 
-    # LTR boundaries
-    max_5 = hxb2_to_ata[max(config.START_5LTR)]
-    min_3 = hxb2_to_ata[min(config.NEF_3LTR)]
-    max_3 = ata_len
-
     for i, (name, diversity_array) in enumerate(diversity_arrays.items()):
         color          = trace_colors[i % len(trace_colors)]
         # Zero rates in LTR regions
-        diversity_array[0:max_5] = 1e-10
-        diversity_array[min_3:max_3] = 1e-10
         diversity_array /= diversity_array.sum()
         smoothed_rates = np.convolve(diversity_array, kernel, mode='same')
         mean_rate      = np.mean(diversity_array)
@@ -244,6 +251,107 @@ def visualize_diversity(
     fig.write_image(path.with_suffix(".svg"))
     
     print(f"Diversity visualization saved to: {save_path}", flush=True)
+
+
+def _subtype_array(regions_aligned, n_total):
+    arr = np.full(n_total, "", dtype=object)
+    for r_start, r_end, st in regions_aligned:
+        st = JPHMM_TO_SBTR_LTR.get(st, st)
+        s, e = max(0, int(r_start)), min(n_total, int(r_end))
+        if s < e:
+            arr[s:e] = str(st)
+    return arr
+
+
+def _gene_entries(hxb2_to_ata, n_total):
+    entries = []
+    for name, (s_h, e_h, frame) in GENES_RAW.items():
+        if 'LTR' in name:
+            # Skip LTR
+            continue
+        s = max(0, int(hxb2_to_ata[s_h]))
+        e = min(n_total, int(hxb2_to_ata[e_h]))
+        if s >= e:
+            continue
+        base = next((b for b in MULTI_EXON if name.lower().startswith(b)), name)
+        entries.append(dict(name=name, base=base, frame=frame, s=s, e=e))
+    return entries
+
+
+def _gene_runs(subtype_arr, s, e):
+    pos = s
+    for val, grp in groupby(subtype_arr[s:e]):
+        n = sum(1 for _ in grp)
+        yield val, pos, n
+        pos += n
+
+
+def _label_layout(entries, n_total, width, fs=7):
+    """
+    width: drawable width in the same unit as fs (pt for matplotlib, px for SVG).
+    Returns labels [(x, y, text, ha, va)] and connectors [[(x, y), ...]],
+    in (bp, lane-fraction) coordinates.
+    """
+    bp_per_u = n_total / width
+    char_w = 0.55 * fs
+    groups = defaultdict(list)
+    lane_rects = defaultdict(list)
+    for g in entries:
+        groups[g["base"]].append(g)
+        lane_rects[g["frame"]].append((g["s"], g["e"]))
+
+    labels, connectors = [], []
+    for base, exons in groups.items():
+        exons = sorted(exons, key=lambda g: g["s"])
+        text = base.replace("_", " ")
+        # Multi-exon gene: connector line + one label centered on it
+        if len(exons) > 1:
+            for a, b in zip(exons[:-1], exons[1:]):
+                xa, xb = (a["s"] + a["e"]) / 2, (b["s"] + b["e"]) / 2
+                if a["frame"] != b["frame"]:
+                    y_line = FRAME_LANES[min(a["frame"], b["frame"])][0]
+                    def attach(g):  # edge of the exon facing the line
+                        y0, y1 = FRAME_LANES[g["frame"]]
+                        return (y1 - PAD) if y1 <= y_line + 1e-6 else (y0 + PAD)
+                    pts = [(xa, attach(a)), (xa, y_line), (xb, y_line), (xb, attach(b))]
+                else:
+                    y0, y1 = FRAME_LANES[a["frame"]]
+                    y_line = (y0 + y1) / 2
+                    pts = [(a["e"], y_line), (b["s"], y_line)]
+                connectors.append(pts)
+                labels.append(((xa + xb) / 2, y_line + 0.01, text, "center", "bottom"))
+            continue
+
+        g = exons[0]
+        y0, y1 = FRAME_LANES[g["frame"]]
+        yc = (y0 + y1) / 2
+        tw = len(text) * char_w * bp_per_u
+        margin = 3 * bp_per_u
+        if tw + margin <= g["e"] - g["s"]:
+            labels.append(((g["s"] + g["e"]) / 2, yc, text, "center", "center"))
+            continue
+
+        # Too small: put the name next to the gene (right first, then left)
+        gap = 2 * bp_per_u
+        others = [r for r in lane_rects[g["frame"]] if r != (g["s"], g["e"])]
+        placed = False
+        for side in ("right", "left"):
+            if side == "right":
+                x0 = g["e"] + gap; x1 = x0 + tw; anchor, ha = x0, "left"
+            else:
+                x1 = g["s"] - gap; x0 = x1 - tw; anchor, ha = x1, "right"
+            if x0 < 0 or x1 > n_total:
+                continue
+            if all(x1 <= s or x0 >= e for s, e in others):
+                labels.append((anchor, yc, text, ha, "center"))
+                placed = True
+                break
+        if not placed:
+            xc = (g["s"] + g["e"]) / 2
+            y_lab = y0 - 0.03
+            connectors.append([(xc, y0 + PAD), (xc, y_lab + 0.005)])
+            labels.append((xc, y_lab, text, "center", "top"))
+    return labels, connectors
 
 def visualize_sample_probs(
     preds_slice: np.ndarray,
@@ -288,7 +396,7 @@ def visualize_sample_probs(
         # "cividis", "turbo", 
         # custom_cmap,
         ]
-    # Only load this one sample from disk.
+
     loss_mask = np.asarray(ploss_slice)
     labels = np.asarray(preds_slice)
 
@@ -297,7 +405,6 @@ def visualize_sample_probs(
     n_total = len(real_loss_mask)
 
     EXCLUDED_SUBTYPES = {"U", "5'LTR", "3'LTR"}
-
     id_to_st = {v: k for k, v in pure_st_to_id_dict.items()}
     keep_ids = [
         i for i in range(len(pure_st_to_id_dict))
@@ -311,11 +418,9 @@ def visualize_sample_probs(
 
     # Figure setup
     gene_track_h = 2.4
-
     fig = plt.figure(
         figsize=(14, 2 + gene_track_h + 0.3 * n_subtypes)
     )
-
     gs = fig.add_gridspec(
         3,
         2,
@@ -324,12 +429,10 @@ def visualize_sample_probs(
         hspace=0.10,
         wspace=0.03,
     )
-
     ax_mask = fig.add_subplot(gs[0, 0])
     ax_lab = fig.add_subplot(gs[1, 0], sharex=ax_mask)
     ax_st = fig.add_subplot(gs[2, 0], sharex=ax_mask)
     ax_cb = fig.add_subplot(gs[1, 1])
-
     frame_lanes = {
         1: (0.67, 1.0),
         2: (0.33, 0.66),
@@ -345,22 +448,18 @@ def visualize_sample_probs(
         vmax=1,
         interpolation="nearest",
     )
-
     ax_mask.set_yticks([0])
     ax_mask.set_yticklabels(["loss\nmask"], fontsize=8)
-
     ax_mask.set_title(
         f"Sample {sample_name}  —  "
         f"{n_real} real tokens / {n_total} total "
         f"({n_total - n_real} padding)",
         fontsize=10,
     )
-
     plt.setp(ax_mask.get_xticklabels(), visible=False)
 
     # Row 2: Subtype probability heatmap
     cmap_choice = random.choice(CMAP_CHOICES)
-
     im = ax_lab.imshow(
         full_labels,
         aspect="auto",
@@ -369,94 +468,53 @@ def visualize_sample_probs(
         vmax=1,
         interpolation="nearest",
     )
-
     ax_lab.set_yticks(range(n_subtypes))
     ax_lab.set_yticklabels(subtype_names, fontsize=7)
-
     plt.setp(ax_lab.get_xticklabels(), visible=False)
 
     # Row 3: Subtype region track
     ax_st.set_xlim(0, n_total)
     ax_st.set_ylim(0, 1)
-
     for spine in ("top", "right", "left"):
         ax_st.spines[spine].set_visible(False)
-
     ax_st.set_yticks([])
-
     ax_st.xaxis.set_major_locator(
         ticker.MultipleLocator(max(1, n_total // 10))
     )
-
     ax_st.tick_params(axis="x", labelsize=8)
     ax_st.set_xlabel(
         "ATA alignment position (bp)",
         fontsize=9,
     )
 
-    subtype_arr = np.full(
-        n_total,
-        fill_value="",
-        dtype=object,
-    )
+    subtype_arr = _subtype_array(regions_aligned, n_total)
+    entries = _gene_entries(hxb2_to_ata, n_total)
 
-    for r_start, r_end, subtype in regions_aligned:
-        if subtype in JPHMM_TO_SBTR_LTR.keys():
-            subtype = JPHMM_TO_SBTR_LTR[subtype]
-
-        s = max(0, int(r_start))
-        e = min(n_total, int(r_end))
-
-        if s < e:
-            subtype_arr[s:e] = str(subtype)
-
-    frame_to_ranges = defaultdict(list)
-
-    for gene, (start_hxb2, end_hxb2, frame) in GENES_RAW.items():
-        s_ata = int(hxb2_to_ata[start_hxb2])
-        e_ata = int(hxb2_to_ata[end_hxb2])
-        frame_to_ranges[frame].append((s_ata, e_ata))
-
-    pad = 0.015
     st_bars = defaultdict(list)
+    for g in entries:
+        y0, y1 = FRAME_LANES[g["frame"]]
+        rect_h = (y1 - y0) - 2 * PAD
+        for val, pos, n in _gene_runs(subtype_arr, g["s"], g["e"]):
+            if val:
+                st_bars[(ST_COLORS.get(val, "#CCCCCC"), y0 + PAD, rect_h)].append((pos, n))
+        # thin black gene outline
+        ax_st.add_patch(Rectangle(
+            (g["s"], y0 + PAD), g["e"] - g["s"], rect_h,
+            fill=False, ec="black", lw=0.5, zorder=3,
+        ))
 
-    for frame, gene_ranges in frame_to_ranges.items():
-        y0, y1 = frame_lanes[frame]
-        rect_h = (y1 - y0) - 2 * pad
+    for frame, (y0, y1) in FRAME_LANES.items():
+        ax_st.text(-n_total * 0.005, (y0 + y1) / 2, f"F{frame}",
+                   ha="right", va="center", fontsize=7, color="grey")
 
-        for g_s, g_e in gene_ranges:
-            g_s = max(0, g_s)
-            g_e = min(n_total, g_e)
-
-            if g_s >= g_e:
-                continue
-
-            pos = g_s
-
-            for val, grp in groupby(subtype_arr[g_s:g_e]):
-                run_len = sum(1 for _ in grp)
-
-                if val:
-                    st_color = ST_COLORS.get(
-                        val,
-                        "#CCCCCC",
-                    )
-
-                    st_bars[
-                        (st_color, y0 + pad, rect_h)
-                    ].append((pos, run_len))
-
-                pos += run_len
-
-        ax_st.text(
-            -n_total * 0.005,
-            (y0 + y1) / 2,
-            f"F{frame}",
-            ha="right",
-            va="center",
-            fontsize=7,
-            color="grey",
-        )
+    width_pt = ax_st.get_position().width * fig.get_figwidth() * 72
+    labels, connectors = _label_layout(entries, n_total, width_pt, fs=7)
+    halo = [pe.withStroke(linewidth=1.2, foreground="white", alpha=0.7)]
+    for pts in connectors:
+        xs, ys = zip(*pts)
+        ax_st.plot(xs, ys, color="black", lw=0.6, zorder=4)
+    for x, y, txt, ha, va in labels:
+        ax_st.text(x, y, txt, ha=ha, va=va, fontsize=7, zorder=5, path_effects=halo)
 
     for (st_color, y_bottom, height), xranges in st_bars.items():
         ax_st.broken_barh(
@@ -469,14 +527,11 @@ def visualize_sample_probs(
 
     LTR5 = "5'LTR"
     LTR3 = "3'LTR"
-
     seen_order = []
     for val in subtype_arr:
         if val != "" and val not in seen_order:
             seen_order.append(val)
-
     middle = [st for st in seen_order if st not in (LTR5, LTR3)]
-
     present_subtypes = (
         ([LTR5] if LTR5 in seen_order else [])
         + middle
@@ -525,6 +580,71 @@ def visualize_sample_probs(
     )
 
     plt.close(fig)
+
+def visualize_sample_probs_light(regions_aligned, hxb2_to_ata, n_total, path,
+                    width=1100, lane_h=24, fs=9):
+    ml, mr, top = 28, 8, 4
+    pw = width - ml - mr
+    sx = pw / n_total
+    H3 = 3 * lane_h
+    height = top + H3 + 46
+    X = lambda x: ml + x * sx
+    Y = lambda y: top + (1 - y) * H3
+
+    arr = _subtype_array(regions_aligned, n_total)
+    entries = _gene_entries(hxb2_to_ata, n_total)
+
+    by_color, outlines, seen = defaultdict(list), [], []
+    for g in entries:
+        y0, y1 = FRAME_LANES[g["frame"]]
+        yt, h = Y(y1 - PAD), (y1 - y0 - 2 * PAD) * H3
+        w = (g["e"] - g["s"]) * sx
+        outlines.append(f"M{X(g['s']):.1f} {yt:.1f}h{w:.1f}v{h:.1f}h-{w:.1f}z")
+        for val, pos, n in _gene_runs(arr, g["s"], g["e"]):
+            if val:
+                if val not in seen:
+                    seen.append(val)
+                by_color[ST_COLORS.get(val, "#CCCCCC")].append(
+                    f"M{X(pos):.1f} {yt:.1f}h{n * sx:.1f}v{h:.1f}h-{n * sx:.1f}z")
+
+    labels, connectors = _label_layout(entries, n_total, pw, fs=fs)
+    anchor = {"left": "start", "center": "middle", "right": "end"}
+    ay = top + H3 + 5
+
+    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+           f'viewBox="0 0 {width} {height}" font-family="Helvetica, Arial, sans-serif">']
+    for c, parts in by_color.items():
+        out.append(f'<path fill="{c}" fill-opacity="0.88" d="{"".join(parts)}"/>')
+    out.append(f'<path fill="none" stroke="#000" stroke-width="0.5" d="{"".join(outlines)}"/>')
+    for pts in connectors:
+        p = " ".join(f"{X(x):.1f},{Y(y):.1f}" for x, y in pts)
+        out.append(f'<polyline points="{p}" fill="none" stroke="#000" stroke-width="0.6"/>')
+    for x, y, txt, ha, va in labels:
+        base_attr = {"center": 'dominant-baseline="central"',
+                     "top": 'dominant-baseline="hanging"'}.get(va, "")
+        out.append(f'<text x="{X(x):.1f}" y="{Y(y):.1f}" font-size="{fs}" text-anchor="{anchor[ha]}" '
+                   f'{base_attr} stroke="#fff" stroke-width="1.2" sroke-opacity="0.7" paint-order="stroke">{escape(txt)}</text>')
+    for f, (y0, y1) in FRAME_LANES.items():
+        out.append(f'<text x="{ml - 4}" y="{Y((y0 + y1) / 2):.1f}" font-size="{fs - 2}" fill="#888" '
+                   f'text-anchor="end" dominant-baseline="central">F{f}</text>')
+
+    # axis
+    out.append(f'<line x1="{ml}" x2="{ml + pw}" y1="{ay}" y2="{ay}" stroke="#000" stroke-width="0.6"/>')
+    step = max(1, n_total // 10)
+    for t in range(0, n_total + 1, step):
+        out.append(f'<line x1="{X(t):.1f}" x2="{X(t):.1f}" y1="{ay}" y2="{ay + 3}" stroke="#000" stroke-width="0.6"/>')
+        out.append(f'<text x="{X(t):.1f}" y="{ay + 12}" font-size="{fs - 1}" text-anchor="middle">{t}</text>')
+
+    # legend
+    lx = ml
+    for st in seen:
+        out.append(f'<rect x="{lx}" y="{height - 13}" width="9" height="9" fill="{ST_COLORS.get(st, "#CCCCCC")}" stroke="#555" stroke-width="0.4"/>')
+        out.append(f'<text x="{lx + 12}" y="{height - 5}" font-size="{fs - 1}">{escape(st)}</text>')
+        lx += 22 + 6 * len(st)
+
+    out.append("</svg>")
+    with open(path, "w") as f:
+        f.write("\n".join(out))
 
 
 def visualize_region_comparison(
@@ -1701,13 +1821,23 @@ if __name__ == "__main__":
 
     # rate array for diversity
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)
-    subtypes_with_data = ['A', 'B', 'C', 'D', 'AE', 'F', 'G']
+    subtypes_with_data = [
+        'A',
+        # 'B', 
+        'C', 'D', 'AE', 'F', 'G']
     names = subtypes_with_data + ['avg']
     diversity_arrays = {}
-    for name in names:
-        rate_array_path = f"{workspace_path}/data/diversity/site_rates_{name}.npy"
-        diversity_array = np.load(rate_array_path)
+    
+    for name in subtypes_with_data:
+        rate_path = f"{workspace_path}/data/output/rates/HIV1_{name}_ALIGNED.fasta.rate"
+        diversity_array = parse_iqtree_rates(rate_path, ATA_LEN, use_classes=True)
         diversity_arrays[name] = diversity_array
+
+    # Calculate the element-wise average across all collected subtype arrays
+    diversity_arrays['avg'] = np.mean(
+        [diversity_arrays[name] for name in subtypes_with_data], 
+        axis=0
+    )
 
     visualize_diversity(
         diversity_arrays,
@@ -1732,7 +1862,7 @@ if __name__ == "__main__":
     visualize_metrics(save_path_loss=save_path_loss,
                       save_path_evol=save_path_evol)
 
-    processing_times = f"{workspace_path}/data/processing_times.csv"
+    processing_times = f"{workspace_path}/data/output/processing_times.csv"
     save_path_time = f"{workspace_path}/figs/processing_time_per_10k.html"
     plot_time_per_10k(processing_times, save_path_time)
 

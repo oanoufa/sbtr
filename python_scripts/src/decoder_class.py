@@ -1,4 +1,4 @@
-# crf_decoder_class.py
+# decoder_class.py
 """Decode subtype predictions against a bank of CRF references."""
 
 from __future__ import annotations
@@ -18,8 +18,6 @@ PROB_ZERO_THRESHOLD = config.PROB_ZERO_THRESHOLD
 CRF_MATCH_MARGIN = config.CRF_MATCH_MARGIN
 CRF_ASSIGN_THR = config.CRF_ASSIGN_THR
 PARTIAL_THR = config.PARTIAL_THR
-START_5LTR = config.START_5LTR
-NEF_3LTR = config.NEF_3LTR
 ATA_LEN = config.ATA_LEN
 LTR_LABELS = {"5'LTR", "3'LTR"}
 CRF_SEGMENTS_BD_ATA = config.CRF_SEGMENTS_BD_ATA
@@ -383,50 +381,40 @@ class CRFReferenceDecoder:
         labels = list(label_names_aligned)
         mask_list = list(mask)
 
+        valid = np.flatnonzero(mask)
+        first_valid = int(valid[0])  if valid.size else None
+        last_valid  = int(valid[-1]) if valid.size else None
+        # The ATA now spans gag start -> nef end: residues inserted before the first
+        # (after the last) aligned residue of a sequence reaching that end are the
+        # removed 5' (3') flanks.
+        reaches_5 = first_valid is not None and first_valid <= flank_tol
+        reaches_3 = last_valid  is not None and last_valid  >= self.L - 1 - flank_tol
+
         offset = 0
         for ata_pos, start_pos, end_pos in sorted(compactmapout_entry, key=lambda t: t[0]):
-            insert_idx = ata_pos + offset  # insertion point right after ref column `ata_pos`
+            insert_idx = ata_pos + offset
             n_insert = end_pos - start_pos + 1
-            prev_label = labels[insert_idx - 1] if insert_idx > 0 else None
-            next_label = labels[insert_idx] if insert_idx < len(labels) else None
-            if prev_label and prev_label != "U":
-                label_to_insert = prev_label
-            elif next_label and next_label != "U":
-                label_to_insert = next_label
+
+            if reaches_5 and ata_pos <= first_valid:
+                label_to_insert = "5'LTR"
+            elif reaches_3 and ata_pos > last_valid:
+                label_to_insert = "3'LTR"
             else:
-                label_to_insert = "U"
+                prev_label = labels[insert_idx - 1] if insert_idx > 0 else None
+                next_label = labels[insert_idx] if insert_idx < len(labels) else None
+                if prev_label and prev_label != "U":
+                    label_to_insert = prev_label
+                elif next_label and next_label != "U":
+                    label_to_insert = next_label
+                else:
+                    label_to_insert = "U"
 
             labels[insert_idx:insert_idx] = [label_to_insert] * n_insert
             mask_list[insert_idx:insert_idx] = [True] * n_insert
             offset += n_insert
 
-        label_names_dealigned = [lbl for lbl, keep in zip(labels, mask_list) if keep]
+        return [lbl for lbl, keep in zip(labels, mask_list) if keep]
 
-        return label_names_dealigned
-
-    def _overwrite_LTR(
-        self,
-        label_names_aligned: List[str],
-        hxb2_to_ata: dict,
-    ) -> List[str]:
-        """
-        Overwrite the first and last positions with labels 5'LTR and 3'LTR.
-        """
-        START_5LTR_ATA = [hxb2_to_ata[i] for i in START_5LTR]
-        NEF_3LTR_ATA = [hxb2_to_ata[i] for i in NEF_3LTR]
-        max_5LTR = max(START_5LTR_ATA)
-        min_3LTR = min(NEF_3LTR_ATA)
-
-        code_5ltr = self.label_to_code["5'LTR"]
-        code_3ltr = self.label_to_code["3'LTR"]
-
-        for i in range(0, max_5LTR + 1):
-            label_names_aligned[i] = code_5ltr
-
-        for i in range(min_3LTR, len(label_names_aligned)):
-            label_names_aligned[i] = code_3ltr
-
-        return label_names_aligned
 
     def _final_decision(
         self,
@@ -523,10 +511,6 @@ class CRFReferenceDecoder:
 
         first, last, num_path = self._trim_flanking_to_skip(num_path, mask, skip_label="U")
         active_positions = f"{str(first)}-{str(last)}" if first <= last else "none"
-
-        num_path = self._overwrite_LTR(
-            label_names_aligned=num_path,
-            hxb2_to_ata=hxb2_to_ata)
 
         if not self.has_bank:
             return num_path

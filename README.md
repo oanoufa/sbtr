@@ -98,7 +98,9 @@ apptainer run --nv \
 ### Output flag (`--wto`)
 The tool always outputs `results_<tag>.csv` and `summary_<tag>.json`. You can request additional outputs by concatenating any combination of these letters to `--wto`:
 
-* `f`: Generate plots/figures showing per-sequence predictions *(adds runtime)*.
+* `f`: Generate a detailed figure per-sequence showing the prediction array and the 1D prediction *(adds runtime)
+*.
+* `l`: Generate a lightweight svg figure for each sequence showing only the 1D prediction.
 * `r`: Output a region csv containing `(start, end, subtype)` breakpoints.
 * `p`: Export raw prediction scores as a NumPy (`.npy`) file.
 * `a`: Save model attention masks.
@@ -248,7 +250,7 @@ Those two new blocks were further inspected.
 
 ## Repository breakdown
 
-Using a genomic language model means training a model on sequence data. In the case of HIV-1, real sequence data is extremely biased towards known subtypes. `data/input` contains all real sequences that were used to train our model. We used LANL HIV-1 2023 full genome reference alignment and HIV-1 2022 full genome Super Filtered Web Alignment. Information on those alignments can be found on [LANL website](https://www.hiv.lanl.gov/content/sequence/NEWALIGN/align.html). The distributions of the sequences from both these alignments per subtype is shown below. We also display the sequence year to evaluate the temporal diversity.
+Using a genomic language model means training a model on sequence data. In the case of HIV-1, sequence data is biased. The distribution of subtypes in sequence data is very different from the distribution of subtypes in actual infections. Also, rare subtypes have very few complete sequences, preventing a deep learning model to accurately recognize those. `data/input` contains all real sequences that were used to train our model. We used LANL HIV-1 2026 full genome reference alignment and HIV-1 2025 full genome Super Filtered Web Alignment. Information on those alignments can be found on [LANL website](https://www.hiv.lanl.gov/content/sequence/NEWALIGN/align.html). The distributions of the sequences from both these alignments per subtype is shown below. We also display the sequence year to evaluate the temporal diversity.
 
 <img src="figs/readme/ref_ali_dist.png" width="800">
 

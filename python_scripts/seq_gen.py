@@ -118,7 +118,9 @@ class Sequence:
 
 
 # Parameter inference
-def infer_params(df_seg: pd.DataFrame, ata_len: int, hxb2_len: int = 9719) -> dict:
+def infer_params(
+    df_seg: pd.DataFrame, ata_len: int,
+    hxb2_len: int = config.HXB2_USED_LEN) -> dict:
     """
     Infer generative parameters from real CRF segment annotations.
     Returns dict with keys: n_breakpoints, n_subtypes, min_seg_len (in ATA coords).
@@ -518,42 +520,22 @@ def place_breakpoints(seg_subtypes, parents, ata_len,
         return breakpoints
 
 # Fragment cropping
-def sample_fragment_window(
-    ata_len: int,
-    min_frag_len: int,
-    rng,
-    hxb2_to_ata,
-    ) -> tuple[int, int]:
+def sample_fragment_window(ata_len: int, min_frag_len: int, rng) -> tuple[int, int]:
     """
     Sample a (start, end) fragment window.
 
-    Start is sampled uniformly in [5'LTR end, ata_len - (3'LTR_start + min_frag_len)].
+    Start is sampled uniformly in [0, ata_len - min_frag_len] (the alignment no
+    longer contains LTRs, so every column is a valid start).
     Length is then sampled log-uniformly in [min_frag_len, ata_len - start].
 
     Returns
     -------
-    (start, end) : int, int
-        Half-open interval [start, end) in ATA coordinates.
+    (start, end) : half-open interval [start, end) in ATA coordinates.
     """
-    LTR5_end_hxb2 = GENES_RAW["5'LTR"][1]
-    LTR3_start_hxb2 = GENES_RAW["3'LTR"][0]
-    LTR5_end_ata = hxb2_to_ata[LTR5_end_hxb2]
-    LTR3_start_ata = hxb2_to_ata[LTR3_start_hxb2]
-
-    max_start = LTR3_start_ata - min_frag_len
-    start = int(rng.integers(LTR5_end_ata, max_start + 1)) if max_start > 0 else 0
+    start = int(rng.integers(0, ata_len - min_frag_len + 1))
     max_len = ata_len - start
-    log_len = rng.uniform(
-        np.log(min_frag_len),
-        np.log(max_len),
-    )
-    length = int(
-        np.clip(
-            np.round(np.exp(log_len)),
-            min_frag_len,
-            max_len,
-        )
-    )
+    log_len = rng.uniform(np.log(min_frag_len), np.log(max_len))
+    length = int(np.clip(np.round(np.exp(log_len)), min_frag_len, max_len))
     return start, start + length
 
 
@@ -698,14 +680,25 @@ def _worker(cfg):
                 name = f"p_{st}_{target_year}_{uuid.uuid4().hex[:8]}"
 
         # fragment cropping 
-        # Applied branch-agnostically: pure and recombinant sequences are
-        # cropped with the same probability, keeping the array shape fixed.
-        # Out-of-window bytes are set to '-', which the cleanup line below
-        # converts to 'N'; lbl_row and mask_row are zeroed so those positions
-        # contribute nothing to the loss.
+        # Applied branch-agnostically: pure and recombinant sequences are cropped with the same probability, keeping the array shape fixed.
+        # Out-of-window bytes are set to '-', which the cleanup line below converts to 'N'; lbl_row and mask_row are zeroed so those positions contribute nothing to the loss.
         frag_start, frag_end = 0, ata_len
         if partial_frac > 0.0 and py_rng.random() < partial_frac:
-            frag_start, frag_end = sample_fragment_window(ata_len, min_frag_len, rng, hxb2_to_ata)
+            # Sample fragment windows until one contains actual data (not only N's or gaps)
+            for _attempt in range(max_ret):
+                frag_start, frag_end = sample_fragment_window(ata_len, min_frag_len, rng)
+                window_slice = seq_row[frag_start:frag_end]
+                
+                # Check if the window has at least one valid base (not N, n, or '-')
+                has_data = np.any(
+                    (window_slice != ord('N')) & 
+                    (window_slice != ord('-'))
+                )
+                if has_data:
+                    break
+            else:
+                # Fallback if no valid window is found within max_ret (e.g., sequence is all N's)
+                frag_start, frag_end = 0, ata_len
 
             # Zero out everything outside the window
             seq_row[:frag_start]  = ord("-")
@@ -785,6 +778,12 @@ if __name__ == "__main__":
 
     # infer parameters from real CRFs
     df_seg = pd.read_csv(f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_hxb2.csv")
+    lo = config.HXB2_START
+    hi = lo + config.HXB2_USED_LEN - 1
+    df_seg = df_seg[(df_seg["end"] >= lo) & (df_seg["start"] <= hi)].copy()
+    df_seg["start"]  = df_seg["start"].clip(lower=lo)
+    df_seg["end"]    = df_seg["end"].clip(upper=hi)
+    df_seg["length"] = df_seg["end"] - df_seg["start"] + 1
     print("Inferred parameters:")
     params = infer_params(df_seg, ata_len)
 
@@ -794,7 +793,6 @@ if __name__ == "__main__":
     mutator = SequenceMutator(
         iqtree_dir=f"{WORKSPACE_PATH}/data/output/rates/",
         ata_len=ata_len,
-        hxb2_to_ata=hxb2_to_ata,
         seed=SEED,
     )
     site_rates_dict = mutator.site_rates_dict
@@ -920,11 +918,11 @@ if __name__ == "__main__":
                 keep = ~np.isin(seq_frag, [ord("-"), ord("N")])
                 seq_clean = seq_frag[keep]
                 labels_id = labels_frag[keep]
+                label_names = [ID_TO_ST_DICT[np.argmax(labels_id[j])] for j in range(len(labels_id))]
 
                 f.write(f">{names[test_indices[i]]}\n")
                 f.write(f"{''.join(map(chr, seq_clean))}\n")
 
-                label_names = [ID_TO_ST_DICT[np.argmax(labels_id[j])] for j in range(len(labels_id))]
                 regions = []
                 start, current = 0, label_names[0]
                 for j in range(1, len(label_names)):

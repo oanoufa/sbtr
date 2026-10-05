@@ -31,23 +31,29 @@ _REF_PREFIX            = re.compile(r"^Ref\.")
 _SUBTYPES_WITH_FILES   = ['A', 'B', 'C', 'D', 'AE', 'F', 'G']
 
 # Module-level functions  (import these in parallel workers)
-def parse_iqtree_rates(rate_path: str, ata_len: int) -> np.ndarray:
+def parse_iqtree_rates(rate_path: str, ata_len: int, use_classes: bool = True) -> np.ndarray:
     """
     Parse per-site posterior mean rates from an IQ-TREE .rate file.
     Returns a float32 array of length ata_len normalized to sum to 1.
     """
+    col = 3 if use_classes else 1        # C_Rate (class rate) vs Rate (posterior mean)
     rates = np.zeros(ata_len, dtype=np.float32)
+    n_sites = 0
     with open(rate_path) as fh:
         for line in fh:
             line = line.strip()
             if not line or line.startswith('#') or line.startswith('Site'):
                 continue
             parts = line.split()
-            if len(parts) < 2:
+            if len(parts) <= col:
                 continue
-            site_idx = int(parts[0]) - 1          # 1-based -> 0-based
+            site_idx = int(parts[0]) - 1
+            n_sites = max(n_sites, site_idx + 1)
             if 0 <= site_idx < ata_len:
-                rates[site_idx] = float(parts[1])
+                rates[site_idx] = float(parts[col])
+    if n_sites != ata_len:
+        raise ValueError(f"{rate_path} has {n_sites} sites but ata_len is {ata_len}: "
+                         f"computed on a different alignment")
     total = rates.sum()
     if total > 0.0:
         rates /= total
@@ -114,7 +120,7 @@ def compute_n_muts(
     seg_start:   int,
     seg_len:     int,
     subtype:     str = 'avg',
-    hxb2_len:    int = 9719,
+    hxb2_len:    int = config.HXB2_USED_LEN,
 ) -> int:
     """
     Expected number of GTR substitutions for a genomic segment.
@@ -220,12 +226,10 @@ class SequenceMutator:
         self,
         iqtree_dir: str,
         ata_len:    int,
-        hxb2_to_ata: np.ndarray,
         seed:       int = 42,
     ):
         self.iqtree_dir = Path(iqtree_dir)
         self.ata_len    = ata_len
-        self.hxb2_to_ata = hxb2_to_ata
         self._rng       = np.random.default_rng(seed)
         self._py_rng    = random.Random(seed)
 
@@ -233,23 +237,13 @@ class SequenceMutator:
         self.sub_probs_dict:  Dict[str, np.ndarray] = {}
         _Q_matrices:          Dict[str, np.ndarray] = {}
 
-        # LTR boundaries
-        max_5 = self.hxb2_to_ata[max(config.START_5LTR)]
-        min_3 = self.hxb2_to_ata[min(config.NEF_3LTR)]
-        max_3 = self.ata_len
-
         # per-subtype loading
         for st in _SUBTYPES_WITH_FILES:
             rate_file   = self.iqtree_dir / f"HIV1_{st}_ALIGNED.fasta.rate"
             iqtree_file = self.iqtree_dir / f"HIV1_{st}_ALIGNED.fasta.iqtree"
 
             print(f"  [SequenceMutator] Parsing IQ-TREE rates for subtype {st}")
-            rates = parse_iqtree_rates(str(rate_file), ata_len)
-
-            # Zero rates in LTR regions
-            rates[0:max_5] = 1e-10
-            rates[min_3:max_3] = 1e-10
-            rates /= rates.sum()
+            rates = parse_iqtree_rates(str(rate_file), ata_len, use_classes=True)
 
             self.site_rates_dict[st] = rates
 
@@ -263,11 +257,6 @@ class SequenceMutator:
         )
         avg_rates = stacked.mean(axis=0)
         avg_rates /= avg_rates.sum()
-
-        avg_rates[0:max_5] = 1e-10
-        avg_rates[min_3:max_3] = 1e-10
-        avg_rates /= avg_rates.sum()
-
         self.site_rates_dict['avg'] = avg_rates
 
         avg_Q = np.mean(

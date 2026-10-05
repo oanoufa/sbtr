@@ -11,12 +11,19 @@ COMBINED_REF_PATH = f"{WORKSPACE_PATH}/data/HIV1_COMBINED_REF.fasta"
 TOKEN_PATH = f"{WORKSPACE_PATH}/hftoken.txt"
 CRF_SEGMENTS_BD_ATA=f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_brokedown_aln.csv"
 
+
+# GLOBAL PARAMETERS
+ATA_LEN = 10240 # max length of sequences in the dataset is (11954) (16980) (11561) NOW 10240 and multiple of 128 (10240)
+HXB2_LEN = 9719
+HXB2_START = 790
+HXB2_END = 9417
+HXB2_USED_LEN = HXB2_END - HXB2_START + 1 # [START, END]
+
 # SEQUENCE GENERATION PARAMETERS
-N_SEQ = 1000000
+N_SEQ = 1500000
 RP = 0.95
 TEST_SET_SIZE = 1000
 MAX_YEAR = 2028
-ATA_LEN = 11561 # max length of sequences in the dataset is (11954) (NOW 16980) NOW 11561 and multiple of 128 (11648)
 MIN_SEG_LEN = 50 # Min length of segments of a subtype in a recombinant sequence (in ATA positions)
 MAX_SUBTYPES = 7
 MAX_BREAKPOINTS = 10
@@ -39,8 +46,8 @@ CRF_MATCH_MARGIN = 0.02 # If several CRFs are within this value, take into accou
 CRF_ASSIGN_THR = 0.5 # Minimum match to assign a CRF
 PARTIAL_THR = 7000 # Threshold to consider a sequence full (>=7000nt) or partial (<7000nt)
 
-# NUCLEOTIDE TRANSFORMER PARAMETERS
-VERSION = "0.2"
+# MODEL PARAMETERS
+VERSION = "0.3"
 PAD_LEN = 128
 SEQ_LEN_AFTER_PAD = ((ATA_LEN // PAD_LEN) + 1) * PAD_LEN
 
@@ -50,7 +57,7 @@ MODEL_CONFIG = {
     "backbone": "InstaDeepAI/NTv3_650M_pre", # zhihan1996/DNABERT-2-117M InstaDeepAI/NTv3_650M_pre InstaDeepAI/nucleotide-transformer-v2-500m-multi-species
     "tokenizer": "InstaDeepAI/NTv3_650M_pre", # /pasteur/helix/projects/mPath/oanoufa/sbtr/data/model/tokenizer/custom_hiv_tokenizer
     "checkpoint_name": f"sbtr_v{VERSION}.pt",
-    "load_checkpoint": True, # Whether to load from checkpoint to resume training or start fresh training
+    "load_checkpoint": False, # Whether to load from checkpoint to resume training or start fresh training
     "model_version": VERSION,
 
     # Data
@@ -64,7 +71,7 @@ MODEL_CONFIG = {
 
     # Training
     "batch_size": 8,
-    "num_steps_training": 100000,
+    "num_steps_training": 120000,
     # Only batch_size * num_steps_training samples will be used for training (randomly sampled from the training split)
     "log_every_n_steps": 10000,
     "learning_rate": 1e-4,
@@ -243,39 +250,26 @@ MASKED_POSITIONS_HXB2 = START_5LTR + EXTENDED_DRM_HXB2_POSITIONS + NEF_3LTR
 
 def build_hxb2_ata_maps(hxb2_ata_seq: str) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Build bidirectional maps between alignment columns and HXB2 positions.
-
-    Parameters
-    ----------
-    hxb2_ata_seq : str
-        HXB2 row in the multiple-sequence alignment (``'-'`` = gap column).
-
-    Returns
-    -------
-    ata_to_hxb2 : np.ndarray, shape (aln_len,), dtype int32
-        ata_to_hxb2[col] = HXB2 position (1-based) of alignment column ``col``.
-        Gap columns carry forward the position of the nearest preceding base;
-        columns before the first HXB2 base carry 0.
-
-    hxb2_to_ata : np.ndarray, shape (hxb2_len + 1,), dtype int32
-        hxb2_to_ata[pos] = alignment column index of HXB2 position ``pos``
-        (1-based).  Index 0 is unused (set to 0).
+    ata_to_hxb2[col] = full-genome HXB2 position (1-based) of column ``col``; the
+        first HXB2 base of the cropped alignment is HXB2_START. Gap columns carry
+        the preceding position forward; columns before the first base carry 0.
+    hxb2_to_ata : shape (HXB2_LEN + 1,), indexed by full-genome HXB2 position.
+        Positions outside [HXB2_START, HXB2_START + n_bases - 1] were cropped and
+        are clamped to the first / last column. Index 0 is unused.
     """
-    seq      = np.frombuffer(hxb2_ata_seq.encode(), dtype=np.uint8)
-    is_base  = seq != ord("-")
-    ata_pos  = np.where(is_base)[0]          # aln cols where HXB2 has a base
-    ata_len  = len(hxb2_ata_seq)
-    hxb2_len = ata_pos.size
+    seq     = np.frombuffer(hxb2_ata_seq.encode(), dtype=np.uint8)
+    ata_pos = np.where(seq != ord("-"))[0]           # aln cols where HXB2 has a base
+    first   = HXB2_START
+    last    = first + ata_pos.size - 1
+    if last > HXB2_LEN:
+        raise ValueError(f"HXB2 row has {ata_pos.size} bases from {first}: runs past {HXB2_LEN}")
 
-    #  forward: alignment column to HXB2 position (gap-filled) 
-    ata_to_hxb2          = np.zeros(ata_len, dtype=np.int32)
-    ata_to_hxb2[ata_pos] = np.arange(1, hxb2_len + 1)
-    for i in range(1, ata_len):
-        if ata_to_hxb2[i] == 0:
-            ata_to_hxb2[i] = ata_to_hxb2[i - 1]
+    ata_to_hxb2 = np.zeros(len(hxb2_ata_seq), dtype=np.int32)
+    ata_to_hxb2[ata_pos] = np.arange(first, last + 1)
+    ata_to_hxb2 = np.maximum.accumulate(ata_to_hxb2)      # forward-fill gap columns
 
-    #  reverse: HXB2 position to alignment column (exact) 
-    hxb2_to_ata     = np.zeros(hxb2_len + 1, dtype=np.int32)  # index 0 unused
-    hxb2_to_ata[1:] = ata_pos
-
+    hxb2_to_ata = np.zeros(HXB2_LEN + 1, dtype=np.int32)
+    hxb2_to_ata[first:last + 1] = ata_pos
+    hxb2_to_ata[1:first]        = ata_pos[0]              # cropped 5' region
+    hxb2_to_ata[last + 1:]      = ata_pos[-1]             # cropped 3' region
     return ata_to_hxb2, hxb2_to_ata

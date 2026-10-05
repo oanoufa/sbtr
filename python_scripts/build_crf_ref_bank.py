@@ -25,7 +25,7 @@ from python_scripts.src.mutator_class import SequenceMutator
 from python_scripts.src import config
 from python_scripts.src.dataset_class import HIVSequenceDataset
 from python_scripts.src.model_class import HFModelForHIVSubtyping
-from python_scripts.src.crf_decoder_class import CRFReferenceDecoder
+from python_scripts.src.decoder_class import CRFReferenceDecoder
 
 TOKEN_PATH = config.TOKEN_PATH
 with open(TOKEN_PATH, 'r') as f:
@@ -441,7 +441,6 @@ if __name__ == "__main__":
     mutator = SequenceMutator(
             iqtree_dir=f"{WORKSPACE_PATH}/data/output/rates/",
             ata_len=ATA_LEN,
-            hxb2_to_ata=hxb2_to_ata,
             seed=42,
         )
     # Model + tokenizer

@@ -20,11 +20,11 @@ from typing import Dict, List, Set, Tuple
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 
-from python_scripts.figs import visualize_sample_probs
+from python_scripts.figs import visualize_sample_probs, visualize_sample_probs_light
 from python_scripts.src import config
 from python_scripts.src.dataset_class import HIVSequenceDataset
 from python_scripts.src.model_class import HFModelForHIVSubtyping
-from python_scripts.src.crf_decoder_class import CRFReferenceDecoder
+from python_scripts.src.decoder_class import CRFReferenceDecoder
 
 ST_TO_ID_DICT      = config.ST_TO_ID_DICT
 NUM_SUBTYPES       = len(ST_TO_ID_DICT)
@@ -51,8 +51,11 @@ parser.add_argument(
     "--seq",
     type=str,
     required=True,
-    help="FASTA file of query sequences or an alignment.\n"
-    "Will be dealigned and re-aligned internally.",
+    help=(
+        "Path to query sequences or an alignment file. "
+        "Supported formats: FASTA, FASTQ, PHYLIP, NEXUS. "
+        "Will be dealigned and re-aligned internally."
+    ),
 )
 parser.add_argument(
     "--mafft_bin",
@@ -92,10 +95,11 @@ parser.add_argument(
     type=str,
     default="",
     help="""Flags determining extra output files. Combine letters in any order:
-  f : Output prediction figures per sequence (increases runtime)
-  r : Output regions CSV with (start, end, subtype)
-  p : Output raw .npy file of predictions
-  a : Output attention masks""",
+  f: Output prediction figures per sequence (increases runtime)
+  l: Output light svg prediction figures
+  r: Output regions CSV with (start, end, subtype)
+  p: Output raw .npy file of predictions
+  a: Output attention masks""",
 )
 
 args = parser.parse_args()
@@ -179,23 +183,68 @@ def parse_compactmapout(
     return mapping
 
 
-def dealign_to_records(
-    input_path: Path,
-    ) -> List:
+from Bio import AlignIO, SeqIO
+from Bio.Seq import Seq
+from pathlib import Path
+from typing import List
+
+
+def dealign_to_records(input_path: Path) -> List:
     """
-    Strip gaps from an alignment (or pass already-flat sequences through),
-    producing query records ready to be aligned to the reference with MAFFT.
-    Mirrors the previous standalone alignment_to_seq.py script.
+    Automatically detects format (FASTA, FASTQ, PHYLIP, NEXUS, CLUSTAL),
+    strips gaps/dots from alignments or unaligned sequences, and produces 
+    query records ready to be aligned to the reference with MAFFT.
     """
+    parsed_records = None
+    format_used = None
+
+    # Try unaligned sequence formats (FASTA, FASTQ)
+    for fmt in ["fasta", "fastq"]:
+        try:
+            with open(input_path, "r") as handle:
+                parsed = list(SeqIO.parse(handle, fmt))
+                if parsed:
+                    parsed_records = parsed
+                    format_used = fmt.upper()
+                    break
+        except Exception:
+            pass
+
+    # Try alignment formats (PHYLIP, NEXUS, CLUSTAL) if unaligned failed
+    if not parsed_records:
+        for fmt in ["phylip", "phylip-relaxed", "nexus", "clustal"]:
+            try:
+                with open(input_path, "r") as handle:
+                    alignment = AlignIO.read(handle, fmt)
+                    if alignment:
+                        # Convert MultipleSeqAlignment into a list of SeqRecords
+                        parsed_records = list(alignment)
+                        format_used = f"Alignment ({fmt.upper()})"
+                        break
+            except Exception:
+                pass
+
+    if not parsed_records:
+        raise ValueError(
+            f"Could not parse '{input_path}'. Please check that it is a valid "
+            "FASTA, FASTQ, PHYLIP, NEXUS, or CLUSTAL file."
+        )
+    print(f"Loaded {len(parsed_records)} records using format: {format_used}")
+
     records = []
-    for index, record in enumerate(SeqIO.parse(str(input_path), "fasta")):
+    for index, record in enumerate(parsed_records):
+        # Skip HXB2 reference if it is the first record
         if index == 0 and "HXB2" in record.id:
             continue
         record.description = ""
-        seq = str(record.seq).upper().replace('-', '').strip('N')
-        record.seq = Seq(seq)
+        # Clean sequence: uppercase, remove alignment gaps (- and .), strip leading/trailing Ns
+        seq_str = str(record.seq).upper().replace("-", "").replace(".", "").strip('N')
+        if not seq_str:
+            continue  # Skip if sequence becomes empty after cleaning
+        record.seq = Seq(seq_str)
         record.id = record.id.replace("Ref.", "")
         records.append(record)
+        
     return records
 
 
@@ -290,7 +339,16 @@ def process_single_sample_worker(
         for start, end, subtype in crf_result["regions_dealigned"]:
             region_lines.append(f"{sample_name},{start},{end},{subtype},{end - start + 1}\n")
 
-    if 'f' in wto:
+    if 'l' in wto:
+        out_path = str(sample_vis_dir / f"{sample_name}_light_preds.svg")
+        visualize_sample_probs_light(
+            regions_aligned=crf_result["regions_aligned"],
+            hxb2_to_ata=HXB2_TO_ATA,
+            n_total=ATA_LEN,
+            path=out_path,
+        )
+
+    elif 'f' in wto:
         out_path = str(sample_vis_dir / f"{sample_name}_preds.png")
         visualize_sample_probs(
             preds_slice=preds_slice,
@@ -301,6 +359,7 @@ def process_single_sample_worker(
             hxb2_to_ata=HXB2_TO_ATA,
             path=out_path,
         )
+
 
     return result_line, region_lines
 

@@ -100,7 +100,9 @@ _CRF26_A5U_SEGMENTS: List[Tuple[int, int, str]] = [
     (8373, 9719, "A5"),
 ]
 
-_HXB2_LENGTH: int = 9719
+_HXB2_LENGTH = config.HXB2_LEN
+_HXB2_USED_LEN = config.HXB2_USED_LEN
+HXB2_FIRST_POS = config.HXB2_START
 _CRF_RE      = re.compile(r"^\d+_", re.IGNORECASE)
 _CRF01_AE_RE = re.compile(r"^(CRF)?01[_-]?AE$",   re.IGNORECASE)
 _CRF26_A5U_RE= re.compile(r"^(CRF)?26[_-]?A5U?$", re.IGNORECASE)
@@ -123,6 +125,15 @@ def normalize_subtype(raw: str) -> str:
 
     if s in ST_TO_ID_DICT:
         return s
+
+    if s == 'A':
+        return 'A1'
+
+    if s == 'E':
+        return 'E'
+
+    if s == 'F':
+        return '/'.join(normalize_subtype(p) for p in ['F1', 'F2'])
 
     # Match optional CRF prefix, digits, and optional suffix
     m = re.match(r'^(?:CRF)?[_-]?(\d+)(?:[_-]?(\w+))?$', s, re.IGNORECASE)
@@ -399,10 +410,12 @@ def build_hxb2_pos_to_aln_col(hxb2_gapped: str) -> np.ndarray:
                   (i.e. ``pure_result[hxb2_id]``).
     """
     arr = np.frombuffer(hxb2_gapped.encode(), dtype=np.uint8)
-    # 0-based alignment columns that carry an actual HXB2 base
     base_cols = np.where(arr != ord('-'))[0]
-    mapping = np.zeros(len(base_cols) + 1, dtype=np.int64)
-    mapping[1:] = base_cols + 1   # store as 1-based alignment columns
+    last_pos = HXB2_FIRST_POS + len(base_cols) - 1
+    mapping = np.zeros(_HXB2_LENGTH + 1, dtype=np.int64)
+    mapping[HXB2_FIRST_POS:last_pos + 1] = base_cols + 1
+    mapping[1:HXB2_FIRST_POS] = 1            # cropped 5' region -> first column
+    mapping[last_pos + 1:] = len(arr)        # cropped 3' region -> last column
     return mapping
 
 
@@ -647,9 +660,10 @@ def build_all_crf_label_sequences(
     """
     hxb2_arr = np.frombuffer(hxb2_gapped.encode(), dtype=np.uint8)
 
-    # Alignment columns that carry an actual HXB2 base (col i -> HXB2 pos i+1)
+    # Alignment columns that carry an actual HXB2 base
     hxb2_base_cols = np.where(hxb2_arr != ord('-'))[0]
-    hxb2_len       = len(hxb2_base_cols)   # = 9719 for the standard alignment
+    n_base         = len(hxb2_base_cols)     # = _HXB2_USED_LEN after cropping
+    hxb2_len       = _HXB2_LENGTH            # label arrays stay in full HXB2 coordinates
     aln_len        = len(hxb2_gapped)
 
     df_by_crf: Dict[str, pd.DataFrame] = {
@@ -669,9 +683,9 @@ def build_all_crf_label_sequences(
             cache = cache,
         )
 
-        # Project: hxb2_base_cols[0] ↔ HXB2 pos 1, [k] ↔ pos k+1
+        # Project: hxb2_base_cols[k] <-> HXB2 pos HXB2_FIRST_POS + k
         aln_labels = np.full(aln_len, '-', dtype=object)
-        aln_labels[hxb2_base_cols] = hxb2_labels[1 : hxb2_len + 1]
+        aln_labels[hxb2_base_cols] = hxb2_labels[HXB2_FIRST_POS : HXB2_FIRST_POS + n_base]
         # Fill gaps that are between segments of the same subtype with that subtype
         # AAA------AAA --> AAAAAAAAAAAA
         if np.any(aln_labels != '-'):
@@ -816,102 +830,36 @@ def prepare_pure_alignment(lanl_alignment_path: str,
                            combined_alignment_path: str,
                            ):
     """
-    Read LANL subtype reference alignment, separate pure subtypes from CRFs.
-    Applies trimAl column filtering while preserving all HXB2-nucleotide columns.
+    Read the (already trimmed) LANL reference alignment and separate pure
+    subtypes from CRFs. Column selection, including protection of all HXB2
+    columns, is done upstream by select_cols.py.
     """
-    # Load original alignment (for HXB2 row only)
     original_records = list(SeqIO.parse(lanl_alignment_path, "fasta"))
     if not original_records:
         raise ValueError(f"No sequences found in '{lanl_alignment_path}'.")
 
-    hxb2_original_seq: Optional[str] = None
-    for rec in original_records:
-        if _HXB2_ID in rec.id:
-            hxb2_original_seq = str(rec.seq).upper()
-            break
-    if hxb2_original_seq is None:
-        raise ValueError(
-            f"HXB2 not found in the original alignment. "
-            f"Expected a record whose ID contains: {_HXB2_ID}."
-        )
-    original_aln_len = len(hxb2_original_seq)
+    hxb2_id = next((r.id for r in original_records if _HXB2_ID in r.id), None)
+    if hxb2_id is None:
+        raise ValueError(f"HXB2 not found. Expected a record whose ID contains: {_HXB2_ID}.")
+    hxb2_ata = next(str(r.seq).upper() for r in original_records if r.id == hxb2_id)
 
-    # Parse trimAl kept-column indices
-    colnumbering_path = os.path.join(
-        WORKSPACE_PATH, "data", "output", "trimal_kept_columns.txt"
-    )
-    with open(colnumbering_path) as fh:
-        line = fh.read().strip()
-    # Strip the '#ColumnsMap\t' prefix
-    line = re.sub(r'^#ColumnsMap\s*', '', line)
-    trimal_kept = np.array(
-        [int(x.strip()) for x in line.split(',') if x.strip()],
-        dtype=np.int64,
-    )
-
-    # Build final column mask
-    # Start with columns kept by trimAl
-    final_mask = np.zeros(original_aln_len, dtype=bool)
-    final_mask[trimal_kept] = True
-
-    # Reintroduce any column where HXB2 had a nucleotide (non-gap)
-    hxb2_arr       = np.frombuffer(hxb2_original_seq.encode(), dtype=np.uint8)
-    hxb2_nongap    = hxb2_arr != ord('-')
-    final_mask     = final_mask | hxb2_nongap
-
-    # final_cols: sorted array of column indices to keep
-    final_cols = np.where(final_mask)[0]
-
-    print(f"  Original alignment columns  : {original_aln_len}")
-    print(f"  trimAl kept columns         : {len(trimal_kept)}")
-    print(f"  HXB2 nucleotide columns     : {int(hxb2_nongap.sum())}")
-    print(f"  Final columns (union)       : {len(final_cols)}")
-    print(f"  Columns removed             : {original_aln_len - len(final_cols)}")
-
-    # Load trimmed alignment and apply final column mask
-    trimmed_path = lanl_alignment_path + ".trimaled"
-    trimmed_records = list(SeqIO.parse(trimmed_path, "fasta"))
-    if not trimmed_records:
-        raise ValueError(f"No sequences found in trimmed alignment '{trimmed_path}'.")
-
-    # Build a dict from the original alignment for fast lookup
-    # We need to slice from the ORIGINAL sequences using final_cols
-    # (trimAl may have reordered nothing, but we re-slice from original
-    #  to guarantee correct column correspondence)
-    original_seq_dict: Dict[str, str] = {
-        rec.id: str(rec.seq).upper() for rec in original_records
-    }
-
-    def _slice_seq(seq: str) -> str:
-        """Slice a sequence to final_cols."""
-        arr = np.frombuffer(seq.encode(), dtype=np.uint8)
-        return arr[final_cols].tobytes().decode()
-
-    # Locate HXB2 in the sliced alignment
-    hxb2_ata: Optional[str] = None
-    hxb2_id:  Optional[str] = None
-    for rec in original_records:
-        if _HXB2_ID in rec.id:
-            hxb2_ata = _slice_seq(str(rec.seq).upper())
-            hxb2_id  = rec.id
-            break
-
-    if hxb2_ata is None:
-        raise ValueError("HXB2 not found after column slicing.")
+    if len(hxb2_ata) != ATA_LEN:
+        raise ValueError(f"Alignment has {len(hxb2_ata)} columns, config.ATA_LEN is {ATA_LEN}.")
+    n_hxb2 = sum(c != "-" for c in hxb2_ata)
+    if n_hxb2 != _HXB2_USED_LEN:
+        raise ValueError(f"HXB2 has {n_hxb2} residues, expected {_HXB2_USED_LEN} "
+                         f"(HXB2 {HXB2_FIRST_POS}-{HXB2_FIRST_POS + _HXB2_USED_LEN - 1}).")
 
     # Build coordinate maps from the final HXB2 row
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata)
     #  print the mapping as a csv with columns: ata_pos, hxb2_pos 
     mapping_path = Path(f"{WORKSPACE_PATH}/data/output/hxb2_ata_mapping.csv")
-    if mapping_path.is_file():
-        mapping_df = pd.read_csv(mapping_path)
     with open(mapping_path, "w") as f:
         f.write("ata_pos,hxb2_pos\n")
         for ata_pos in range(ATA_LEN):
             hxb2_pos = ata_to_hxb2[ata_pos]
             f.write(f"{ata_pos},{hxb2_pos}\n")
     print(f"  New ATA length              : {len(hxb2_ata)}")
-    print(f"  HXB2 positions covered      : {int(hxb2_nongap.sum())}")
 
     # Project per-HXB2-position masks onto new alignment columns
     # _PURE_E_HXB2:  np.ndarray = _build_pure_e_hxb2_mask()
@@ -930,10 +878,12 @@ def prepare_pure_alignment(lanl_alignment_path: str,
     for rec in original_records:
         subtype  = _extract_subtype(rec.id)
         old_id   = rec.id
-        new_id   = '.'.join(['Ref'] + [subtype] + old_id.split('.')[1:])
+        year_str = old_id.split('.')[2]
+        if len(year_str) == 4:
+            year_str = year_str[2:]  # Convert 4-digit year to 2-digit if needed
+        new_id   = '.'.join(['Ref'] + [subtype] + [old_id.split('.')[1]] + [year_str] + old_id.split('.')[3:])
         rec.id   = new_id
-        seq_str  = _slice_seq(original_seq_dict[old_id])
-
+        seq_str  = str(rec.seq).upper()
         accession_name = rec.id.split('.')[-1]
         if accession_name in accession_names_seen:
             print(f"Warning: Duplicate accession '{accession_name}' in '{rec.id}'. Skipping.")
@@ -1054,12 +1004,13 @@ if __name__ == "__main__":
     print("Projecting HXB2-coordinate segments/breakpoints onto ATA alignment coordinates …")
     hxb2_pos_to_aln = build_hxb2_pos_to_aln_col(hxb2_gapped)
 
-    df_segments_aln = convert_hxb2_df_to_aln(
-        df_segments, hxb2_pos_to_aln, pos_cols=("start", "end")
-    )
-    df_breakpoints_aln = convert_hxb2_df_to_aln(
-        df_breakpoints, hxb2_pos_to_aln, pos_cols=("position",)
-    )
+    hxb2_last_pos = HXB2_FIRST_POS + _HXB2_USED_LEN - 1
+    seg_win = df_segments[(df_segments["end"] >= HXB2_FIRST_POS)
+                          & (df_segments["start"] <= hxb2_last_pos)]
+    bp_win  = df_breakpoints[df_breakpoints["position"].between(HXB2_FIRST_POS, hxb2_last_pos)]
+
+    df_segments_aln    = convert_hxb2_df_to_aln(seg_win, hxb2_pos_to_aln, pos_cols=("start", "end"))
+    df_breakpoints_aln = convert_hxb2_df_to_aln(bp_win, hxb2_pos_to_aln, pos_cols=("position",))
 
     segments_aln_path    = f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_aln.csv"
     breakpoints_aln_path = f"{WORKSPACE_PATH}/data/output/lanl_crf_breakpoints_aln.csv"
