@@ -39,7 +39,7 @@ GAP = ord("-")
 CRF_RE = re.compile(r"^\d+_")
 TARGET_LEN = config.ATA_LEN
 HXB2_LEN = config.HXB2_LEN
-
+ST_TO_ID_DICT = config.ST_TO_ID_DICT
 
 def crop_to_hxb2_range(ids, arr, ref_idx, start, end):
     ref_cols = np.where(arr[ref_idx] != GAP)[0]     # alignment column of each HXB2 base
@@ -142,9 +142,12 @@ def classify(seq_id):
     label = seq_id.split(".")[0]
     if CRF_RE.match(label) or label in {"CPX", "URF"}:
         return "crf", label
+    if label in ST_TO_ID_DICT:
+        return "pure", label
     if label == "U":
         return "other", label
-    return "pure", label
+    # URF
+    return "other", label
 
 
 def group_identity(sub):

@@ -20,7 +20,7 @@ HXB2_END = 9417
 HXB2_USED_LEN = HXB2_END - HXB2_START + 1 # [START, END]
 
 # SEQUENCE GENERATION PARAMETERS
-N_SEQ = 1500000
+N_SEQ = 15000
 RP = 0.95
 TEST_SET_SIZE = 1000
 MAX_YEAR = 2028
@@ -32,6 +32,7 @@ MIN_FRAG_LEN = 300 # Min length of a partial sequence (prot is around 300bp)
 DIV_WINDOW_SIZE = 200
 MIN_DIV = 15
 MAX_RETRIES = 50
+BP_PRIOR_LAMBDA = 1.0
 
 # CRF REF BANK PARAMETERS
 PCT_PER_CRF_BANK = 0.30 # Adaptive bank size depending on the number of sequences of the CRF
@@ -57,7 +58,7 @@ MODEL_CONFIG = {
     "backbone": "InstaDeepAI/NTv3_650M_pre", # zhihan1996/DNABERT-2-117M InstaDeepAI/NTv3_650M_pre InstaDeepAI/nucleotide-transformer-v2-500m-multi-species
     "tokenizer": "InstaDeepAI/NTv3_650M_pre", # /pasteur/helix/projects/mPath/oanoufa/sbtr/data/model/tokenizer/custom_hiv_tokenizer
     "checkpoint_name": f"sbtr_v{VERSION}.pt",
-    "load_checkpoint": False, # Whether to load from checkpoint to resume training or start fresh training
+    "load_checkpoint": True, # Whether to load from checkpoint to resume training or start fresh training
     "model_version": VERSION,
 
     # Data
@@ -71,7 +72,7 @@ MODEL_CONFIG = {
 
     # Training
     "batch_size": 8,
-    "num_steps_training": 120000,
+    "num_steps_training": 60000,
     # Only batch_size * num_steps_training samples will be used for training (randomly sampled from the training split)
     "log_every_n_steps": 10000,
     "learning_rate": 1e-4,
@@ -84,7 +85,7 @@ MODEL_CONFIG = {
     "embed_layer": -1, # Which layer of the backbone to use for embeddings
 
     # Validation
-    "validate_every_n_steps": 50000,
+    "validate_every_n_steps": 30000,
     "max_val_batches": 500,
 
     # Inference
@@ -208,12 +209,19 @@ GENES_RAW = {
 }
 
 GENE_COLORS = {
-    "5'LTR": "#7f7f7f", "3'LTR": "#7f7f7f",
-    "p17": "#1f77b4", "p24": "#ff7f0e", "p2": "#2ca02c", "p7": "#d62728", "p1": "#9467bd", "p6": "#8c564b",
-    "prot": "#e377c2", "p51_RT": "#7f7f7f", "p15": "#bcbd22", "p31_int": "#17becf",
-    "gp120": "#aec7e8", "gp41": "#ffbb78",
-    "vif": "#98df8a", "vpr": "#ff9896", "vpu": "#c5b0d5", "nef": "#c49c94",
-    "tat1": "#f7b6d2", "tat2": "#f7b6d2", "rev1": "#dbdb8d", "rev2": "#dbdb8d"
+    # LTRs
+    "5'LTR": "#969696", "3'LTR": "#969696",
+    # gag: blues
+    "p17": "#4292c6", "p24": "#9ecae1", "p2": "#2171b5",
+    "p7": "#c6dbef", "p1": "#6baed6", "p6": "#084594",
+    # pol: greens
+    "prot": "#a1dab4", "p51_RT": "#41ab5d", "p15": "#c7e9c0", "p31_int": "#238b45",
+    # env: oranges
+    "gp120": "#f16913", "gp41": "#fdae6b",
+    # accessory: purples
+    "vif": "#9e9ac8", "vpr": "#cbc9e2", "vpu": "#807dba", "nef": "#6a51a3",
+    # regulatory: pinks (both exons share a colour)
+    "tat1": "#dd3497", "tat2": "#dd3497", "rev1": "#fa9fb5", "rev2": "#fa9fb5",
 }
 
 COLOR_SCHEME = ['#072C4B', '#F28089','#71cddd', "a07a99", "#E69F00"]

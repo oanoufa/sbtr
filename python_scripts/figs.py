@@ -130,6 +130,85 @@ def visualize_breakpoints(
     print(f"Breakpoints visualization saved to: {save_path}", flush=True)
 
 
+def _add_gene_lanes(
+    fig):
+    """Gene lanes + frame labels."""
+    frame_lanes = {3: (0.00, 0.09), 2: (0.10, 0.19), 1: (0.20, 0.29)}
+    for i, (gene, (start, end, frame)) in enumerate(GENES_RAW.items()):
+        y0, y1 = frame_lanes[frame]
+        color = GENE_COLORS.get(gene, "grey")
+        fig.add_shape(
+            type="rect", xref="x", yref="paper",
+            x0=start, x1=end, y0=y0, y1=y1,
+            fillcolor=color, opacity=0.85,
+            layer="below", line=dict(color="white", width=0.5),
+        )
+        shift = i % 2
+        y_pos = (y0 + y1 - 0.05*shift) / 2
+        fig.add_annotation(x=(start + end) / 2, y=y_pos, yref="paper",
+                           text=f"<b>{gene}</b>", showarrow=False,
+                           font=dict(size=8, color="black"),
+                           bgcolor="rgba(255,255,255,0.6)", bordercolor=color, borderwidth=0.5)
+    for frame, (y0, y1) in frame_lanes.items():
+        fig.add_annotation(
+            x=1.002, y=(y0 + y1 - 0.04) / 2, xref="paper", yref="paper",
+            xanchor="left", text=f"F{frame}", showarrow=False,
+            font=dict(size=12, color="gray"),
+            bgcolor="rgba(255,255,255,0.6)",
+        )
+
+
+def visualize_generated_breakpoints(
+        df_gen,
+        df_real=None,
+        save_path=f"{workspace_path}/figs/generated_breakpoint_distribution.html"):
+    """Generated breakpoint distribution along HXB2, optionally overlaid with the
+    real CRF one. Both are shown in % of their own total so they are comparable."""
+    xbins = dict(start=0, end=9719, size=50)
+    fig = go.Figure()
+    if df_real is not None:
+        fig.add_histogram(x=df_real["pos"], xbins=xbins, histnorm="percent",
+                          name="Real CRFs (LANL)", marker_color=COLOR_SCHEME[0], opacity=0.6)
+    fig.add_histogram(x=df_gen["pos"], xbins=xbins, histnorm="percent",
+                      name="Generated", marker_color=COLOR_SCHEME[1], opacity=0.7)
+    _add_gene_lanes(fig)
+    fig.update_layout(
+        title="Breakpoint distribution across HIV-1 genome (generated recombinants)",
+        xaxis_title="HXB2 position", yaxis_title="% of breakpoints",
+        template="plotly_white", barmode="overlay",
+        xaxis=dict(range=[0, 9719], anchor="free", position=0),
+        yaxis=dict(domain=[0.33, 1.0]),
+        width=1200, height=600,
+        legend=dict(x=0.35, y=0.90, bgcolor="rgba(0,0,0,0.1)"),
+
+    )
+    fig.write_html(save_path)
+    fig.write_image(Path(save_path).with_suffix(".svg"))
+    print(f"Generated breakpoints figure saved to: {save_path}", flush=True)
+
+
+def visualize_breakpoint_rank_profile(
+        df_gen, n_bp_sel, ata_len,
+        save_path=f"{workspace_path}/figs/breakpoint_rank_profile.html"):
+    """For sequences with exactly n_bp_sel breakpoints, histogram of the relative
+    position (0-1) of each breakpoint rank. Sequential sampling shows up as the
+    last ranks stacked at 1; an unbiased sampler centres rank k near k/(n+1)."""
+    d = df_gen[df_gen["n_bp"] == n_bp_sel].copy()
+    d["rel"] = d["pos_ata"] / ata_len
+    fig = go.Figure()
+    for k in range(1, n_bp_sel + 1):
+        fig.add_histogram(x=d.loc[d["rank"] == k, "rel"],
+                          xbins=dict(start=0, end=1, size=0.01),
+                          histnorm="percent", name=f"bp {k}", opacity=0.6)
+    fig.update_layout(
+        title=f"Relative position of each breakpoint rank (sequences with {n_bp_sel} breakpoints)",
+        xaxis_title="Relative position in ATA alignment", yaxis_title="% of sequences",
+        template="plotly_white", barmode="overlay", width=1200, height=450)
+    fig.write_html(save_path)
+    fig.write_image(Path(save_path).with_suffix(".svg"))
+    print(f"Rank profile saved to: {save_path}", flush=True)
+
+
 def visualize_diversity(
     diversity_arrays: dict,
     hxb2_to_ata: np.ndarray,
@@ -583,7 +662,7 @@ def visualize_sample_probs(
 
 def visualize_sample_probs_light(regions_aligned, hxb2_to_ata, n_total, path,
                     width=1100, lane_h=24, fs=9):
-    ml, mr, top = 28, 8, 4
+    ml, mr, top = 28, 20, 4
     pw = width - ml - mr
     sx = pw / n_total
     H3 = 3 * lane_h

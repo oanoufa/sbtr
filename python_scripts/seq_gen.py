@@ -24,6 +24,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 import math
 import uuid
+import re
 
 from src import config
 from src.mutator_class import (
@@ -32,7 +33,7 @@ from src.mutator_class import (
     mutate_sequence_gtr,
     _ACGT_BYTES,
 )
-from figs import plot_fragment_length_distribution, plot_reference_distribution_with_year
+from figs import plot_fragment_length_distribution, plot_reference_distribution_with_year, visualize_generated_breakpoints, visualize_breakpoint_rank_profile
 
 WORKSPACE_PATH = config.WORKSPACE_PATH
 # Command line arguments
@@ -69,6 +70,7 @@ MAX_SUBTYPES = config.MAX_SUBTYPES
 MAX_BREAKPOINTS = config.MAX_BREAKPOINTS
 PARTIAL_FRAC  = config.PARTIAL_FRAC
 MIN_FRAG_LEN  = config.MIN_FRAG_LEN
+BP_PRIOR_LAMBDA = config.BP_PRIOR_LAMBDA
 
 out_dir    = f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}_{PARTIAL_FRAC}"
 out_seqs   = f"{out_dir}/sequences_{N_SEQ}_{RP}_{PARTIAL_FRAC}.npy"
@@ -78,25 +80,29 @@ out_meta   = f"{out_dir}/metadata_{N_SEQ}_{RP}_{PARTIAL_FRAC}.tsv"
 os.makedirs(out_dir, exist_ok=True)
 
 SUBTYPE_GROUPS = {
-    "A1": 0, "A2": 0, "A3": 0, "A4": 0, "A5": 0, "A6": 0, "A7": 0, "A8": 0, "AE": 0,
+    "A1": 0, "A2": 0, "A3": 0, "A4": 0, "A5": 0, "A6": 0, "A7": 0, "A8": 0,
     "F1": 1, "F2": 1,
     "B": 4, "D": 4,
-    "C": 2, "G": 2, "H": 2, "J": 2, "K": 2, "L": 2,
+    "AE": 2, "C": 2, "G": 2, "H": 2, "J": 2, "K": 2, "L": 2,
     "N": 3, "O": 3, "P": 3,
 }
 
 # Only recombine within M-group
 DIVERGENCE_WEIGHTS = [
-    [0.0001, 1.0000, 1.0000, 0.0001, 1.0000],
-    [1.0000, 0.0001, 1.0000, 0.0001, 1.0000],
-    [1.0000, 1.0000, 1.0000, 0.0001, 1.0000],
-    [0.0001, 0.0001, 0.0001, 1.0000, 0.0001],
-    [1.0000, 0.0001, 1.0000, 0.0001, 0.0001],
+    [0.01, 1.0000, 1.0000, 0.0001, 1.0000],
+    [1.0000, 0.01, 1.0000, 0.0001, 1.0000],
+    [1.00, 1.0000, 1.0000, 0.0001, 1.0000],
+    [0.0001, 0.0001, 0.0001, 1.00, 0.0001],
+    [1.00, 1.0000, 1.0000, 0.0001, 0.01],
 ]
+
+# end of pol (HXB2): CRF01_AE is A1 up to here
+AE_A1_END_HXB2 = (GENES_RAW["p31_int"][1] + GENES_RAW["vif"][0]) // 2
+# half-width (ATA positions) of the loss-masked zone at the A1->AE switch; 0 disables. we add this because of the overlap between pol and vif (vif starts at 5041, pol ends at 5096)
+AE_SPLIT_MASK  = 30
 
 ST_TO_ID_DICT = config.ST_TO_ID_DICT
 MAX_YEAR = config.MAX_YEAR
-GENES_HXB2 = config.GENES_RAW
 
 # Initialize uuid with SEED
 random.seed(SEED)
@@ -116,6 +122,65 @@ class Sequence:
     def __len__(self):
         return len(self.arr)
 
+def extract_generated_breakpoints(names, out_labels, n_subtypes, ata_len, ata_to_hxb2):
+    """One row per breakpoint of each generated recombinant.
+    pos = HXB2 coordinate, pos_ata = ATA coordinate, rank = 1..n_bp (left to right)."""
+    lbl_mm = np.load(out_labels, mmap_mode="r")
+    rows = []
+    for idx, n in enumerate(tqdm(names, desc="Extracting breakpoints", mininterval=10)):
+        if not n.startswith("r"):
+            continue
+        lbl = np.unpackbits(lbl_mm[idx], axis=-1)[:, :n_subtypes]
+        any_active = lbl.any(axis=1)
+        active = np.full(ata_len, -1, dtype=np.int32)
+        active[any_active] = lbl[any_active].argmax(axis=1)
+        lp = np.where(active >= 0)[0]
+        if len(lp) < 2:
+            continue
+        bp_ata = lp[np.where(np.diff(active[lp]) != 0)[0] + 1]
+        for k, b in enumerate(bp_ata):
+            rows.append((idx, k + 1, len(bp_ata), int(b), int(ata_to_hxb2[b])))
+    return pd.DataFrame(rows, columns=["seq", "rank", "n_bp", "pos_ata", "pos"])
+
+_MIX = re.compile(r"[/+,]")
+
+def is_uncertain(label: str) -> bool:
+    return label == "U" or bool(_MIX.search(label))
+
+def segments_to_breakpoints(df_seg):
+    """One breakpoint per transition between two *different* certain subtypes.
+    A U segment between them is not a breakpoint but the uncertainty interval of one:
+    the breakpoint lies in [end of left segment, start of right segment]."""
+    rows = []
+    for crf, g in df_seg.sort_values(["crf", "start"]).groupby("crf"):
+        seg = g[~g["subtype"].map(is_uncertain)].reset_index(drop=True)
+        for a, b in zip(seg.iloc[:-1].itertuples(), seg.iloc[1:].itertuples()):
+            if a.subtype == b.subtype:
+                continue
+            lo, hi = a.end, b.start
+            rows.append((crf, a.subtype, b.subtype, lo, hi, (lo + hi) / 2))
+    return pd.DataFrame(rows, columns=["crf", "left", "right", "lo", "hi", "pos"])
+
+
+def label_segment(lbl_row, mask_row, s, e, st, st_id, ae_split):
+    """Label [s, e) with subtype `st`. AE positions before ae_split are labeled A1
+    (gag/pol of CRF01_AE); the A1->AE switch inside a parent is loss-masked."""
+    if st == "AE" and s < ae_split:
+        m = min(e, ae_split)
+        lbl_row[s:m, st_id["A1"]] = True
+        if e > ae_split:
+            mask_row[max(ae_split - AE_SPLIT_MASK, 0): ae_split + AE_SPLIT_MASK] = False
+        s = m
+    if s < e:
+        lbl_row[s:e, st_id[st]] = True
+
+def labels_to_parts(lbl_row, id_to_st):
+    """Subtypes in left-to-right label order, and number of label switches."""
+    pos = np.flatnonzero(lbl_row.any(axis=1))
+    ids = lbl_row[pos].argmax(axis=1)
+    cut = np.flatnonzero(np.diff(ids)) + 1
+    sts = list(dict.fromkeys(id_to_st[int(i)] for i in ids[np.r_[0, cut]]))
+    return sts, len(cut)
 
 # Parameter inference
 def infer_params(
@@ -126,8 +191,9 @@ def infer_params(
     Returns dict with keys: n_breakpoints, n_subtypes, min_seg_len (in ATA coords).
     """
     params = {}
-    is_compound = df_seg["subtype"].str.contains("/", regex=False)
-    df_pure = df_seg[~is_compound]
+    is_unc  = df_seg["subtype"].map(is_uncertain)
+    df_pure = df_seg[~is_unc]
+    print("Removed uncertain segments:", is_unc.sum(), "of", len(df_seg), "total segments")
 
     # Breakpoints / CRF: empirical, parity-aware
     n_pure_per_crf = df_pure.groupby("crf").size()
@@ -465,9 +531,21 @@ def assign_subtypes_to_segments(n_seg, subtype_pool, py_rng):
         result.append(py_rng.choice(cands))
     return result[:n_seg]
 
+def build_bp_prior(df_bp, hxb2_to_ata, ata_len, lam=0.5, bw=100):
+    dens = np.zeros(ata_len)
+    for lo, hi in zip(df_bp["lo"], df_bp["hi"]):
+        a, b = sorted((int(hxb2_to_ata[int(lo)]), int(hxb2_to_ata[int(hi)])))
+        a, b = max(a, 0), min(b, ata_len - 1)
+        dens[a:b + 1] += 1.0 / (b - a + 1)
+    k = np.exp(-0.5 * (np.arange(-4 * bw, 4 * bw + 1) / bw) ** 2)
+    dens = np.convolve(dens, k / k.sum(), mode="same")
+    dens /= dens.sum()
+    return lam * dens + (1 - lam) / ata_len
 
 def place_breakpoints(seg_subtypes, parents, ata_len,
-                      DIV_WINDOW_SIZE, min_div, min_seg_len, rng, force_div=False):
+                      DIV_WINDOW_SIZE, min_div, min_seg_len, rng,
+                      force_div=False, prior=None, alpha=0.0,
+                      ):
     """
     Place one breakpoint between each pair of adjacent segments.
     Returns: list[int] of ATA breakpoint positions, or None on failure.
@@ -477,32 +555,48 @@ def place_breakpoints(seg_subtypes, parents, ata_len,
     min_seg_len = max(min_seg_len, MIN_SEG_LEN)
 
     if force_div:
-        breakpoints = []
-        prev = 0
-        _cache = {}
+        L = ata_len
+        _cache, w = {}, []
         for i in range(n_bp):
-            st_L = seg_subtypes[i]
-            st_R = seg_subtypes[i + 1]
-
-            remaining_bps = n_bp - i - 1
-            right_limit   = ata_len - (remaining_bps + 1) * min_seg_len
-
-            key = (id(parents_seq[st_L]), id(parents_seq[st_R]))
+            key = (id(parents_seq[seg_subtypes[i]]), id(parents_seq[seg_subtypes[i + 1]]))
             if key not in _cache:
-                _cache[key] = divergence_profile(parents_seq[st_L], parents_seq[st_R], DIV_WINDOW_SIZE)
-            profile = _cache[key]
-            eligible = profile >= min_div
-            eligible[: prev + min_seg_len] = False
-            eligible[right_limit:] = False
-            cands = np.where(eligible)[0]
-            if cands.size == 0:
+                _cache[key] = divergence_profile(
+                    parents_seq[seg_subtypes[i]], parents_seq[seg_subtypes[i + 1]], DIV_WINDOW_SIZE)
+            prof = _cache[key].astype(np.float64)
+            wi = np.where(prof >= min_div, prof ** alpha, 0.0)
+            if prior is not None:
+                wi *= prior
+            wi[: min_seg_len * (i + 1)] = 0.0
+            wi[L - min_seg_len * (n_bp - i) + 1 :] = 0.0
+            w.append(wi)
+
+        # forward filtering
+        F, prev_cum = [], None
+        for i in range(n_bp):
+            f = w[i].copy()
+            if i > 0:
+                shifted = np.zeros(L)
+                shifted[min_seg_len:] = prev_cum[: L - min_seg_len]  # sum over y <= x - min_seg_len
+                f *= shifted
+            s = f.sum()
+            if s == 0:
                 return None
-            w = profile[cands].astype(np.float64)
-            w /= w.sum()
-            bp = int(rng.choice(cands, p=w))
-            breakpoints.append(bp)
-            prev = bp
-        return breakpoints
+            f /= s
+            # rescale to avoid underflow
+            F.append(f)
+            prev_cum = np.cumsum(f)
+
+        # backward sampling
+        bps = [0] * n_bp
+        bps[-1] = int(rng.choice(L, p=F[-1]))
+        for i in range(n_bp - 2, -1, -1):
+            p = F[i].copy()
+            p[bps[i + 1] - min_seg_len + 1 :] = 0.0
+            s = p.sum()
+            if s == 0:
+                return None
+            bps[i] = int(rng.choice(L, p=p / s))
+        return bps
 
     else:
         L_free = ata_len - (n_bp + 1) * min_seg_len
@@ -548,8 +642,11 @@ def _worker(cfg):
     nb         = params["n_breakpoints"]
     ns         = params["n_subtypes"]
     min_seg    = params["min_seg_len"]
+    bp_prior = params.get("bp_prior")
     st_id      = cfg["pure_st_to_id_dict"]
     hxb2_to_ata= cfg["hxb2_to_ata"]
+    ae_split   = cfg["ae_split"]
+    id_to_st   = {v: k for k, v in st_id.items()}
     n_st_total = len(st_id)
     ata_len    = cfg["ata_len"]
     site_rates_dict = cfg["site_rates_dict"]
@@ -591,8 +688,8 @@ def _worker(cfg):
             seq_row, total_muts = mutate_sequence_gtr(
                 seq_obj.arr.copy(), 0, rate_arr, rng, n_muts, sub_probs)
             lbl_row = np.zeros((ata_len, n_st_total), dtype=bool)
-            lbl_row[:, st_id[st]] = True
             mask_row = np.ones(ata_len, dtype=bool)
+            label_segment(lbl_row, mask_row, 0, ata_len, st, st_id, ae_split)
             # name is of the form: p_<subtype>_<target_year>_<unique_id> to indicate a pure sequence
             name = f"p_{st}_{target_year}_{uuid.uuid4().hex[:8]}"
             ok = True
@@ -617,7 +714,8 @@ def _worker(cfg):
                     parents = {st: py_rng.choice(st_to_seq_dict[st]) for st in chosen_subtypes}
                     max_parent_year = max(p.year for p in parents.values())
                     target_year = py_rng.randint(max_parent_year, MAX_YEAR)
-                    bps = place_breakpoints(seg_st, parents, ata_len, div_window_size, mdiv, min_seg, rng, force_div)
+                    bps = place_breakpoints(seg_st, parents, ata_len, div_window_size,
+                    mdiv, min_seg, rng, force_div, bp_prior)
                     if bps is not None:
                         break
                 if bps is None:
@@ -642,7 +740,7 @@ def _worker(cfg):
                     )
                     seq_row[s:e], muts = mutate_sequence_gtr(chunk, s, rate_arr, rng, n_muts, sub_probs)
                     total_muts += muts
-                    lbl_row[s:e, st_id[seg_st[si]]] = True
+                    label_segment(lbl_row, mask_row, s, e, seg_st[si], st_id, ae_split)
 
                 # 2) Build Ambiguity Mask (Loss Mask)
                 for si in range(n_seg - 1):
@@ -675,8 +773,8 @@ def _worker(cfg):
                 )
                 seq_row, total_muts = mutate_sequence_gtr(seq_obj.arr.copy(), 0, rate_arr, rng, n_muts, sub_probs)
                 lbl_row = np.zeros((ata_len, n_st_total), dtype=bool)
-                lbl_row[:, st_id[st]] = True
                 mask_row = np.ones(ata_len, dtype=bool)
+                label_segment(lbl_row, mask_row, 0, ata_len, st, st_id, ae_split)
                 name = f"p_{st}_{target_year}_{uuid.uuid4().hex[:8]}"
 
         # fragment cropping 
@@ -708,31 +806,17 @@ def _worker(cfg):
             mask_row[:frag_start] = False
             mask_row[frag_end:]   = False
 
-            # For recombinants: some subtypes may no longer have any labeled
-            # Positions inside the window: rebuild the name and recount n_bp.
-            if name.startswith("r"):
-                # Preserve the left-to-right order subtypes appeared in the
-                # chimera; filter to those still visible after the crop.
-                st_ordered = name.split("_")[1].split("+")
-                remaining  = [s for s in st_ordered if lbl_row[:, st_id[s]].any()]
-
-                if len(remaining) <= 1:
-                    # Window fell inside a single segment: demote to pure.
-                    # `remaining` always has at least one entry because the window is
-                    # non-empty and segments cover the full genome before crop.
-                    kept = remaining[0] if remaining else st_ordered[0]
-                    name = f"p_{kept}_{target_year}_{uuid.uuid4().hex[:8]}"
-                    n_bp = 0
-                else:
-                    name = f"r_{'+'.join(remaining)}_{target_year}_{uuid.uuid4().hex[:8]}"
-                    # Recount breakpoints actually visible in the cropped window.
-                    any_lbl     = lbl_row.any(axis=1)
-                    labeled_pos = np.where(any_lbl)[0]
-                    if len(labeled_pos) > 1:
-                        labeled_st = lbl_row[labeled_pos].argmax(axis=1)
-                        n_bp = int(np.sum(np.diff(labeled_st) != 0))
-                    else:
-                        n_bp = 0
+        # name / n_bp from the final labels (seg_st can't be trusted: AE in gag/pol is labeled A1)
+        sts, n_bp_lbl = labels_to_parts(lbl_row, id_to_st)
+        uid = name.rsplit("_", 1)[1]
+        if name.startswith("r"):
+            if len(sts) > 1:
+                name, n_bp = f"r_{'+'.join(sts)}_{target_year}_{uid}", n_bp_lbl
+            else:
+                name, n_bp = f"p_{sts[0]}_{target_year}_{uid}", 0
+        elif len(sts) == 1 and name.split("_")[1] != sts[0]:
+            # pure AE cropped entirely inside gag/pol -> now a pure A1 window
+            name = f"p_{sts[0]}_{target_year}_{uid}"
 
         # cleanup & write
         seq_row[seq_row == ord("-")] = ord("N")  # gaps to N
@@ -789,6 +873,11 @@ if __name__ == "__main__":
 
     # rate arrays and GTR substitution probabilities
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)
+    ae_split = int(hxb2_to_ata[AE_A1_END_HXB2]) + 1   # first AE position (exclusive end of the A1 zone (pol end))
+
+    df_bp = segments_to_breakpoints(df_seg)
+    params["bp_prior"] = build_bp_prior(df_bp, hxb2_to_ata, ata_len, lam=BP_PRIOR_LAMBDA)
+
 
     mutator = SequenceMutator(
         iqtree_dir=f"{WORKSPACE_PATH}/data/output/rates/",
@@ -833,7 +922,7 @@ if __name__ == "__main__":
              pure_st_to_id_dict=ST_TO_ID_DICT, hxb2_to_ata=hxb2_to_ata, params=params,
              site_rates_dict=site_rates_dict,
              sub_probs_dict=sub_probs_dict,
-             ata_len=ata_len,
+             ata_len=ata_len, ae_split=ae_split,
              div_window_size=DIV_WINDOW_SIZE, min_div=MIN_DIV, max_retries=MAX_RETRIES,
              force_divergent=FORCE_DIV, realistic=REALISTIC,
              partial_frac=PARTIAL_FRAC, min_frag_len=MIN_FRAG_LEN)
@@ -955,6 +1044,14 @@ if __name__ == "__main__":
     compare_generated_vs_real(
         names, out_labels, n_subtypes, ata_len, df_seg, ata_to_hxb2,
     )
+
+    df_gen = extract_generated_breakpoints(names, out_labels, n_subtypes, ata_len, ata_to_hxb2)
+
+    visualize_generated_breakpoints(
+        df_gen, 
+        df_real=df_bp)
+    n_mode = int(df_gen["n_bp"].mode()[0])
+    visualize_breakpoint_rank_profile(df_gen, n_mode, ata_len)
 
     # sanity check
     seq_mm = np.load(out_seqs,   mmap_mode="r")

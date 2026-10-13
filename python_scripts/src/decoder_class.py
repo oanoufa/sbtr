@@ -374,6 +374,7 @@ class CRFReferenceDecoder:
         mask: np.ndarray,
         compactmapout_entry: List[Tuple[int, int, int]],
         label_names_aligned: List[str],
+        flank_tol: int = 30,
     ) -> List[str]:
         """
         Generate label_names_dealigned by inserting the removed insertions in the labels as the previous label, then applying the mask to get the final label_names_dealigned.
@@ -384,9 +385,7 @@ class CRFReferenceDecoder:
         valid = np.flatnonzero(mask)
         first_valid = int(valid[0])  if valid.size else None
         last_valid  = int(valid[-1]) if valid.size else None
-        # The ATA now spans gag start -> nef end: residues inserted before the first
-        # (after the last) aligned residue of a sequence reaching that end are the
-        # removed 5' (3') flanks.
+        # The ATA now spans gag start -> nef end: residues inserted before the first (after the last) aligned residue of a sequence reaching that end are the removed 5' (3') flanks.
         reaches_5 = first_valid is not None and first_valid <= flank_tol
         reaches_3 = last_valid  is not None and last_valid  >= self.L - 1 - flank_tol
 

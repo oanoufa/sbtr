@@ -998,9 +998,7 @@ if __name__ == "__main__":
     # Build per-position label sequences (HXB2 -> alignment)
     hxb2_gapped = pure_result[hxb2_id]
 
-    # Project the HXB2-coordinate segments/breakpoints tables onto ATA
-    # alignment coordinates (same data, expressed as alignment column
-    # indices instead of raw HXB2 genome positions).
+    # Project the HXB2-coordinate segments/breakpoints tables onto ATA alignment coordinates (same data, expressed as alignment column indices instead of raw HXB2 genome positions).
     print("Projecting HXB2-coordinate segments/breakpoints onto ATA alignment coordinates …")
     hxb2_pos_to_aln = build_hxb2_pos_to_aln_col(hxb2_gapped)
 

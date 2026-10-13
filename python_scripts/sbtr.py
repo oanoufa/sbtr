@@ -120,6 +120,8 @@ if 'p' in wto:
     print("p in wto: saving prediction array in a npy file", flush=True)
 if 'f' in wto:
     print("f in wto: saving figures in figs folder", flush=True)
+if 'l' in wto:
+    print("f in wto: saving light svg figures in figs folder", flush=True)
 if 'a' in wto:
     print("a in wto: saving attention masks in a npy file", flush=True)
 
@@ -647,7 +649,7 @@ if __name__ == "__main__":
     # CRF decoding and figures
     print(f"\nRunning CRF decoding across available CPUs...", flush=True)
     sample_vis_dir = out_dir / "figs"
-    if 'f' in wto: 
+    if 'f' in wto or 'l' in wto:
         sample_vis_dir.mkdir(parents=True, exist_ok=True)
 
     results_buffer, regions_buffer = [], []
