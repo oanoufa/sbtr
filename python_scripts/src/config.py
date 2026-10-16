@@ -20,7 +20,7 @@ HXB2_END = 9417
 HXB2_USED_LEN = HXB2_END - HXB2_START + 1 # [START, END]
 
 # SEQUENCE GENERATION PARAMETERS
-N_SEQ = 15000
+N_SEQ = 1500000
 RP = 0.95
 TEST_SET_SIZE = 1000
 MAX_YEAR = 2028
@@ -48,7 +48,7 @@ CRF_ASSIGN_THR = 0.5 # Minimum match to assign a CRF
 PARTIAL_THR = 7000 # Threshold to consider a sequence full (>=7000nt) or partial (<7000nt)
 
 # MODEL PARAMETERS
-VERSION = "0.3"
+VERSION = "0.4"
 PAD_LEN = 128
 SEQ_LEN_AFTER_PAD = ((ATA_LEN // PAD_LEN) + 1) * PAD_LEN
 
@@ -58,7 +58,7 @@ MODEL_CONFIG = {
     "backbone": "InstaDeepAI/NTv3_650M_pre", # zhihan1996/DNABERT-2-117M InstaDeepAI/NTv3_650M_pre InstaDeepAI/nucleotide-transformer-v2-500m-multi-species
     "tokenizer": "InstaDeepAI/NTv3_650M_pre", # /pasteur/helix/projects/mPath/oanoufa/sbtr/data/model/tokenizer/custom_hiv_tokenizer
     "checkpoint_name": f"sbtr_v{VERSION}.pt",
-    "load_checkpoint": True, # Whether to load from checkpoint to resume training or start fresh training
+    "load_checkpoint": False, # Whether to load from checkpoint to resume training or start fresh training
     "model_version": VERSION,
 
     # Data
@@ -72,7 +72,7 @@ MODEL_CONFIG = {
 
     # Training
     "batch_size": 8,
-    "num_steps_training": 60000,
+    "num_steps_training": 150000,
     # Only batch_size * num_steps_training samples will be used for training (randomly sampled from the training split)
     "log_every_n_steps": 10000,
     "learning_rate": 1e-4,
@@ -126,7 +126,7 @@ CLOCK_RATES = {
 CLOCK_RATES['avg'] = sum(CLOCK_RATES.values()) / len(CLOCK_RATES)
 
 ST_TO_ID_DICT = {
-    'A1': 0, 'A2': 1, 'A3': 2, 'A4': 3, 'A5': 4, 'A6': 5, 'A7': 6, 'A8': 7,
+    'A1': 0, 'A2': 1, 'A3': 2, 'A4': 3, 'A5U': 4, 'A6': 5, 'A7': 6, 'A8': 7,
     'B': 8, 'C': 9, 'D': 10, 'AE': 11, 'F1': 12, 'F2': 13, 'G': 14,
     'H': 15, 'J': 16, 'K': 17, 'L': 18, 'N': 19, 'O': 20, 'P': 21,
     }
@@ -138,7 +138,7 @@ ST_COLORS = {
     'A2':  '#85B7EB',
     'A3':  '#0C447C',
     'A4':  '#B5D4F4',
-    'A5':  '#B5D47C',
+    'A5U':  '#B5D47C',
     'A6':  '#042C53',
     'A7':  '#5B9FD4',
     'A8':  '#2A76C4',

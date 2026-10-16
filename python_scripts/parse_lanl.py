@@ -72,34 +72,6 @@ CRF_CANONICAL = {
 }
 
 U_ALIASES = {'U', 'U1', 'Undetermined', 'Unsequenced', 'unknown', 'Undefined'}
-
-# CRF01_AE mosaic structure (HXB2 coordinates, 1-based)
-_CRF01_BREAKPOINTS: List[Tuple[int, str, str]] = [
-    (5097, "A1",   "E"   ),
-    (5321, "E",    "A1"  ),
-    (5451, "A1",   "E"   ),
-    (5651, "E",    "A1"  ),
-    (6311, "A1",   "E/A1"),
-    (6501, "E/A1", "E"   ),
-    (8000, "E",    "E/A1"),
-    (8379, "E/A1", "A1"  ),
-    (9086, "A1",   "E"   ),
-]
-
-_CRF26_A5U_SEGMENTS: List[Tuple[int, int, str]] = [
-    (   1, 1398, "A5"),
-    (1399, 1659, "U"),
-    (1660, 2378, "A5"),
-    (2379, 2679, "U"),
-    (2680, 4235, "A5"),
-    (4236, 4514, "U"),
-    (4515, 6692, "A5"),
-    (6693, 6857, "U"),
-    (6858, 7969, "A5"),
-    (7970, 8372, "U"),
-    (8373, 9719, "A5"),
-]
-
 _HXB2_LENGTH = config.HXB2_LEN
 _HXB2_USED_LEN = config.HXB2_USED_LEN
 HXB2_FIRST_POS = config.HXB2_START
@@ -114,26 +86,25 @@ def normalize_subtype(raw: str) -> str:
     if '/' in raw:
         parts = raw.split('/')
         return '/'.join(normalize_subtype(p) for p in parts)
-
     s = raw.strip()
-
     if s in U_ALIASES:
         return 'U'
-
     if s in CRF_CANONICAL:
         return CRF_CANONICAL[s]
-
     if s in ST_TO_ID_DICT:
         return s
-
     if s == 'A':
         return 'A1'
-
     if s == 'E':
         return 'E'
-
+    if s == 'A5':
+        return 'A5U'
     if s == 'F':
         return '/'.join(normalize_subtype(p) for p in ['F1', 'F2'])
+    if s == 'mix':
+        return '07_BC/08_BC'
+    if s == '0708_mix':
+        return '07_BC/08_BC'
 
     # Match optional CRF prefix, digits, and optional suffix
     m = re.match(r'^(?:CRF)?[_-]?(\d+)(?:[_-]?(\w+))?$', s, re.IGNORECASE)
@@ -145,10 +116,8 @@ def normalize_subtype(raw: str) -> str:
         if suffix:
             return f"{num}_{suffix}"
         return num
-
     print(f"Warning: unrecognised subtype label {s!r}, returning as-is", flush=True)
     return s
-
 
 def resolve_u_in_compound(subtype, prev_st, next_st):
     parts  = subtype.split('/')
@@ -168,38 +137,6 @@ def resolve_u_in_compound(subtype, prev_st, next_st):
             return internal
     else:
         return None
-
-
-def resolve_u_segments(segs):
-    resolved = [s.copy() for s in segs]
-    n = len(resolved)
-
-    for i, seg in enumerate(resolved):
-        if 'U' not in seg['subtype']:
-            continue
-
-        prev_st = next((resolved[j]['subtype'].split('/')[0] for j in range(i-1, -1, -1)
-                        if 'U' not in resolved[j]['subtype']), None)
-        next_st = next((resolved[j]['subtype'].split('/')[-1] for j in range(i+1, n)
-                        if 'U' not in resolved[j]['subtype']), None)
-
-        if seg['subtype'] == 'U':
-            if prev_st is None and next_st is None:
-                pass
-            elif prev_st is None:
-                resolved[i]['subtype'] = next_st
-            elif next_st is None:
-                resolved[i]['subtype'] = prev_st
-            elif prev_st == next_st:
-                resolved[i]['subtype'] = prev_st
-            else:
-                resolved[i]['subtype'] = f"{prev_st}/{next_st}"
-        else:
-            resolved[i]['subtype'] = resolve_u_in_compound(
-                seg['subtype'], prev_st, next_st
-            )
-    return resolved
-
 
 def join_neighbor_segments(resolved):
     if not resolved:
@@ -230,7 +167,6 @@ def parse_breakpoints_file(filepath):
     current_segs = []
 
     def flush(crf, segs):
-        # segs = resolve_u_segments(segs)
         segs = join_neighbor_segments(segs)
         if not check_crf_is_pure(segs):
             for seg in segs:
@@ -369,31 +305,6 @@ def scrape_and_parse_lanl_breakpoints(output_path):
     print(f"Written {blocks_written} CRF blocks to {output_path}")
 
 
-# HXB2 position masks
-def _build_pure_e_hxb2_mask() -> np.ndarray:
-    boundaries = (
-        [1]
-        + [bp[0] for bp in _CRF01_BREAKPOINTS]
-        + [_HXB2_LENGTH + 1]
-    )
-    labels = (
-        [_CRF01_BREAKPOINTS[0][1]]
-        + [bp[2] for bp in _CRF01_BREAKPOINTS]
-    )
-    mask = np.zeros(_HXB2_LENGTH + 2, dtype=bool)
-    for i, label in enumerate(labels):
-        if label == "E":
-            mask[boundaries[i] : boundaries[i + 1]] = True
-    return mask
-
-
-def _build_crf26_a5u_a_mask() -> np.ndarray:
-    mask = np.zeros(_HXB2_LENGTH + 2, dtype=bool)
-    for start, end, label in _CRF26_A5U_SEGMENTS:
-        if label == "A5":
-            mask[start : end + 1] = True
-    return mask
-
 
 # HXB2 <-> ATA alignment coordinate projection helpers
 def build_hxb2_pos_to_aln_col(hxb2_gapped: str) -> np.ndarray:
@@ -463,26 +374,21 @@ def _extract_subtype(record_id: str) -> Optional[str]:
     else:
         return st
 
-
 def _is_pure_subtype(subtype: Optional[str]) -> bool:
     if not subtype:
         return False
     return subtype in _PURE_ST
-
 
 def _is_crf(subtype: Optional[str]) -> bool:
     if not subtype:
         return False
     return bool(_CRF_RE.match(subtype))
 
-
 def _is_crf01_ae(subtype: Optional[str]) -> bool:
     return bool(subtype and _CRF01_AE_RE.match(subtype))
 
-
 def _is_crf26_a5u(subtype: Optional[str]) -> bool:
     return bool(subtype and _CRF26_A5U_RE.match(subtype))
-
 
 # CRF label-sequence construction
 def _crf_df_key(label: str, df_by_crf: Dict[str, pd.DataFrame]) -> Optional[str]:
@@ -498,7 +404,6 @@ def _crf_df_key(label: str, df_by_crf: Dict[str, pd.DataFrame]) -> Optional[str]
             if key.startswith(num_str):
                 return key
     return label if label in df_by_crf else None
-
 
 def _pure_set_of(
     label: str,
@@ -526,6 +431,10 @@ def _pure_set_of(
     if label == '0708_mix':
         return frozenset({'B', 'C'})
 
+    if label == 'mix':
+        # Only appears in 174_0708, hopefully it doesn't appear in another CRF in the future
+        return frozenset({'B', 'C'})
+
     key = _crf_df_key(label, df_by_crf)
     if key and key not in seen:
         out = set()
@@ -533,8 +442,7 @@ def _pure_set_of(
             out |= _pure_set_of(str(sub), df_by_crf, seen | {key}, depth + 1)
         return frozenset(out)
 
-    return frozenset()   # unresolvable (e.g. 'mix')
-
+    return frozenset()
 
 def _resolve_single_label(
     subtype: str,
@@ -710,41 +618,6 @@ def build_all_crf_label_sequences(
 
     return label_seqs
 
-def _merge_same_subtype_segments(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse consecutive same-subtype segments within each CRF.
-
-    Segments that are separated only by alignment-gap (``'-'``) positions and
-    carry the same subtype label are merged into a single segment.  Segments
-    with a different subtype in between are left as separate boundaries.
-
-    Parameters
-    ----------
-    df : DataFrame with columns crf, start, end, subtype, length.
-         Rows must be sorted by start within each CRF (as produced by
-         :func:`label_sequences_to_segments_csv`).
-
-    Returns
-    -------
-    DataFrame with the same columns; *length* = end − start + 1.
-    """
-    rows: List[Dict] = []
-    for _, grp in df.groupby('crf', sort=False):
-        segs = grp.sort_values('start').to_dict('records')
-        if not segs:
-            continue
-        merged = [segs[0].copy()]
-        for seg in segs[1:]:
-            prev = merged[-1]
-            if seg['subtype'] == prev['subtype']:
-                # Same subtype - extend the open segment
-                prev['end']    = seg['end']
-                prev['length'] = prev['end'] - prev['start'] + 1
-            else:
-                # Different subtype - start a new segment
-                merged.append(seg.copy())
-        rows.extend(merged)
-    return pd.DataFrame(rows, columns=['crf', 'start', 'end', 'subtype', 'length'])
-
 def label_sequences_to_segments_csv(
     label_seqs: Dict[str, np.ndarray],
     output_path: str,
@@ -787,9 +660,6 @@ def label_sequences_to_segments_csv(
             i = j
 
     df = pd.DataFrame(rows, columns=['crf', 'start', 'end', 'subtype', 'length'])
-
-    # Merge same-subtype segments that are only gap-separated
-    # df = _merge_same_subtype_segments(df)
 
     df.to_csv(output_path, index=False)
     return df
@@ -861,14 +731,6 @@ def prepare_pure_alignment(lanl_alignment_path: str,
             f.write(f"{ata_pos},{hxb2_pos}\n")
     print(f"  New ATA length              : {len(hxb2_ata)}")
 
-    # Project per-HXB2-position masks onto new alignment columns
-    # _PURE_E_HXB2:  np.ndarray = _build_pure_e_hxb2_mask()
-    # pure_e_cols:   np.ndarray = _PURE_E_HXB2[ata_to_hxb2]
-    # Now considering AE as a pure subtype, we don't need to mask the A parts of AE anymore.
-
-    _CRF26_A_HXB2: np.ndarray = _build_crf26_a5u_a_mask()
-    crf26_a_cols:  np.ndarray = _CRF26_A_HXB2[ata_to_hxb2]
-
     # Classify and collect
     pure_result: Dict[str, str] = {}
     crf_result:  Dict[str, str] = {}
@@ -922,11 +784,12 @@ def prepare_pure_alignment(lanl_alignment_path: str,
                 print(f"Warning: Record ID '{rec.id}' does not match expected format. Skipping.")
                 continue
             arr = np.frombuffer(seq_str.encode(), dtype=np.uint8).copy()
-            arr[~crf26_a_cols] = ord("N")
+            # arr[~crf26_a_cols] = ord("N")
+            # In the end we decided to keep the full sequence for CRF26_A5U and consider it a pure subtype with class A5U
             masked_seq = arr.tobytes().decode()
-            new_id_a = str(rec.id).replace("26_A5U", "A5").replace("26_A5", "A5")
+            new_id_a = str(rec.id).replace("26_A5U", "A5U").replace("26_A5", "A5U")
             pure_result[new_id_a] = masked_seq
-            pure_subtype_count['A5'] += 1
+            pure_subtype_count['A5U'] += 1
             accession_names_seen.add(accession_name)
 
         if _is_crf(subtype):
@@ -990,7 +853,6 @@ if __name__ == "__main__":
     print("Saved lanl_crf_segments_hxb2.csv and lanl_crf_breakpoints_hxb2.csv\n")
 
     # Prepare pure / CRF reference alignments
-
     hxb2_id, pure_result, crf_result, combined_result = prepare_pure_alignment(
         lanl_subtype_ref_path, pure_ref_path, crf_ref_path, combined_ref_path,
     )

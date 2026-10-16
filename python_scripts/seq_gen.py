@@ -33,7 +33,7 @@ from src.mutator_class import (
     mutate_sequence_gtr,
     _ACGT_BYTES,
 )
-from figs import plot_fragment_length_distribution, plot_reference_distribution_with_year, visualize_generated_breakpoints, visualize_breakpoint_rank_profile
+from figs import plot_fragment_length_distribution, plot_reference_distribution_with_year, visualize_generated_breakpoints, visualize_breakpoint_rank_profile, compare_generated_vs_real
 
 WORKSPACE_PATH = config.WORKSPACE_PATH
 # Command line arguments
@@ -71,6 +71,8 @@ MAX_BREAKPOINTS = config.MAX_BREAKPOINTS
 PARTIAL_FRAC  = config.PARTIAL_FRAC
 MIN_FRAG_LEN  = config.MIN_FRAG_LEN
 BP_PRIOR_LAMBDA = config.BP_PRIOR_LAMBDA
+ST_TO_ID_DICT = config.ST_TO_ID_DICT
+MAX_YEAR = config.MAX_YEAR
 
 out_dir    = f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}_{PARTIAL_FRAC}"
 out_seqs   = f"{out_dir}/sequences_{N_SEQ}_{RP}_{PARTIAL_FRAC}.npy"
@@ -80,7 +82,7 @@ out_meta   = f"{out_dir}/metadata_{N_SEQ}_{RP}_{PARTIAL_FRAC}.tsv"
 os.makedirs(out_dir, exist_ok=True)
 
 SUBTYPE_GROUPS = {
-    "A1": 0, "A2": 0, "A3": 0, "A4": 0, "A5": 0, "A6": 0, "A7": 0, "A8": 0,
+    "A1": 0, "A2": 0, "A3": 0, "A4": 0, "A5U": 0, "A6": 0, "A7": 0, "A8": 0,
     "F1": 1, "F2": 1,
     "B": 4, "D": 4,
     "AE": 2, "C": 2, "G": 2, "H": 2, "J": 2, "K": 2, "L": 2,
@@ -89,20 +91,17 @@ SUBTYPE_GROUPS = {
 
 # Only recombine within M-group
 DIVERGENCE_WEIGHTS = [
-    [0.01, 1.0000, 1.0000, 0.0001, 1.0000],
-    [1.0000, 0.01, 1.0000, 0.0001, 1.0000],
+    [0.5, 1.0000, 1.0000, 0.0001, 1.0000],
+    [1.0000, 0.5, 1.0000, 0.0001, 1.0000],
     [1.00, 1.0000, 1.0000, 0.0001, 1.0000],
     [0.0001, 0.0001, 0.0001, 1.00, 0.0001],
-    [1.00, 1.0000, 1.0000, 0.0001, 0.01],
+    [1.0000, 1.0000, 1.0000, 0.0001, 0.5],
 ]
 
 # end of pol (HXB2): CRF01_AE is A1 up to here
 AE_A1_END_HXB2 = (GENES_RAW["p31_int"][1] + GENES_RAW["vif"][0]) // 2
 # half-width (ATA positions) of the loss-masked zone at the A1->AE switch; 0 disables. we add this because of the overlap between pol and vif (vif starts at 5041, pol ends at 5096)
 AE_SPLIT_MASK  = 30
-
-ST_TO_ID_DICT = config.ST_TO_ID_DICT
-MAX_YEAR = config.MAX_YEAR
 
 # Initialize uuid with SEED
 random.seed(SEED)
@@ -142,9 +141,9 @@ def extract_generated_breakpoints(names, out_labels, n_subtypes, ata_len, ata_to
             rows.append((idx, k + 1, len(bp_ata), int(b), int(ata_to_hxb2[b])))
     return pd.DataFrame(rows, columns=["seq", "rank", "n_bp", "pos_ata", "pos"])
 
-_MIX = re.compile(r"[/+,]")
 
 def is_uncertain(label: str) -> bool:
+    _MIX = re.compile(r"[/+,]")
     return label == "U" or bool(_MIX.search(label))
 
 def segments_to_breakpoints(df_seg):
@@ -231,222 +230,222 @@ def infer_params(
     print(f"  min_seg   {min_hxb2} HXB2 → {params['min_seg_len']} ATA")
     return params
 
-def compare_generated_vs_real(
-        names, out_labels, n_subtypes, ata_len, df_seg, ata_to_hxb2,
-        ):
-    """
-    Read back generated labels, extract per-recombinant statistics,
-    and compare against real CRF segment data.
+# def compare_generated_vs_real(
+#         names, out_labels, n_subtypes, ata_len, df_seg, ata_to_hxb2,
+#         ):
+#     """
+#     Read back generated labels, extract per-recombinant statistics,
+#     and compare against real CRF segment data.
     
-    Segment lengths are converted to HXB2 coordinates via ata_to_hxb2
-    for a fair comparison against the real data (which is annotated in HXB2).
-    """
-    lbl_mm = np.load(out_labels, mmap_mode="r")
+#     Segment lengths are converted to HXB2 coordinates via ata_to_hxb2
+#     for a fair comparison against the real data (which is annotated in HXB2).
+#     """
+#     lbl_mm = np.load(out_labels, mmap_mode="r")
 
-    gen_n_bp      = []
-    gen_n_st      = []
-    gen_seg_lens_ata  = []
-    gen_seg_lens_hxb2 = []
+#     gen_n_bp      = []
+#     gen_n_st      = []
+#     gen_seg_lens_ata  = []
+#     gen_seg_lens_hxb2 = []
 
-    rec_indices = [i for i, n in enumerate(names) if n.startswith("r")]
+#     rec_indices = [i for i, n in enumerate(names) if n.startswith("r")]
 
-    for idx in tqdm(rec_indices, desc="Analyzing generated recombinants", mininterval=10):
-        lbl = np.unpackbits(lbl_mm[idx], axis=-1)[:, :n_subtypes]
+#     for idx in tqdm(rec_indices, desc="Analyzing generated recombinants", mininterval=10):
+#         lbl = np.unpackbits(lbl_mm[idx], axis=-1)[:, :n_subtypes]
 
-        # Active subtype at each position (-1 where all labels are False, i.e. N)
-        any_active = lbl.any(axis=1)
-        active = np.full(ata_len, -1, dtype=np.int32)
-        active[any_active] = lbl[any_active].argmax(axis=1)
+#         # Active subtype at each position (-1 where all labels are False, i.e. N)
+#         any_active = lbl.any(axis=1)
+#         active = np.full(ata_len, -1, dtype=np.int32)
+#         active[any_active] = lbl[any_active].argmax(axis=1)
 
-        labeled_pos = np.where(active >= 0)[0]
-        if len(labeled_pos) < 2:
-            continue
+#         labeled_pos = np.where(active >= 0)[0]
+#         if len(labeled_pos) < 2:
+#             continue
 
-        labeled_st = active[labeled_pos]
+#         labeled_st = active[labeled_pos]
 
-        # Detect transitions between adjacent labeled positions
-        change_idx = np.where(np.diff(labeled_st) != 0)[0]
+#         # Detect transitions between adjacent labeled positions
+#         change_idx = np.where(np.diff(labeled_st) != 0)[0]
 
-        gen_n_bp.append(len(change_idx))
-        gen_n_st.append(len(np.unique(labeled_st)))
+#         gen_n_bp.append(len(change_idx))
+#         gen_n_st.append(len(np.unique(labeled_st)))
 
-        # Segment boundaries in ATA, then convert to HXB2 lengths
-        bp_ata       = labeled_pos[change_idx + 1]
-        seg_starts   = np.concatenate([[labeled_pos[0]],      bp_ata])
-        seg_ends     = np.concatenate([bp_ata, [labeled_pos[-1] + 1]])
+#         # Segment boundaries in ATA, then convert to HXB2 lengths
+#         bp_ata       = labeled_pos[change_idx + 1]
+#         seg_starts   = np.concatenate([[labeled_pos[0]],      bp_ata])
+#         seg_ends     = np.concatenate([bp_ata, [labeled_pos[-1] + 1]])
 
-        for s, e in zip(seg_starts, seg_ends):
-            gen_seg_lens_ata.append(int(e) - int(s))
-            e_clamped = min(int(e) - 1, ata_len - 1)
-            hxb2_len  = int(ata_to_hxb2[e_clamped]) - int(ata_to_hxb2[int(s)])
-            if hxb2_len > 0:
-                gen_seg_lens_hxb2.append(hxb2_len)
-    # Real CRF statistics
-    is_compound   = df_seg["subtype"].str.contains("/", regex=False)
-    df_pure       = df_seg[~is_compound]
+#         for s, e in zip(seg_starts, seg_ends):
+#             gen_seg_lens_ata.append(int(e) - int(s))
+#             e_clamped = min(int(e) - 1, ata_len - 1)
+#             hxb2_len  = int(ata_to_hxb2[e_clamped]) - int(ata_to_hxb2[int(s)])
+#             if hxb2_len > 0:
+#                 gen_seg_lens_hxb2.append(hxb2_len)
+#     # Real CRF statistics
+#     is_compound   = df_seg["subtype"].str.contains("/", regex=False)
+#     df_pure       = df_seg[~is_compound]
 
-    real_n_bp     = (df_pure.groupby("crf").size() - 1).clip(lower=0)
-    real_n_st     = df_pure.groupby("crf")["subtype"].nunique()
-    real_seg_lens = df_pure["length"].dropna().astype(float)
-    real_seg_lens = real_seg_lens[real_seg_lens > 0]
+#     real_n_bp     = (df_pure.groupby("crf").size() - 1).clip(lower=0)
+#     real_n_st     = df_pure.groupby("crf")["subtype"].nunique()
+#     real_seg_lens = df_pure["length"].dropna().astype(float)
+#     real_seg_lens = real_seg_lens[real_seg_lens > 0]
 
-    # Printing helpers
-    W_L, W_C = 30, 12
+#     # Printing helpers
+#     W_L, W_C = 30, 12
 
-    def _header(title):
-        print(f"\n {title}")
-        print(f"  {'':>{W_L}}  {'real':>{W_C}}  {'generated':>{W_C}}")
-        print(f"  {'-' * (W_L + 2 * W_C + 4)}")
+#     def _header(title):
+#         print(f"\n {title}")
+#         print(f"  {'':>{W_L}}  {'real':>{W_C}}  {'generated':>{W_C}}")
+#         print(f"  {'-' * (W_L + 2 * W_C + 4)}")
 
-    def _row(label, rv, gv, fmt=".1f"):
-        def _f(v):
-            if v is None or (isinstance(v, float) and np.isnan(v)):
-                return "n/a".rjust(W_C)
-            return format(v, fmt).rjust(W_C)
-        print(f"  {label:>{W_L}}  {_f(rv)}  {_f(gv)}")
+#     def _row(label, rv, gv, fmt=".1f"):
+#         def _f(v):
+#             if v is None or (isinstance(v, float) and np.isnan(v)):
+#                 return "n/a".rjust(W_C)
+#             return format(v, fmt).rjust(W_C)
+#         print(f"  {label:>{W_L}}  {_f(rv)}  {_f(gv)}")
 
-    def _discrete(title, real_s, gen_list):
-        _header(title)
-        r = pd.Series(real_s)
-        g = pd.Series(gen_list, dtype=int)
-        _row("n",    len(r),    len(g),    fmt="d")
-        _row("mean", r.mean(),  g.mean())
-        _row("std",  r.std(),   g.std())
-        _row("min",  r.min(),   g.min(),   fmt=".0f")
-        _row("max",  r.max(),   g.max(),   fmt=".0f")
-        # Full PMF comparison
-        all_vals = sorted(set(r.tolist()) | set(g.tolist()))
-        rpmf = r.value_counts(normalize=True)
-        gpmf = g.value_counts(normalize=True)
-        print(f"\n  {'value':>{W_L}}  {'real %':>{W_C}}  {'gen %':>{W_C}}")
-        for v in all_vals:
-            _row(str(v), rpmf.get(v, 0.0) * 100, gpmf.get(v, 0.0) * 100)
+#     def _discrete(title, real_s, gen_list):
+#         _header(title)
+#         r = pd.Series(real_s)
+#         g = pd.Series(gen_list, dtype=int)
+#         _row("n",    len(r),    len(g),    fmt="d")
+#         _row("mean", r.mean(),  g.mean())
+#         _row("std",  r.std(),   g.std())
+#         _row("min",  r.min(),   g.min(),   fmt=".0f")
+#         _row("max",  r.max(),   g.max(),   fmt=".0f")
+#         # Full PMF comparison
+#         all_vals = sorted(set(r.tolist()) | set(g.tolist()))
+#         rpmf = r.value_counts(normalize=True)
+#         gpmf = g.value_counts(normalize=True)
+#         print(f"\n  {'value':>{W_L}}  {'real %':>{W_C}}  {'gen %':>{W_C}}")
+#         for v in all_vals:
+#             _row(str(v), rpmf.get(v, 0.0) * 100, gpmf.get(v, 0.0) * 100)
 
-    def _continuous(title, real_s, gen_list):
-        _header(title)
-        r = pd.Series(real_s, dtype=float)
-        g = pd.Series(gen_list, dtype=float)
-        g = g[g > 0]
-        _row("n",      len(r),      len(g),      fmt="d")
-        _row("min",    r.min(),     g.min()    if len(g) else float("nan"))
-        _row("median", r.median(),  g.median() if len(g) else float("nan"))
-        _row("mean",   r.mean(),    g.mean()   if len(g) else float("nan"))
-        _row("std",    r.std(),     g.std()    if len(g) else float("nan"))
-        _row("max",    r.max(),     g.max()    if len(g) else float("nan"))
-        if len(r) > 1 and len(g) > 1:
-            _row("log-normal μ", np.log(r).mean(), np.log(g).mean(), fmt=".3f")
-            _row("log-normal σ", np.log(r).std(),  np.log(g).std(),  fmt=".3f")
+#     def _continuous(title, real_s, gen_list):
+#         _header(title)
+#         r = pd.Series(real_s, dtype=float)
+#         g = pd.Series(gen_list, dtype=float)
+#         g = g[g > 0]
+#         _row("n",      len(r),      len(g),      fmt="d")
+#         _row("min",    r.min(),     g.min()    if len(g) else float("nan"))
+#         _row("median", r.median(),  g.median() if len(g) else float("nan"))
+#         _row("mean",   r.mean(),    g.mean()   if len(g) else float("nan"))
+#         _row("std",    r.std(),     g.std()    if len(g) else float("nan"))
+#         _row("max",    r.max(),     g.max()    if len(g) else float("nan"))
+#         if len(r) > 1 and len(g) > 1:
+#             _row("log-normal μ", np.log(r).mean(), np.log(g).mean(), fmt=".3f")
+#             _row("log-normal σ", np.log(r).std(),  np.log(g).std(),  fmt=".3f")
 
-    def _plot_distribution_comparison(n_bp, n_st, seg_lens, path, title):
+#     def _plot_distribution_comparison(n_bp, n_st, seg_lens, path, title):
 
-        color_scheme = ['#072C4B', '#F28089', '#71cddd']
+#         color_scheme = ['#072C4B', '#F28089', '#71cddd']
 
-        #n_breakpoints / sequence
-        n_bp = pd.Series(n_bp)
-        n_st = pd.Series(n_st)
-        seg_lens = pd.Series(seg_lens)
-        bp_values = n_bp.value_counts().sort_index().index.tolist()
-        bp_real_pct = n_bp.value_counts(normalize=True).sort_index().values.tolist()
+#         #n_breakpoints / sequence
+#         n_bp = pd.Series(n_bp)
+#         n_st = pd.Series(n_st)
+#         seg_lens = pd.Series(seg_lens)
+#         bp_values = n_bp.value_counts().sort_index().index.tolist()
+#         bp_real_pct = n_bp.value_counts(normalize=True).sort_index().values.tolist()
 
-        #n_subtypes / sequence
-        st_values = n_st.value_counts().sort_index().index.tolist()
-        st_real_pct = n_st.value_counts(normalize=True).sort_index().values.tolist()
+#         #n_subtypes / sequence
+#         st_values = n_st.value_counts().sort_index().index.tolist()
+#         st_real_pct = n_st.value_counts(normalize=True).sort_index().values.tolist()
 
-        #segment lengths
-        sl_mu = seg_lens.apply(lambda x: np.log(x)).mean()
-        sl_sigma = seg_lens.apply(lambda x: np.log(x)).std()
-        bin_width = 200
+#         #segment lengths
+#         sl_mu = seg_lens.apply(lambda x: np.log(x)).mean()
+#         sl_sigma = seg_lens.apply(lambda x: np.log(x)).std()
+#         bin_width = 200
 
-        # 1A. Data for the bars (binned percentages)
-        bin_edges = np.arange(0, 9500 + bin_width, bin_width)
-        bin_centers = bin_edges[:-1] + (bin_width / 2)
-        sl_real_pct = []
-        sl_hover_text = []
+#         # 1A. Data for the bars (binned percentages)
+#         bin_edges = np.arange(0, 9500 + bin_width, bin_width)
+#         bin_centers = bin_edges[:-1] + (bin_width / 2)
+#         sl_real_pct = []
+#         sl_hover_text = []
 
-        def lognorm_cdf(x, mu, sigma):
-            if x <= 0: return 0.0
-            return 0.5 * (1 + math.erf((np.log(x) - mu) / (sigma * np.sqrt(2))))
+#         def lognorm_cdf(x, mu, sigma):
+#             if x <= 0: return 0.0
+#             return 0.5 * (1 + math.erf((np.log(x) - mu) / (sigma * np.sqrt(2))))
 
-        for i in range(len(bin_edges)-1):
-            left_edge = bin_edges[i]
-            right_edge = bin_edges[i+1]
-            prob = lognorm_cdf(right_edge, sl_mu, sl_sigma) - lognorm_cdf(left_edge, sl_mu, sl_sigma)
-            sl_real_pct.append(prob * 100)
-            sl_hover_text.append(f"{int(left_edge)} - {int(right_edge)} bp<br>{prob*100:.1f}%")
+#         for i in range(len(bin_edges)-1):
+#             left_edge = bin_edges[i]
+#             right_edge = bin_edges[i+1]
+#             prob = lognorm_cdf(right_edge, sl_mu, sl_sigma) - lognorm_cdf(left_edge, sl_mu, sl_sigma)
+#             sl_real_pct.append(prob * 100)
+#             sl_hover_text.append(f"{int(left_edge)} - {int(right_edge)} bp<br>{prob*100:.1f}%")
 
-        # 1B. Data for the continuous line (scaled PDF)
-        sl_x_line = np.linspace(10, 9500, 500)
-        sl_pdf = (1 / (sl_x_line * sl_sigma * np.sqrt(2 * np.pi))) * \
-                np.exp(- (np.log(sl_x_line) - sl_mu)**2 / (2 * sl_sigma**2))
-        sl_y_line = sl_pdf * bin_width * 100
+#         # 1B. Data for the continuous line (scaled PDF)
+#         sl_x_line = np.linspace(10, 9500, 500)
+#         sl_pdf = (1 / (sl_x_line * sl_sigma * np.sqrt(2 * np.pi))) * \
+#                 np.exp(- (np.log(sl_x_line) - sl_mu)**2 / (2 * sl_sigma**2))
+#         sl_y_line = sl_pdf * bin_width * 100
 
-        fig = make_subplots(
-            rows=1, cols=3, 
-            subplot_titles=(
-                "Breakpoints per sequence", 
-                "Subtypes per sequence", 
-                "Segment lengths distribution"
-            ),
-            horizontal_spacing=0.08
-        )
+#         fig = make_subplots(
+#             rows=1, cols=3, 
+#             subplot_titles=(
+#                 "Breakpoints per sequence", 
+#                 "Subtypes per sequence", 
+#                 "Segment lengths distribution"
+#             ),
+#             horizontal_spacing=0.08
+#         )
 
-        fig.add_trace(
-            go.Bar(x=bp_values, y=bp_real_pct, marker_color=color_scheme[0], hoverinfo='x+y', opacity=0.8),
-            row=1, col=1
-        )
-        fig.add_trace(
-            go.Bar(x=st_values, y=st_real_pct, marker_color=color_scheme[1], hoverinfo='x+y', opacity=0.8),
-            row=1, col=2
-        )
-        fig.add_trace(
-            go.Bar(x=bin_centers, y=sl_real_pct, width=bin_width*0.9, 
-                marker_color=color_scheme[0],
-                hoverinfo="text", hovertext=sl_hover_text,
-                opacity=0.8,
-                name="Binned data"),
-            row=1, col=3
-        )
-        fig.add_trace(
-            go.Scatter(x=sl_x_line, y=sl_y_line, mode='lines',
-                    line=dict(color=color_scheme[1], width=3),
-                    hoverinfo="none",
-                    name="Continuous fit"),
-            row=1, col=3
-        )
+#         fig.add_trace(
+#             go.Bar(x=bp_values, y=bp_real_pct, marker_color=color_scheme[0], hoverinfo='x+y', opacity=0.8),
+#             row=1, col=1
+#         )
+#         fig.add_trace(
+#             go.Bar(x=st_values, y=st_real_pct, marker_color=color_scheme[1], hoverinfo='x+y', opacity=0.8),
+#             row=1, col=2
+#         )
+#         fig.add_trace(
+#             go.Bar(x=bin_centers, y=sl_real_pct, width=bin_width*0.9, 
+#                 marker_color=color_scheme[0],
+#                 hoverinfo="text", hovertext=sl_hover_text,
+#                 opacity=0.8,
+#                 name="Binned data"),
+#             row=1, col=3
+#         )
+#         fig.add_trace(
+#             go.Scatter(x=sl_x_line, y=sl_y_line, mode='lines',
+#                     line=dict(color=color_scheme[1], width=3),
+#                     hoverinfo="none",
+#                     name="Continuous fit"),
+#             row=1, col=3
+#         )
 
-        fig.update_xaxes(title_text="Number of breakpoints", tickmode='linear', tick0=1, dtick=2, row=1, col=1)
-        fig.update_yaxes(title_text="Percentage (%)", row=1, col=1)
-        fig.update_xaxes(title_text="Number of subtypes", tickmode='linear', tick0=2, dtick=1, row=1, col=2)
-        fig.update_yaxes(title_text="Percentage (%)", row=1, col=2)
-        fig.update_xaxes(title_text="Segment length (HXB2 bp)", row=1, col=3)
-        fig.update_yaxes(title_text="Percentage (%)", row=1, col=3)
+#         fig.update_xaxes(title_text="Number of breakpoints", tickmode='linear', tick0=1, dtick=2, row=1, col=1)
+#         fig.update_yaxes(title_text="Percentage (%)", row=1, col=1)
+#         fig.update_xaxes(title_text="Number of subtypes", tickmode='linear', tick0=2, dtick=1, row=1, col=2)
+#         fig.update_yaxes(title_text="Percentage (%)", row=1, col=2)
+#         fig.update_xaxes(title_text="Segment length (HXB2 bp)", row=1, col=3)
+#         fig.update_yaxes(title_text="Percentage (%)", row=1, col=3)
 
-        fig.update_layout(
-            title=title,
-            title_x=0.5,
-            template="plotly_white",
-            showlegend=False, 
-            height=500,
-            width=1200,
-            bargap=0.15
-        )
-        fig.write_html(path)
-        path = Path(path)
-        fig.write_image(path.with_suffix(".svg"))
-    # Print
-    print(f"\n  === Distribution comparison: {len(real_n_bp)} real CRFs  vs  "
-          f"{len(rec_indices)} generated recombinants ===")
-    _discrete("n_breakpoints / sequence",  real_n_bp,     gen_n_bp)
-    _discrete("n_subtypes / sequence",     real_n_st,     gen_n_st)
-    _continuous("segment lengths (HXB2 bp)", real_seg_lens, gen_seg_lens_hxb2)
-    _continuous("segment lengths (ATA pos)", pd.Series(dtype=float), gen_seg_lens_ata)
+#         fig.update_layout(
+#             title=title,
+#             title_x=0.5,
+#             template="plotly_white",
+#             showlegend=False, 
+#             height=500,
+#             width=1200,
+#             bargap=0.15
+#         )
+#         fig.write_html(path)
+#         path = Path(path)
+#         fig.write_image(path.with_suffix(".svg"))
+#     # Print
+#     print(f"\n  === Distribution comparison: {len(real_n_bp)} real CRFs  vs  "
+#           f"{len(rec_indices)} generated recombinants ===")
+#     _discrete("n_breakpoints / sequence",  real_n_bp,     gen_n_bp)
+#     _discrete("n_subtypes / sequence",     real_n_st,     gen_n_st)
+#     _continuous("segment lengths (HXB2 bp)", real_seg_lens, gen_seg_lens_hxb2)
+#     _continuous("segment lengths (ATA pos)", pd.Series(dtype=float), gen_seg_lens_ata)
 
-    crf_dist_path = f"{WORKSPACE_PATH}/figs/crf_dist.html"
-    synthetic_dist_path = f"{WORKSPACE_PATH}/figs/synthetic_dist.html"
-    _plot_distribution_comparison(gen_n_bp, gen_n_st, pd.Series(gen_seg_lens_hxb2), synthetic_dist_path,
-                                  title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">{len(gen_n_bp)} generated recombinants</sup>')
-    _plot_distribution_comparison(real_n_bp, real_n_st, real_seg_lens, crf_dist_path,
-                                  title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">Data taken from LANL Sequence Database - {len(real_n_bp)} CRFs</sup>')
+#     crf_dist_path = f"{WORKSPACE_PATH}/figs/crf_dist.html"
+#     synthetic_dist_path = f"{WORKSPACE_PATH}/figs/synthetic_dist.html"
+#     _plot_distribution_comparison(gen_n_bp, gen_n_st, pd.Series(gen_seg_lens_hxb2), synthetic_dist_path,
+#                                   title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">{len(gen_n_bp)} generated recombinants</sup>')
+#     _plot_distribution_comparison(real_n_bp, real_n_st, real_seg_lens, crf_dist_path,
+#                                   title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">Data taken from LANL Sequence Database - {len(real_n_bp)} CRFs</sup>')
 
 # Subtype sampling
 def weighted_subtype_probs(counts: dict, floor: float = 0.015) -> dict:
@@ -490,7 +489,7 @@ def sample_subtypes(n, pool, py_rng, st_probs=None):
             weights = []
             for st_cand in remain:
                 g = SUBTYPE_GROUPS.get(st_cand, 2)
-                w = max(DIVERGENCE_WEIGHTS[g][SUBTYPE_GROUPS[a]] for a in chosen)
+                w = min(DIVERGENCE_WEIGHTS[g][SUBTYPE_GROUPS[a]] for a in chosen)
                 weights.append(w)
             total = sum(weights)
             r = py_rng.random() * total

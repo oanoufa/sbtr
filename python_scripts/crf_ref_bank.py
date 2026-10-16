@@ -417,7 +417,7 @@ def build_crf_reference_bank(
     )
     print(
         f"  CRF test set ready       : {len(test_set)} sequences "
-        f"({len(crf_groups)} CRF type(s), ≤{n_test} per type)"
+        f"({len(crf_groups)} CRF type(s), {n_test} per type)"
     )
     return reference_bank, reference_names, test_set
 

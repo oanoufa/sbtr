@@ -28,6 +28,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from html import escape
 import matplotlib.patheffects as pe
 from matplotlib.patches import Rectangle
+from tqdm import tqdm
 
 
 from python_scripts.src.mutator_class import parse_iqtree_rates
@@ -36,6 +37,7 @@ from python_scripts.src import config
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 workspace_path = config.WORKSPACE_PATH
+WORKSPACE_PATH = workspace_path
 
 GENES_RAW = config.GENES_RAW
 GENE_COLORS = config.GENE_COLORS
@@ -207,6 +209,223 @@ def visualize_breakpoint_rank_profile(
     fig.write_html(save_path)
     fig.write_image(Path(save_path).with_suffix(".svg"))
     print(f"Rank profile saved to: {save_path}", flush=True)
+
+def compare_generated_vs_real(
+        names, out_labels, n_subtypes, ata_len, df_seg, ata_to_hxb2,
+        ):
+    """
+    Read back generated labels, extract per-recombinant statistics,
+    and compare against real CRF segment data.
+    
+    Segment lengths are converted to HXB2 coordinates via ata_to_hxb2
+    for a fair comparison against the real data (which is annotated in HXB2).
+    """
+    lbl_mm = np.load(out_labels, mmap_mode="r")
+
+    gen_n_bp      = []
+    gen_n_st      = []
+    gen_seg_lens_ata  = []
+    gen_seg_lens_hxb2 = []
+
+    rec_indices = [i for i, n in enumerate(names) if n.startswith("r")]
+
+    for idx in tqdm(rec_indices, desc="Analyzing generated recombinants", mininterval=10):
+        lbl = np.unpackbits(lbl_mm[idx], axis=-1)[:, :n_subtypes]
+
+        # Active subtype at each position (-1 where all labels are False, i.e. N)
+        any_active = lbl.any(axis=1)
+        active = np.full(ata_len, -1, dtype=np.int32)
+        active[any_active] = lbl[any_active].argmax(axis=1)
+
+        labeled_pos = np.where(active >= 0)[0]
+        if len(labeled_pos) < 2:
+            continue
+
+        labeled_st = active[labeled_pos]
+
+        # Detect transitions between adjacent labeled positions
+        change_idx = np.where(np.diff(labeled_st) != 0)[0]
+
+        gen_n_bp.append(len(change_idx))
+        gen_n_st.append(len(np.unique(labeled_st)))
+
+        # Segment boundaries in ATA, then convert to HXB2 lengths
+        bp_ata       = labeled_pos[change_idx + 1]
+        seg_starts   = np.concatenate([[labeled_pos[0]],      bp_ata])
+        seg_ends     = np.concatenate([bp_ata, [labeled_pos[-1] + 1]])
+
+        for s, e in zip(seg_starts, seg_ends):
+            gen_seg_lens_ata.append(int(e) - int(s))
+            e_clamped = min(int(e) - 1, ata_len - 1)
+            hxb2_len  = int(ata_to_hxb2[e_clamped]) - int(ata_to_hxb2[int(s)])
+            if hxb2_len > 0:
+                gen_seg_lens_hxb2.append(hxb2_len)
+    # Real CRF statistics
+    is_compound   = df_seg["subtype"].str.contains("/", regex=False)
+    df_pure       = df_seg[~is_compound]
+
+    real_n_bp     = (df_pure.groupby("crf").size() - 1).clip(lower=0)
+    real_n_st     = df_pure.groupby("crf")["subtype"].nunique()
+    real_seg_lens = df_pure["length"].dropna().astype(float)
+    real_seg_lens = real_seg_lens[real_seg_lens > 0]
+
+    # Printing helpers
+    W_L, W_C = 30, 12
+
+    def _header(title):
+        print(f"\n {title}")
+        print(f"  {'':>{W_L}}  {'real':>{W_C}}  {'generated':>{W_C}}")
+        print(f"  {'-' * (W_L + 2 * W_C + 4)}")
+
+    def _row(label, rv, gv, fmt=".1f"):
+        def _f(v):
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return "n/a".rjust(W_C)
+            return format(v, fmt).rjust(W_C)
+        print(f"  {label:>{W_L}}  {_f(rv)}  {_f(gv)}")
+
+    def _discrete(title, real_s, gen_list):
+        _header(title)
+        r = pd.Series(real_s)
+        g = pd.Series(gen_list, dtype=int)
+        _row("n",    len(r),    len(g),    fmt="d")
+        _row("mean", r.mean(),  g.mean())
+        _row("std",  r.std(),   g.std())
+        _row("min",  r.min(),   g.min(),   fmt=".0f")
+        _row("max",  r.max(),   g.max(),   fmt=".0f")
+        # Full PMF comparison
+        all_vals = sorted(set(r.tolist()) | set(g.tolist()))
+        rpmf = r.value_counts(normalize=True)
+        gpmf = g.value_counts(normalize=True)
+        print(f"\n  {'value':>{W_L}}  {'real %':>{W_C}}  {'gen %':>{W_C}}")
+        for v in all_vals:
+            _row(str(v), rpmf.get(v, 0.0) * 100, gpmf.get(v, 0.0) * 100)
+
+    def _continuous(title, real_s, gen_list):
+        _header(title)
+        r = pd.Series(real_s, dtype=float)
+        g = pd.Series(gen_list, dtype=float)
+        g = g[g > 0]
+        _row("n",      len(r),      len(g),      fmt="d")
+        _row("min",    r.min(),     g.min()    if len(g) else float("nan"))
+        _row("median", r.median(),  g.median() if len(g) else float("nan"))
+        _row("mean",   r.mean(),    g.mean()   if len(g) else float("nan"))
+        _row("std",    r.std(),     g.std()    if len(g) else float("nan"))
+        _row("max",    r.max(),     g.max()    if len(g) else float("nan"))
+        if len(r) > 1 and len(g) > 1:
+            _row("log-normal μ", np.log(r).mean(), np.log(g).mean(), fmt=".3f")
+            _row("log-normal σ", np.log(r).std(),  np.log(g).std(),  fmt=".3f")
+
+    def _plot_distribution_comparison(n_bp, n_st, seg_lens, path, title):
+
+        color_scheme = ['#072C4B', '#F28089', '#71cddd']
+
+        #n_breakpoints / sequence
+        n_bp = pd.Series(n_bp)
+        n_st = pd.Series(n_st)
+        seg_lens = pd.Series(seg_lens)
+        bp_values = n_bp.value_counts().sort_index().index.tolist()
+        bp_real_pct = n_bp.value_counts(normalize=True).sort_index().values.tolist()
+
+        #n_subtypes / sequence
+        st_values = n_st.value_counts().sort_index().index.tolist()
+        st_real_pct = n_st.value_counts(normalize=True).sort_index().values.tolist()
+
+        #segment lengths
+        sl_mu = seg_lens.apply(lambda x: np.log(x)).mean()
+        sl_sigma = seg_lens.apply(lambda x: np.log(x)).std()
+        bin_width = 200
+
+        # 1A. Data for the bars (binned percentages)
+        bin_edges = np.arange(0, 9500 + bin_width, bin_width)
+        bin_centers = bin_edges[:-1] + (bin_width / 2)
+        sl_real_pct = []
+        sl_hover_text = []
+
+        def lognorm_cdf(x, mu, sigma):
+            if x <= 0: return 0.0
+            return 0.5 * (1 + math.erf((np.log(x) - mu) / (sigma * np.sqrt(2))))
+
+        for i in range(len(bin_edges)-1):
+            left_edge = bin_edges[i]
+            right_edge = bin_edges[i+1]
+            prob = lognorm_cdf(right_edge, sl_mu, sl_sigma) - lognorm_cdf(left_edge, sl_mu, sl_sigma)
+            sl_real_pct.append(prob * 100)
+            sl_hover_text.append(f"{int(left_edge)} - {int(right_edge)} bp<br>{prob*100:.1f}%")
+
+        # 1B. Data for the continuous line (scaled PDF)
+        sl_x_line = np.linspace(10, 9500, 500)
+        sl_pdf = (1 / (sl_x_line * sl_sigma * np.sqrt(2 * np.pi))) * \
+                np.exp(- (np.log(sl_x_line) - sl_mu)**2 / (2 * sl_sigma**2))
+        sl_y_line = sl_pdf * bin_width * 100
+
+        fig = make_subplots(
+            rows=1, cols=3, 
+            subplot_titles=(
+                "Breakpoints per sequence", 
+                "Subtypes per sequence", 
+                "Segment lengths distribution"
+            ),
+            horizontal_spacing=0.08
+        )
+
+        fig.add_trace(
+            go.Bar(x=bp_values, y=bp_real_pct, marker_color=color_scheme[0], hoverinfo='x+y', opacity=0.8),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Bar(x=st_values, y=st_real_pct, marker_color=color_scheme[1], hoverinfo='x+y', opacity=0.8),
+            row=1, col=2
+        )
+        fig.add_trace(
+            go.Bar(x=bin_centers, y=sl_real_pct, width=bin_width*0.9, 
+                marker_color=color_scheme[0],
+                hoverinfo="text", hovertext=sl_hover_text,
+                opacity=0.8,
+                name="Binned data"),
+            row=1, col=3
+        )
+        fig.add_trace(
+            go.Scatter(x=sl_x_line, y=sl_y_line, mode='lines',
+                    line=dict(color=color_scheme[1], width=3),
+                    hoverinfo="none",
+                    name="Continuous fit"),
+            row=1, col=3
+        )
+
+        fig.update_xaxes(title_text="Number of breakpoints", tickmode='linear', tick0=1, dtick=2, row=1, col=1)
+        fig.update_yaxes(title_text="Percentage (%)", row=1, col=1)
+        fig.update_xaxes(title_text="Number of subtypes", tickmode='linear', tick0=2, dtick=1, row=1, col=2)
+        fig.update_yaxes(title_text="Percentage (%)", row=1, col=2)
+        fig.update_xaxes(title_text="Segment length (HXB2 bp)", row=1, col=3)
+        fig.update_yaxes(title_text="Percentage (%)", row=1, col=3)
+
+        fig.update_layout(
+            title=title,
+            title_x=0.5,
+            template="plotly_white",
+            showlegend=False, 
+            height=500,
+            width=1200,
+            bargap=0.15
+        )
+        fig.write_html(path)
+        path = Path(path)
+        fig.write_image(path.with_suffix(".svg"))
+    # Print
+    print(f"\n  === Distribution comparison: {len(real_n_bp)} real CRFs  vs  "
+          f"{len(rec_indices)} generated recombinants ===")
+    _discrete("n_breakpoints / sequence",  real_n_bp,     gen_n_bp)
+    _discrete("n_subtypes / sequence",     real_n_st,     gen_n_st)
+    _continuous("segment lengths (HXB2 bp)", real_seg_lens, gen_seg_lens_hxb2)
+    _continuous("segment lengths (ATA pos)", pd.Series(dtype=float), gen_seg_lens_ata)
+
+    crf_dist_path = f"{WORKSPACE_PATH}/figs/crf_dist.html"
+    synthetic_dist_path = f"{WORKSPACE_PATH}/figs/synthetic_dist.html"
+    _plot_distribution_comparison(gen_n_bp, gen_n_st, pd.Series(gen_seg_lens_hxb2), synthetic_dist_path,
+                                  title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">{len(gen_n_bp)} generated recombinants</sup>')
+    _plot_distribution_comparison(real_n_bp, real_n_st, real_seg_lens, crf_dist_path,
+                                  title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">Data taken from LANL Sequence Database - {len(real_n_bp)} CRFs</sup>')
 
 
 def visualize_diversity(
@@ -630,12 +849,11 @@ def visualize_sample_probs(
 
         ax_st.legend(
             handles=legend_handles,
-            title="Subtype(s)",
-            title_fontsize=8,
+            title=None,
             fontsize=7,
-            ncol=min(len(legend_handles), 6),
-            loc="upper left",
-            bbox_to_anchor=(0.0, 0.78),
+            ncol=len(legend_handles),
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.15),
             frameon=True,
             framealpha=0.85,
             borderpad=0.6,
@@ -660,6 +878,21 @@ def visualize_sample_probs(
 
     plt.close(fig)
 
+
+_PATTERN_DEFS = (
+    '<defs>'
+    '<pattern id="p-hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
+    '<line x1="0" y1="0" x2="0" y2="4" stroke="#000" stroke-width="1" stroke-opacity="0.6"/></pattern>'
+    '<pattern id="p-plus" width="6" height="6" patternUnits="userSpaceOnUse">'
+    '<path d="M3 1v4M1 3h4" stroke="#000" stroke-width="0.9" stroke-opacity="0.6" fill="none"/></pattern>'
+    '<pattern id="p-cross" width="5" height="5" patternUnits="userSpaceOnUse">'
+    '<path d="M0 0L5 5M5 0L0 5" stroke="#000" stroke-width="0.8" stroke-opacity="0.6" fill="none"/></pattern>'
+    '<pattern id="p-dots" width="5" height="5" patternUnits="userSpaceOnUse">'
+    '<circle cx="2.5" cy="2.5" r="0.9" fill="#000" fill-opacity="0.6"/></pattern>'
+    '</defs>'
+)
+_PATTERN_CYCLE = [None, "hatch", "plus", "cross", "dots"]  # None = plain colour
+
 def visualize_sample_probs_light(regions_aligned, hxb2_to_ata, n_total, path,
                     width=1100, lane_h=24, fs=9):
     ml, mr, top = 28, 20, 4
@@ -673,7 +906,7 @@ def visualize_sample_probs_light(regions_aligned, hxb2_to_ata, n_total, path,
     arr = _subtype_array(regions_aligned, n_total)
     entries = _gene_entries(hxb2_to_ata, n_total)
 
-    by_color, outlines, seen = defaultdict(list), [], []
+    by_st, outlines, seen = defaultdict(list), [], []
     for g in entries:
         y0, y1 = FRAME_LANES[g["frame"]]
         yt, h = Y(y1 - PAD), (y1 - y0 - 2 * PAD) * H3
@@ -683,17 +916,25 @@ def visualize_sample_probs_light(regions_aligned, hxb2_to_ata, n_total, path,
             if val:
                 if val not in seen:
                     seen.append(val)
-                by_color[ST_COLORS.get(val, "#CCCCCC")].append(
+                by_st[val].append(
                     f"M{X(pos):.1f} {yt:.1f}h{n * sx:.1f}v{h:.1f}h-{n * sx:.1f}z")
 
+    order = list(ST_COLORS)
+    present = sorted(seen, key=lambda s: order.index(s) if s in order else len(order))
+    pat = {st: _PATTERN_CYCLE[i % len(_PATTERN_CYCLE)] for i, st in enumerate(present)}
     labels, connectors = _label_layout(entries, n_total, pw, fs=fs)
     anchor = {"left": "start", "center": "middle", "right": "end"}
     ay = top + H3 + 5
 
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-           f'viewBox="0 0 {width} {height}" font-family="Helvetica, Arial, sans-serif">']
-    for c, parts in by_color.items():
-        out.append(f'<path fill="{c}" fill-opacity="0.88" d="{"".join(parts)}"/>')
+        f'viewBox="0 0 {width} {height}" font-family="Helvetica, Arial, sans-serif">',
+        _PATTERN_DEFS]
+    for st, parts in by_st.items():
+        d = "".join(parts)
+        out.append(f'<path fill="{ST_COLORS.get(st, "#CCCCCC")}" fill-opacity="0.88" d="{d}"/>')
+        p = pat[st]
+        if p:
+            out.append(f'<path fill="url(#p-{p})" d="{d}"/>')
     out.append(f'<path fill="none" stroke="#000" stroke-width="0.5" d="{"".join(outlines)}"/>')
     for pts in connectors:
         p = " ".join(f"{X(x):.1f},{Y(y):.1f}" for x, y in pts)
@@ -702,7 +943,7 @@ def visualize_sample_probs_light(regions_aligned, hxb2_to_ata, n_total, path,
         base_attr = {"center": 'dominant-baseline="central"',
                      "top": 'dominant-baseline="hanging"'}.get(va, "")
         out.append(f'<text x="{X(x):.1f}" y="{Y(y):.1f}" font-size="{fs}" text-anchor="{anchor[ha]}" '
-                   f'{base_attr} stroke="#fff" stroke-width="1.2" sroke-opacity="0.7" paint-order="stroke">{escape(txt)}</text>')
+                   f'{base_attr} stroke="#fff" stroke-width="1.2" stroke-opacity="0.7" paint-order="stroke">{escape(txt)}</text>')
     for f, (y0, y1) in FRAME_LANES.items():
         out.append(f'<text x="{ml - 4}" y="{Y((y0 + y1) / 2):.1f}" font-size="{fs - 2}" fill="#888" '
                    f'text-anchor="end" dominant-baseline="central">F{f}</text>')
@@ -718,6 +959,9 @@ def visualize_sample_probs_light(regions_aligned, hxb2_to_ata, n_total, path,
     lx = ml
     for st in seen:
         out.append(f'<rect x="{lx}" y="{height - 13}" width="9" height="9" fill="{ST_COLORS.get(st, "#CCCCCC")}" stroke="#555" stroke-width="0.4"/>')
+        p = pat[st]
+        if p:
+            out.append(f'<rect x="{lx}" y="{height - 13}" width="9" height="9" fill="url(#p-{p})"/>')
         out.append(f'<text x="{lx + 12}" y="{height - 5}" font-size="{fs - 1}">{escape(st)}</text>')
         lx += 22 + 6 * len(st)
 
@@ -725,6 +969,61 @@ def visualize_sample_probs_light(regions_aligned, hxb2_to_ata, n_total, path,
     with open(path, "w") as f:
         f.write("\n".join(out))
 
+def visualize_sample_probs_lines(preds_slice, pure_st_to_id_dict, n_total, path,
+                                 width=1100, height=260, fs=9, min_peak=0.3,
+                                 excluded=frozenset({"U", "5'LTR", "3'LTR"})):
+    ml, mr, top, bot = 34, 20, 8, 46
+    pw, ph = width - ml - mr, height - top - bot
+    X = lambda x: ml + x * pw / n_total
+    Y = lambda y: top + (1 - y) * ph
+
+    P = np.asarray(preds_slice)                      # (ata_len, n_subtypes)
+    step = max(1, n_total // pw)
+    idx = np.arange(0, n_total, step)
+    xs = idx + step / 2
+
+    id_to_st = {v: k for k, v in pure_st_to_id_dict.items()}
+    lines, seen = [], []
+    for i in range(len(id_to_st)):
+        st = id_to_st[i]
+        if st in excluded or P[:, i].max() <= min_peak:
+            continue
+        ys = np.maximum.reduceat(P[:, i], idx)
+        pts = " ".join(f"{X(x):.1f},{Y(y):.1f}" for x, y in zip(xs, ys))
+        lines.append(f'<polyline points="{pts}" fill="none" stroke="{ST_COLORS.get(st, "#CCCCCC")}" '
+                     f'stroke-width="1.2" stroke-linejoin="round"/>')
+        seen.append(st)
+
+    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+           f'viewBox="0 0 {width} {height}" font-family="Helvetica, Arial, sans-serif">']
+
+    # y grid + labels
+    for v in (0, 0.5, 1):
+        out.append(f'<line x1="{ml}" x2="{ml + pw}" y1="{Y(v):.1f}" y2="{Y(v):.1f}" '
+                   f'stroke="#ddd" stroke-width="0.5"/>')
+        out.append(f'<text x="{ml - 4}" y="{Y(v):.1f}" font-size="{fs - 1}" fill="#555" '
+                   f'text-anchor="end" dominant-baseline="central">{v:g}</text>')
+    out.extend(lines)
+
+    # x axis
+    ay = top + ph + 2
+    out.append(f'<line x1="{ml}" x2="{ml + pw}" y1="{ay}" y2="{ay}" stroke="#000" stroke-width="0.6"/>')
+    tstep = max(1, n_total // 10)
+    for t in range(0, n_total + 1, tstep):
+        out.append(f'<line x1="{X(t):.1f}" x2="{X(t):.1f}" y1="{ay}" y2="{ay + 3}" stroke="#000" stroke-width="0.6"/>')
+        out.append(f'<text x="{X(t):.1f}" y="{ay + 12}" font-size="{fs - 1}" text-anchor="middle">{t}</text>')
+
+    # legend (colored line swatches)
+    lx = ml
+    for st in seen:
+        c = ST_COLORS.get(st, "#CCCCCC")
+        out.append(f'<line x1="{lx}" x2="{lx + 12}" y1="{height - 9}" y2="{height - 9}" stroke="{c}" stroke-width="2"/>')
+        out.append(f'<text x="{lx + 16}" y="{height - 5}" font-size="{fs - 1}">{escape(st)}</text>')
+        lx += 26 + 6 * len(st)
+
+    out.append("</svg>")
+    with open(path, "w") as f:
+        f.write("\n".join(out))
 
 def visualize_region_comparison(
     seq_id: str,
@@ -1902,7 +2201,7 @@ if __name__ == "__main__":
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)
     subtypes_with_data = [
         'A',
-        # 'B', 
+        'B', 
         'C', 'D', 'AE', 'F', 'G']
     names = subtypes_with_data + ['avg']
     diversity_arrays = {}
@@ -1941,7 +2240,7 @@ if __name__ == "__main__":
     visualize_metrics(save_path_loss=save_path_loss,
                       save_path_evol=save_path_evol)
 
-    processing_times = f"{workspace_path}/data/output/processing_times.csv"
+    processing_times = f"{workspace_path}/data/speed_test/processing_times.csv"
     save_path_time = f"{workspace_path}/figs/processing_time_per_10k.html"
     plot_time_per_10k(processing_times, save_path_time)
 

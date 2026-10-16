@@ -20,7 +20,7 @@ from typing import Dict, List, Set, Tuple
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 
-from python_scripts.figs import visualize_sample_probs, visualize_sample_probs_light
+from python_scripts.figs import visualize_sample_probs, visualize_sample_probs_light, visualize_sample_probs_lines
 from python_scripts.src import config
 from python_scripts.src.dataset_class import HIVSequenceDataset
 from python_scripts.src.model_class import HFModelForHIVSubtyping
@@ -348,6 +348,13 @@ def process_single_sample_worker(
             hxb2_to_ata=HXB2_TO_ATA,
             n_total=ATA_LEN,
             path=out_path,
+        )
+        out_path_line = str(sample_vis_dir / f"{sample_name}_line.svg")
+        visualize_sample_probs_lines(
+            preds_slice=preds_slice,
+            pure_st_to_id_dict=ST_TO_ID_DICT,
+            n_total=ATA_LEN,
+            path=out_path_line,
         )
 
     elif 'f' in wto:

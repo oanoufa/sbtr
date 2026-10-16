@@ -20,7 +20,7 @@ tv_weight = MODEL_CONFIG['tv_weight']
 
 # High-level clade groups to calculate true biological performance
 CLADE_GROUPS = {
-    "A_Clade": ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8"],
+    "A_Clade": ["A1", "A2", "A3", "A4", "A5U", "A6", "A7", "A8"],
     "F_Clade": ["F1", "F2"],
     "B/D": ["B", "D"]
 }
