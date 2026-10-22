@@ -28,7 +28,7 @@ for _i, _b in enumerate(_ACGT_BYTES):
     _BASE_TO_ACGT_IDX[_b] = _i
 
 _REF_PREFIX            = re.compile(r"^Ref\.")
-_SUBTYPES_WITH_FILES   = ['A', 'B', 'C', 'D', 'AE', 'F', 'G']
+_SUBTYPES_WITH_FILES   = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
 
 # Module-level functions  (import these in parallel workers)
 def parse_iqtree_rates(rate_path: str, ata_len: int, use_classes: bool = True) -> np.ndarray:

@@ -5,7 +5,7 @@ import torch
 import pandas as pd
 import json
 import gzip
-from Bio import SeqIO
+from Bio import SeqIO, AlignIO
 from Bio.Seq import Seq
 import os
 import sys
@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
+import re
 
-from python_scripts.figs import visualize_sample_probs, visualize_sample_probs_light, visualize_sample_probs_lines
+from python_scripts.figs import visualize_sample_probs, visualize_combined_light
 from python_scripts.src import config
 from python_scripts.src.dataset_class import HIVSequenceDataset
 from python_scripts.src.model_class import HFModelForHIVSubtyping
@@ -121,7 +122,7 @@ if 'p' in wto:
 if 'f' in wto:
     print("f in wto: saving figures in figs folder", flush=True)
 if 'l' in wto:
-    print("f in wto: saving light svg figures in figs folder", flush=True)
+    print("l in wto: saving light svg figures in figs folder", flush=True)
 if 'a' in wto:
     print("a in wto: saving attention masks in a npy file", flush=True)
 
@@ -133,6 +134,10 @@ else:
 
 device = "cuda" if torch.cuda.is_available() and gpu else "cpu"
 print(f"Using device: {device}", flush=True)
+if torch.cuda.is_available():
+    print(f"CUDA device count: {torch.cuda.device_count()}")
+    for i in range(torch.cuda.device_count()):
+        print(f"  cuda:{i} → {torch.cuda.get_device_name(i)}")
 device = torch.device(device) if isinstance(device, str) else device
 
 # Points to the directory where this python file is located
@@ -146,6 +151,90 @@ gz_path = COMBINED_REF_PATH.with_name(COMBINED_REF_PATH.name + ".gz")
 if not COMBINED_REF_PATH.exists():
     with gzip.open(gz_path, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
         f_out.write(f_in.read())
+
+MAX_SEQ_LEN        = config.MAX_SEQ_LEN
+MIN_INFORMATIVE_BP = config.MIN_INFORMATIVE_BP
+MAX_N_FRACTION     = config.MAX_N_FRACTION
+PROB_ZERO_THRESHOLD = config.PROB_ZERO_THRESHOLD
+VALID_NT           = set("ACGTRYKMSWBDHVN")  # IUPAC DNA
+_BAD_ID_CHARS      = re.compile(r"[^A-Za-z0-9._+\-]")
+
+def _preview(items: List[str], n: int = 10) -> str:
+    return ", ".join(items[:n]) + (f", ... (+{len(items) - n} more)" if len(items) > n else "")
+
+def sanitize_ids(records: List, reference_ids: Set[str], mapping_path: Path = None) -> None:
+    """Replace problematic characters by '.', and make IDs unique (also w.r.t. reference IDs)."""
+    taken = {i.lower() for i in reference_ids}
+    mapping = []
+    for n, rec in enumerate(records, start=1):
+        orig = rec.id
+        new = _BAD_ID_CHARS.sub(".", orig) or f"seq{n}"
+        base, k = new, 1
+        while new.lower() in taken:      # duplicate or collision with a reference ID
+            k += 1
+            new = f"{base}_{k}"
+        taken.add(new.lower())
+        if new != orig:
+            mapping.append((orig, new))
+            rec.id = new
+
+    if mapping:
+        print(f"  [warn] {len(mapping)} sequence ID(s) renamed (special characters, duplicates "
+              f"or clash with reference IDs): {_preview([f'{o} -> {n}' for o, n in mapping], 5)}",
+              flush=True)
+        if mapping_path is not None:
+            pd.DataFrame(mapping, columns=["original_id", "new_id"]).to_csv(mapping_path, index=False)
+            print(f"  ID mapping saved: {mapping_path}", flush=True)
+
+def check_inputs(
+    records: List,
+    reference_ids: Set[str],
+    id_mapping_path: Path = None,
+    skipped_path: Path = None,
+    ) -> List:
+    """Sanitize IDs, convert RNA to DNA, and drop invalid sequences
+    (non-nucleotide characters, too long, too few informative bp).
+    Returns the kept records; exits only if none remain."""
+    sanitize_ids(records, reference_ids, id_mapping_path)
+
+    kept, skipped, high_n = [], [], []
+    n_rna = 0
+    for rec in records:
+        seq = str(rec.seq)
+        if "U" in seq:
+            seq = seq.replace("U", "T")
+            rec.seq = Seq(seq)
+            n_rna += 1
+
+        n_count = seq.count("N")
+        informative = len(seq) - n_count
+        invalid = set(seq) - VALID_NT
+
+        if invalid:
+            skipped.append((rec.id, f"non-nucleotide characters: {''.join(sorted(invalid))}"))
+        elif len(seq) > MAX_SEQ_LEN:
+            skipped.append((rec.id, f"longer than {MAX_SEQ_LEN} bp after dealigning ({len(seq)} bp)"))
+        elif informative < MIN_INFORMATIVE_BP:
+            skipped.append((rec.id, f"fewer than {MIN_INFORMATIVE_BP} informative bp ({informative} bp)"))
+        else:
+            if n_count / len(seq) > MAX_N_FRACTION:
+                high_n.append(f"{rec.id} ({n_count / len(seq):.0%} N)")
+            kept.append(rec)
+
+    if n_rna:
+        print(f"  [info] RNA detected (U) in {n_rna} sequence(s): converting to DNA (U -> T).", flush=True)
+    if high_n:
+        print(f"  [warn] {len(high_n)} sequence(s) with > {MAX_N_FRACTION:.0%} N (kept): {_preview(high_n)}", flush=True)
+    if skipped:
+        print(f"  [warn] {len(skipped)} sequence(s) skipped: "
+              f"{_preview([f'{i} ({r})' for i, r in skipped], 5)}", flush=True)
+        if skipped_path is not None:
+            pd.DataFrame(skipped, columns=["sequence_name", "reason"]).to_csv(skipped_path, index=False)
+            print(f"  Skipped sequences saved: {skipped_path}", flush=True)
+
+    if not kept:
+        sys.exit("ERROR: no valid query sequences remain after input checks.")
+    return kept
 
 def parse_compactmapout(
     compactmapout_path: Path,
@@ -183,12 +272,6 @@ def parse_compactmapout(
                 mapping[seq_name].append((int(ata_pos), int(start_pos), int(end_pos)))  # Store as a tuple of (ATA position, start, end)
 
     return mapping
-
-
-from Bio import AlignIO, SeqIO
-from Bio.Seq import Seq
-from pathlib import Path
-from typing import List
 
 
 def dealign_to_records(input_path: Path) -> List:
@@ -343,18 +426,15 @@ def process_single_sample_worker(
 
     if 'l' in wto:
         out_path = str(sample_vis_dir / f"{sample_name}_light_preds.svg")
-        visualize_sample_probs_light(
+        visualize_combined_light(
             regions_aligned=crf_result["regions_aligned"],
             hxb2_to_ata=HXB2_TO_ATA,
-            n_total=ATA_LEN,
-            path=out_path,
-        )
-        out_path_line = str(sample_vis_dir / f"{sample_name}_line.svg")
-        visualize_sample_probs_lines(
             preds_slice=preds_slice,
             pure_st_to_id_dict=ST_TO_ID_DICT,
             n_total=ATA_LEN,
-            path=out_path_line,
+            path=out_path,
+            min_peak=PROB_ZERO_THRESHOLD,
+            floor=0.01
         )
 
     elif 'f' in wto:
@@ -490,6 +570,7 @@ if __name__ == "__main__":
     query_records = dealign_to_records(seq_path)
     if len(query_records) == 0:
         sys.exit("ERROR: no query sequences found after dealigning input.")
+    check_inputs(query_records, reference_ids, out_dir / f"id_mapping_{tag}.csv")
     print(f"  Query sequences: {len(query_records)}", flush=True)
 
     with tempfile.TemporaryDirectory(prefix=f"sbtr_{tag}_", ignore_cleanup_errors=True) as tmp_dir_str:
@@ -685,9 +766,26 @@ if __name__ == "__main__":
             results_buffer.append(res_line)
             regions_buffer.extend(reg_lines)
 
+    def sort_key(x):
+        try:
+            # Try to extract and convert the prefix to an integer
+            val = int(x.split(',')[0].split('_')[0])
+            return (0, val)  # Group 0: Numbered items come first, sorted by number
+        except ValueError:
+            return (1, x)    # Group 1: Unnumbered items go to the end, sorted alphabetically
+    def region_sort_key(item):
+        idx, x = item
+        try:
+            parts = x.split(',')
+            region_name = parts[0].strip().lower()
+            region_val = int(parts[1].strip())
+            return (0, region_name, region_val, idx)  # Group 0: Sorted valid entries (with idx as tie-breaker)
+        except (IndexError, ValueError):
+            return (1, idx, 0)                        # Group 1: Malformed entries kept in their exact original order
 
-    results_buffer = sorted(results_buffer, key=lambda x: x.split(',')[0].lower())
-    regions_buffer = sorted(regions_buffer, key=lambda x: (x.split(',')[0].lower(), int(x.split(',')[1])))
+    # Enumerate to keep track of original positions, sort, then extract the values back out
+    regions_buffer = [x for idx, x in sorted(enumerate(regions_buffer), key=region_sort_key)]
+    results_buffer = sorted(results_buffer, key=sort_key)
 
     # Write results out in bulk
     result_csv_path = out_dir / f"results_{tag}.csv"

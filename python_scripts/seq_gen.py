@@ -1,13 +1,5 @@
 """
-HIV recombinant sequence generator.
-
-For each recombinant:
-  1. Sample n_subtypes, n_breakpoints from distributions inferred from real CRFs
-  2. Pick subtypes (divergence-group-aware weighting)
-  3. Pick one parent sequence per subtype
-  4. Compute windowed divergence profile for each adjacent-subtype transition
-  5. Place breakpoints at positions weighted by divergence (≥ threshold)
-  6. Build chimeric sequence, mutate, optionally crop to a fragment, write
+HIV recombinant sequence generator
 """
 
 import random
@@ -33,27 +25,31 @@ from src.mutator_class import (
     mutate_sequence_gtr,
     _ACGT_BYTES,
 )
-from figs import plot_fragment_length_distribution, plot_reference_distribution_with_year, visualize_generated_breakpoints, visualize_breakpoint_rank_profile, compare_generated_vs_real
+from figs import (
+    plot_fragment_length_distribution,
+    plot_reference_distribution_with_year,
+    visualize_generated_breakpoints,
+    visualize_breakpoint_rank_profile,
+    compare_generated_vs_real,
+)
 
 WORKSPACE_PATH = config.WORKSPACE_PATH
-# Command line arguments
+
 parser = ArgumentParser()
 parser.add_argument("--n_workers",        type=int,   default=None)
 parser.add_argument("--ref_alignment",    type=str,
                     default=f"{WORKSPACE_PATH}/data/input/HIV1_PURE_REF.fasta",
-                    help="Reference alignment (FASTA) from which sequences are drawn.")
+                    help="Reference alignment FASTA from which sequences are drawn")
 parser.add_argument("--realistic",        action="store_true",
                     help="Whether to generate more realistic recombinants or not")
 parser.add_argument("--force_divergent",  action="store_true",
-                    help="If true, force breakpoints to occur in divergent regions. "
-                         "If false, random placement.")
+                    help="Force breakpoints to occur in divergent regions")
 args = parser.parse_args()
 
 REF_ALIGNMENT = args.ref_alignment
 REALISTIC     = args.realistic
 FORCE_DIV     = args.force_divergent
 N_WORKERS     = args.n_workers or mp.cpu_count()
-
 
 N_SEQ         = config.N_SEQ
 RP            = config.RP
@@ -82,31 +78,24 @@ out_meta   = f"{out_dir}/metadata_{N_SEQ}_{RP}_{PARTIAL_FRAC}.tsv"
 os.makedirs(out_dir, exist_ok=True)
 
 SUBTYPE_GROUPS = {
-    "A1": 0, "A2": 0, "A3": 0, "A4": 0, "A5U": 0, "A6": 0, "A7": 0, "A8": 0,
+    "A1": 0, "A2": 0, "A3": 0, "A4": 0, "A5": 0, "A6": 0, "A7": 0, "A8": 0,
     "F1": 1, "F2": 1,
-    "B": 4, "D": 4,
-    "AE": 2, "C": 2, "G": 2, "H": 2, "J": 2, "K": 2, "L": 2,
+    "E": 2, "C": 2, "G": 2, "H": 2, "J": 2, "K": 2, "L": 2,
     "N": 3, "O": 3, "P": 3,
+    "B": 4, "D": 4,
 }
 
-# Only recombine within M-group
+# only recombine within M group
 DIVERGENCE_WEIGHTS = [
-    [0.5, 1.0000, 1.0000, 0.0001, 1.0000],
+    [0.00001, 1.00, 1.00, 0.000001, 1.00],
     [1.0000, 0.5, 1.0000, 0.0001, 1.0000],
-    [1.00, 1.0000, 1.0000, 0.0001, 1.0000],
-    [0.0001, 0.0001, 0.0001, 1.00, 0.0001],
-    [1.0000, 1.0000, 1.0000, 0.0001, 0.5],
+    [1.00, 1.000, 1.000, 0.000001, 1.000],
+    [0.0001, 0.0001, 0.0001, 1.0, 0.0001],
+    [1.0000, 1.000, 1.00, 0.0001, 0.0001],
 ]
 
-# end of pol (HXB2): CRF01_AE is A1 up to here
-AE_A1_END_HXB2 = (GENES_RAW["p31_int"][1] + GENES_RAW["vif"][0]) // 2
-# half-width (ATA positions) of the loss-masked zone at the A1->AE switch; 0 disables. we add this because of the overlap between pol and vif (vif starts at 5041, pol ends at 5096)
-AE_SPLIT_MASK  = 30
-
-# Initialize uuid with SEED
 random.seed(SEED)
 
-# Sequence class used to store both the sequence and some metadata
 class Sequence:
     def __init__(self,
                  seq: str,
@@ -115,15 +104,101 @@ class Sequence:
                  year: int | None = None):
         self.arr = np.frombuffer(seq.upper().encode(), dtype=np.uint8)
         self.subtype = subtype
-        self.country_code = country_code  # None if unknown
-        self.year = year  # None if unknown
+        self.country_code = country_code
+        self.year = year
 
     def __len__(self):
         return len(self.arr)
 
+def is_uncertain(label: str) -> bool:
+    _MIX = re.compile(r"[/+,]")
+    return label == "U" or bool(_MIX.search(label))
+
+def load_mosaic_definitions(csv_path: str):
+    # loads segments from csv, coordinates converted from 1 based inclusive to 0 based half open
+    df = pd.read_csv(csv_path)
+    mosaic_dict = defaultdict(list)
+    for _, row in df.iterrows():
+        crf_name = str(row["crf"]).strip()
+        st_label = str(row["subtype"]).strip()
+        start_0 = int(row["start"]) - 1
+        end_0 = int(row["end"])
+
+        # normalize segment label inside the sequence
+        # 01_AE has E segments and A1 segments
+        # A5U has A5 segments and U segments
+        if st_label in ["AE", "01_AE"]:
+            st_label = "E"
+        elif st_label == "A5U":
+            st_label = "A5"
+
+        seg_entry = {
+            "start": start_0,
+            "end": end_0,
+            "label": st_label
+        }
+
+        # map whatever crf name is in the csv to our parent names E and A5
+        aliases = [crf_name]
+        if crf_name in ["01_AE", "CRF01_AE", "AE", "E"]:
+            aliases.extend(["E", "AE", "01_AE", "CRF01_AE"])
+        if crf_name in ["A5U", "05_A5U", "A5"]:
+            aliases.extend(["A5", "A5U", "05_A5U"])
+
+        for a in set(aliases):
+            mosaic_dict[a].append(seg_entry)
+
+    for k in mosaic_dict:
+        mosaic_dict[k].sort(key=lambda x: x["start"])
+
+    return dict(mosaic_dict)
+
+
+def label_parent_track(lbl_row, mask_row, s, e, st, st_id, mosaic_dict, rng=None, mask_bp_buf=30):
+    # labels pure parents or mosaic parents like E and A5
+    if st in mosaic_dict:
+        for seg in mosaic_dict[st]:
+            seg_s = max(s, seg["start"])
+            seg_e = min(e, seg["end"])
+            if seg_s >= seg_e:
+                continue
+
+            sub_st = seg["label"]
+
+            # if segment is U or mixed like A1/G zero it out and mask it
+            if is_uncertain(sub_st) or sub_st not in st_id:
+                mask_row[seg_s:seg_e] = False
+                lbl_row[seg_s:seg_e] = False
+            else:
+                lbl_row[seg_s:seg_e, st_id[sub_st]] = True
+
+            # jitter loss mask across internal segment boundaries
+            if seg["start"] > s:
+                jit = int(rng.integers(mask_bp_buf // 3, mask_bp_buf * 2)) if rng else mask_bp_buf
+                b_start = max(s, seg["start"] - jit)
+                b_end = min(e, seg["start"] + jit)
+                mask_row[b_start:b_end] = False
+
+            if seg["end"] < e:
+                jit = int(rng.integers(mask_bp_buf // 3, mask_bp_buf * 2)) if rng else mask_bp_buf
+                b_start = max(s, seg["end"] - jit)
+                b_end = min(e, seg["end"] + jit)
+                mask_row[b_start:b_end] = False
+    else:
+        # regular pure subtype sequence
+        if s < e and st in st_id:
+            lbl_row[s:e, st_id[st]] = True
+
+def labels_to_parts(lbl_row, id_to_st):
+    pos = np.flatnonzero(lbl_row.any(axis=1))
+    if len(pos) == 0:
+        return ["unknown"], 0
+    ids = lbl_row[pos].argmax(axis=1)
+    cut = np.flatnonzero(np.diff(ids)) + 1
+    sts = list(dict.fromkeys(id_to_st[int(i)] for i in ids[np.r_[0, cut]]))
+    return sts, len(cut)
+
 def extract_generated_breakpoints(names, out_labels, n_subtypes, ata_len, ata_to_hxb2):
-    """One row per breakpoint of each generated recombinant.
-    pos = HXB2 coordinate, pos_ata = ATA coordinate, rank = 1..n_bp (left to right)."""
     lbl_mm = np.load(out_labels, mmap_mode="r")
     rows = []
     for idx, n in enumerate(tqdm(names, desc="Extracting breakpoints", mininterval=10)):
@@ -141,15 +216,7 @@ def extract_generated_breakpoints(names, out_labels, n_subtypes, ata_len, ata_to
             rows.append((idx, k + 1, len(bp_ata), int(b), int(ata_to_hxb2[b])))
     return pd.DataFrame(rows, columns=["seq", "rank", "n_bp", "pos_ata", "pos"])
 
-
-def is_uncertain(label: str) -> bool:
-    _MIX = re.compile(r"[/+,]")
-    return label == "U" or bool(_MIX.search(label))
-
 def segments_to_breakpoints(df_seg):
-    """One breakpoint per transition between two *different* certain subtypes.
-    A U segment between them is not a breakpoint but the uncertainty interval of one:
-    the breakpoint lies in [end of left segment, start of right segment]."""
     rows = []
     for crf, g in df_seg.sort_values(["crf", "start"]).groupby("crf"):
         seg = g[~g["subtype"].map(is_uncertain)].reset_index(drop=True)
@@ -160,44 +227,17 @@ def segments_to_breakpoints(df_seg):
             rows.append((crf, a.subtype, b.subtype, lo, hi, (lo + hi) / 2))
     return pd.DataFrame(rows, columns=["crf", "left", "right", "lo", "hi", "pos"])
 
-
-def label_segment(lbl_row, mask_row, s, e, st, st_id, ae_split):
-    """Label [s, e) with subtype `st`. AE positions before ae_split are labeled A1
-    (gag/pol of CRF01_AE); the A1->AE switch inside a parent is loss-masked."""
-    if st == "AE" and s < ae_split:
-        m = min(e, ae_split)
-        lbl_row[s:m, st_id["A1"]] = True
-        if e > ae_split:
-            mask_row[max(ae_split - AE_SPLIT_MASK, 0): ae_split + AE_SPLIT_MASK] = False
-        s = m
-    if s < e:
-        lbl_row[s:e, st_id[st]] = True
-
-def labels_to_parts(lbl_row, id_to_st):
-    """Subtypes in left-to-right label order, and number of label switches."""
-    pos = np.flatnonzero(lbl_row.any(axis=1))
-    ids = lbl_row[pos].argmax(axis=1)
-    cut = np.flatnonzero(np.diff(ids)) + 1
-    sts = list(dict.fromkeys(id_to_st[int(i)] for i in ids[np.r_[0, cut]]))
-    return sts, len(cut)
-
-# Parameter inference
 def infer_params(
     df_seg: pd.DataFrame, ata_len: int,
     hxb2_len: int = config.HXB2_USED_LEN) -> dict:
-    """
-    Infer generative parameters from real CRF segment annotations.
-    Returns dict with keys: n_breakpoints, n_subtypes, min_seg_len (in ATA coords).
-    """
     params = {}
     is_unc  = df_seg["subtype"].map(is_uncertain)
     df_pure = df_seg[~is_unc]
     print("Removed uncertain segments:", is_unc.sum(), "of", len(df_seg), "total segments")
 
-    # Breakpoints / CRF: empirical, parity-aware
     n_pure_per_crf = df_pure.groupby("crf").size()
     n_bp = (n_pure_per_crf - 1).clip(lower=0)
-    n_bp_counts = n_bp.value_counts().sort_index()  # observed k -> count
+    n_bp_counts = n_bp.value_counts().sort_index()
     max_k = int(n_bp_counts.index.max())
     full_range = np.arange(1, max_k + 1)
     counts = n_bp_counts.reindex(full_range, fill_value=0).values.astype(float)
@@ -211,250 +251,24 @@ def infer_params(
             smoothed[idx] = np.convolve(vals, kernel, mode="same")
         return smoothed
 
-    smoothed = smooth_within_parity(counts, window=3) + 0.5  # +0.5 pseudo-count for zero bins
+    smoothed = smooth_within_parity(counts, window=3) + 0.5
     probs = smoothed / smoothed.sum()
 
     params["n_breakpoints"] = {"values": full_range.tolist(), "probs": probs.tolist()}
 
-    # Distinct subtypes / CRF: empirical PMF
     pmf = df_pure.groupby("crf")["subtype"].nunique().value_counts(normalize=True).sort_index()
     params["n_subtypes"] = {"values": pmf.index.tolist(), "probs": pmf.values.tolist()}
 
-    # Minimum segment length (scaled HXB2 to ATA)
     pure_len = df_pure["length"].dropna().astype(float)
     min_hxb2 = int(pure_len[pure_len > 0].min())
     params["min_seg_len"] = max(1, int(min_hxb2 * ata_len / hxb2_len))
 
     print(f"  n_bp/CRF  {params['n_breakpoints']}")
     print(f"  subtypes  {dict(zip(pmf.index, (pmf.values*100).round(1)))}")
-    print(f"  min_seg   {min_hxb2} HXB2 → {params['min_seg_len']} ATA")
+    print(f"  min_seg   {min_hxb2} HXB2 to {params['min_seg_len']} ATA")
     return params
 
-# def compare_generated_vs_real(
-#         names, out_labels, n_subtypes, ata_len, df_seg, ata_to_hxb2,
-#         ):
-#     """
-#     Read back generated labels, extract per-recombinant statistics,
-#     and compare against real CRF segment data.
-    
-#     Segment lengths are converted to HXB2 coordinates via ata_to_hxb2
-#     for a fair comparison against the real data (which is annotated in HXB2).
-#     """
-#     lbl_mm = np.load(out_labels, mmap_mode="r")
-
-#     gen_n_bp      = []
-#     gen_n_st      = []
-#     gen_seg_lens_ata  = []
-#     gen_seg_lens_hxb2 = []
-
-#     rec_indices = [i for i, n in enumerate(names) if n.startswith("r")]
-
-#     for idx in tqdm(rec_indices, desc="Analyzing generated recombinants", mininterval=10):
-#         lbl = np.unpackbits(lbl_mm[idx], axis=-1)[:, :n_subtypes]
-
-#         # Active subtype at each position (-1 where all labels are False, i.e. N)
-#         any_active = lbl.any(axis=1)
-#         active = np.full(ata_len, -1, dtype=np.int32)
-#         active[any_active] = lbl[any_active].argmax(axis=1)
-
-#         labeled_pos = np.where(active >= 0)[0]
-#         if len(labeled_pos) < 2:
-#             continue
-
-#         labeled_st = active[labeled_pos]
-
-#         # Detect transitions between adjacent labeled positions
-#         change_idx = np.where(np.diff(labeled_st) != 0)[0]
-
-#         gen_n_bp.append(len(change_idx))
-#         gen_n_st.append(len(np.unique(labeled_st)))
-
-#         # Segment boundaries in ATA, then convert to HXB2 lengths
-#         bp_ata       = labeled_pos[change_idx + 1]
-#         seg_starts   = np.concatenate([[labeled_pos[0]],      bp_ata])
-#         seg_ends     = np.concatenate([bp_ata, [labeled_pos[-1] + 1]])
-
-#         for s, e in zip(seg_starts, seg_ends):
-#             gen_seg_lens_ata.append(int(e) - int(s))
-#             e_clamped = min(int(e) - 1, ata_len - 1)
-#             hxb2_len  = int(ata_to_hxb2[e_clamped]) - int(ata_to_hxb2[int(s)])
-#             if hxb2_len > 0:
-#                 gen_seg_lens_hxb2.append(hxb2_len)
-#     # Real CRF statistics
-#     is_compound   = df_seg["subtype"].str.contains("/", regex=False)
-#     df_pure       = df_seg[~is_compound]
-
-#     real_n_bp     = (df_pure.groupby("crf").size() - 1).clip(lower=0)
-#     real_n_st     = df_pure.groupby("crf")["subtype"].nunique()
-#     real_seg_lens = df_pure["length"].dropna().astype(float)
-#     real_seg_lens = real_seg_lens[real_seg_lens > 0]
-
-#     # Printing helpers
-#     W_L, W_C = 30, 12
-
-#     def _header(title):
-#         print(f"\n {title}")
-#         print(f"  {'':>{W_L}}  {'real':>{W_C}}  {'generated':>{W_C}}")
-#         print(f"  {'-' * (W_L + 2 * W_C + 4)}")
-
-#     def _row(label, rv, gv, fmt=".1f"):
-#         def _f(v):
-#             if v is None or (isinstance(v, float) and np.isnan(v)):
-#                 return "n/a".rjust(W_C)
-#             return format(v, fmt).rjust(W_C)
-#         print(f"  {label:>{W_L}}  {_f(rv)}  {_f(gv)}")
-
-#     def _discrete(title, real_s, gen_list):
-#         _header(title)
-#         r = pd.Series(real_s)
-#         g = pd.Series(gen_list, dtype=int)
-#         _row("n",    len(r),    len(g),    fmt="d")
-#         _row("mean", r.mean(),  g.mean())
-#         _row("std",  r.std(),   g.std())
-#         _row("min",  r.min(),   g.min(),   fmt=".0f")
-#         _row("max",  r.max(),   g.max(),   fmt=".0f")
-#         # Full PMF comparison
-#         all_vals = sorted(set(r.tolist()) | set(g.tolist()))
-#         rpmf = r.value_counts(normalize=True)
-#         gpmf = g.value_counts(normalize=True)
-#         print(f"\n  {'value':>{W_L}}  {'real %':>{W_C}}  {'gen %':>{W_C}}")
-#         for v in all_vals:
-#             _row(str(v), rpmf.get(v, 0.0) * 100, gpmf.get(v, 0.0) * 100)
-
-#     def _continuous(title, real_s, gen_list):
-#         _header(title)
-#         r = pd.Series(real_s, dtype=float)
-#         g = pd.Series(gen_list, dtype=float)
-#         g = g[g > 0]
-#         _row("n",      len(r),      len(g),      fmt="d")
-#         _row("min",    r.min(),     g.min()    if len(g) else float("nan"))
-#         _row("median", r.median(),  g.median() if len(g) else float("nan"))
-#         _row("mean",   r.mean(),    g.mean()   if len(g) else float("nan"))
-#         _row("std",    r.std(),     g.std()    if len(g) else float("nan"))
-#         _row("max",    r.max(),     g.max()    if len(g) else float("nan"))
-#         if len(r) > 1 and len(g) > 1:
-#             _row("log-normal μ", np.log(r).mean(), np.log(g).mean(), fmt=".3f")
-#             _row("log-normal σ", np.log(r).std(),  np.log(g).std(),  fmt=".3f")
-
-#     def _plot_distribution_comparison(n_bp, n_st, seg_lens, path, title):
-
-#         color_scheme = ['#072C4B', '#F28089', '#71cddd']
-
-#         #n_breakpoints / sequence
-#         n_bp = pd.Series(n_bp)
-#         n_st = pd.Series(n_st)
-#         seg_lens = pd.Series(seg_lens)
-#         bp_values = n_bp.value_counts().sort_index().index.tolist()
-#         bp_real_pct = n_bp.value_counts(normalize=True).sort_index().values.tolist()
-
-#         #n_subtypes / sequence
-#         st_values = n_st.value_counts().sort_index().index.tolist()
-#         st_real_pct = n_st.value_counts(normalize=True).sort_index().values.tolist()
-
-#         #segment lengths
-#         sl_mu = seg_lens.apply(lambda x: np.log(x)).mean()
-#         sl_sigma = seg_lens.apply(lambda x: np.log(x)).std()
-#         bin_width = 200
-
-#         # 1A. Data for the bars (binned percentages)
-#         bin_edges = np.arange(0, 9500 + bin_width, bin_width)
-#         bin_centers = bin_edges[:-1] + (bin_width / 2)
-#         sl_real_pct = []
-#         sl_hover_text = []
-
-#         def lognorm_cdf(x, mu, sigma):
-#             if x <= 0: return 0.0
-#             return 0.5 * (1 + math.erf((np.log(x) - mu) / (sigma * np.sqrt(2))))
-
-#         for i in range(len(bin_edges)-1):
-#             left_edge = bin_edges[i]
-#             right_edge = bin_edges[i+1]
-#             prob = lognorm_cdf(right_edge, sl_mu, sl_sigma) - lognorm_cdf(left_edge, sl_mu, sl_sigma)
-#             sl_real_pct.append(prob * 100)
-#             sl_hover_text.append(f"{int(left_edge)} - {int(right_edge)} bp<br>{prob*100:.1f}%")
-
-#         # 1B. Data for the continuous line (scaled PDF)
-#         sl_x_line = np.linspace(10, 9500, 500)
-#         sl_pdf = (1 / (sl_x_line * sl_sigma * np.sqrt(2 * np.pi))) * \
-#                 np.exp(- (np.log(sl_x_line) - sl_mu)**2 / (2 * sl_sigma**2))
-#         sl_y_line = sl_pdf * bin_width * 100
-
-#         fig = make_subplots(
-#             rows=1, cols=3, 
-#             subplot_titles=(
-#                 "Breakpoints per sequence", 
-#                 "Subtypes per sequence", 
-#                 "Segment lengths distribution"
-#             ),
-#             horizontal_spacing=0.08
-#         )
-
-#         fig.add_trace(
-#             go.Bar(x=bp_values, y=bp_real_pct, marker_color=color_scheme[0], hoverinfo='x+y', opacity=0.8),
-#             row=1, col=1
-#         )
-#         fig.add_trace(
-#             go.Bar(x=st_values, y=st_real_pct, marker_color=color_scheme[1], hoverinfo='x+y', opacity=0.8),
-#             row=1, col=2
-#         )
-#         fig.add_trace(
-#             go.Bar(x=bin_centers, y=sl_real_pct, width=bin_width*0.9, 
-#                 marker_color=color_scheme[0],
-#                 hoverinfo="text", hovertext=sl_hover_text,
-#                 opacity=0.8,
-#                 name="Binned data"),
-#             row=1, col=3
-#         )
-#         fig.add_trace(
-#             go.Scatter(x=sl_x_line, y=sl_y_line, mode='lines',
-#                     line=dict(color=color_scheme[1], width=3),
-#                     hoverinfo="none",
-#                     name="Continuous fit"),
-#             row=1, col=3
-#         )
-
-#         fig.update_xaxes(title_text="Number of breakpoints", tickmode='linear', tick0=1, dtick=2, row=1, col=1)
-#         fig.update_yaxes(title_text="Percentage (%)", row=1, col=1)
-#         fig.update_xaxes(title_text="Number of subtypes", tickmode='linear', tick0=2, dtick=1, row=1, col=2)
-#         fig.update_yaxes(title_text="Percentage (%)", row=1, col=2)
-#         fig.update_xaxes(title_text="Segment length (HXB2 bp)", row=1, col=3)
-#         fig.update_yaxes(title_text="Percentage (%)", row=1, col=3)
-
-#         fig.update_layout(
-#             title=title,
-#             title_x=0.5,
-#             template="plotly_white",
-#             showlegend=False, 
-#             height=500,
-#             width=1200,
-#             bargap=0.15
-#         )
-#         fig.write_html(path)
-#         path = Path(path)
-#         fig.write_image(path.with_suffix(".svg"))
-#     # Print
-#     print(f"\n  === Distribution comparison: {len(real_n_bp)} real CRFs  vs  "
-#           f"{len(rec_indices)} generated recombinants ===")
-#     _discrete("n_breakpoints / sequence",  real_n_bp,     gen_n_bp)
-#     _discrete("n_subtypes / sequence",     real_n_st,     gen_n_st)
-#     _continuous("segment lengths (HXB2 bp)", real_seg_lens, gen_seg_lens_hxb2)
-#     _continuous("segment lengths (ATA pos)", pd.Series(dtype=float), gen_seg_lens_ata)
-
-#     crf_dist_path = f"{WORKSPACE_PATH}/figs/crf_dist.html"
-#     synthetic_dist_path = f"{WORKSPACE_PATH}/figs/synthetic_dist.html"
-#     _plot_distribution_comparison(gen_n_bp, gen_n_st, pd.Series(gen_seg_lens_hxb2), synthetic_dist_path,
-#                                   title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">{len(gen_n_bp)} generated recombinants</sup>')
-#     _plot_distribution_comparison(real_n_bp, real_n_st, real_seg_lens, crf_dist_path,
-#                                   title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">Data taken from LANL Sequence Database - {len(real_n_bp)} CRFs</sup>')
-
-# Subtype sampling
 def weighted_subtype_probs(counts: dict, floor: float = 0.015) -> dict:
-    """
-    sqrt(n)-weighted sampling probabilities per subtype, water-filled so that
-    no subtype falls below `floor`. Subtypes too rare to reach `floor` under
-    pure sqrt(n) weighting are pinned at `floor`; the remaining probability
-    mass is redistributed by sqrt(n) among the rest.
-    """
     w = {k: math.sqrt(v) for k, v in counts.items()}
     fixed, free = {}, dict(w)
     while True:
@@ -469,14 +283,7 @@ def weighted_subtype_probs(counts: dict, floor: float = 0.015) -> dict:
             fixed[k] = floor
             del free[k]
 
-
 def sample_subtypes(n, pool, py_rng, st_probs=None):
-    """Pick n distinct subtypes with divergence-aware weighting.
-
-    st_probs: optional dict {subtype: prob} used to weight the first pick
-    (favoring subtypes with more reference diversity); later picks stay
-    divergence-aware.
-    """
     chosen, remain = [], list(pool)
     for _ in range(n):
         if not chosen:
@@ -503,12 +310,7 @@ def sample_subtypes(n, pool, py_rng, st_probs=None):
         remain.remove(st)
     return chosen
 
-# Divergence-aware breakpoint placement
 def divergence_profile(seq1, seq2, DIV_WINDOW_SIZE):
-    """
-    Windowed Hamming distance (DIV_WINDOW_SIZE centered on position).
-    Returns float32 array, same length as input.
-    """
     v1 = np.isin(seq1, _ACGT_BYTES)
     v2 = np.isin(seq2, _ACGT_BYTES)
     diff = ((seq1 != seq2) & v1 & v2).astype(np.float32)
@@ -516,12 +318,7 @@ def divergence_profile(seq1, seq2, DIV_WINDOW_SIZE):
     kernel = np.ones(2 * window_half + 1, dtype=np.float32)
     return np.convolve(diff, kernel, mode="same")
 
-
 def assign_subtypes_to_segments(n_seg, subtype_pool, py_rng):
-    """
-    Assign subtypes so that every subtype appears at least once and no two adjacent
-    segments share the same subtype.
-    """
     pool = list(subtype_pool)
     py_rng.shuffle(pool)
     result = list(pool)
@@ -543,12 +340,7 @@ def build_bp_prior(df_bp, hxb2_to_ata, ata_len, lam=0.5, bw=100):
 
 def place_breakpoints(seg_subtypes, parents, ata_len,
                       DIV_WINDOW_SIZE, min_div, min_seg_len, rng,
-                      force_div=False, prior=None, alpha=0.0,
-                      ):
-    """
-    Place one breakpoint between each pair of adjacent segments.
-    Returns: list[int] of ATA breakpoint positions, or None on failure.
-    """
+                      force_div=False, prior=None, alpha=0.0):
     n_bp = len(seg_subtypes) - 1
     parents_seq = {st: seq.arr for st, seq in parents.items()}
     min_seg_len = max(min_seg_len, MIN_SEG_LEN)
@@ -569,23 +361,20 @@ def place_breakpoints(seg_subtypes, parents, ata_len,
             wi[L - min_seg_len * (n_bp - i) + 1 :] = 0.0
             w.append(wi)
 
-        # forward filtering
         F, prev_cum = [], None
         for i in range(n_bp):
             f = w[i].copy()
             if i > 0:
                 shifted = np.zeros(L)
-                shifted[min_seg_len:] = prev_cum[: L - min_seg_len]  # sum over y <= x - min_seg_len
+                shifted[min_seg_len:] = prev_cum[: L - min_seg_len]
                 f *= shifted
             s = f.sum()
             if s == 0:
                 return None
             f /= s
-            # rescale to avoid underflow
             F.append(f)
             prev_cum = np.cumsum(f)
 
-        # backward sampling
         bps = [0] * n_bp
         bps[-1] = int(rng.choice(L, p=F[-1]))
         for i in range(n_bp - 2, -1, -1):
@@ -612,27 +401,13 @@ def place_breakpoints(seg_subtypes, parents, ata_len,
 
         return breakpoints
 
-# Fragment cropping
 def sample_fragment_window(ata_len: int, min_frag_len: int, rng) -> tuple[int, int]:
-    """
-    Sample a (start, end) fragment window.
-
-    Start is sampled uniformly in [0, ata_len - min_frag_len] (the alignment no
-    longer contains LTRs, so every column is a valid start).
-    Length is then sampled log-uniformly in [min_frag_len, ata_len - start].
-
-    Returns
-    -------
-    (start, end) : half-open interval [start, end) in ATA coordinates.
-    """
     start = int(rng.integers(0, ata_len - min_frag_len + 1))
     max_len = ata_len - start
     log_len = rng.uniform(np.log(min_frag_len), np.log(max_len))
     length = int(np.clip(np.round(np.exp(log_len)), min_frag_len, max_len))
     return start, start + length
 
-
-# Worker
 def _worker(cfg):
     row_start  = cfg["row_start"]
     row_end    = cfg["row_end"]
@@ -641,10 +416,8 @@ def _worker(cfg):
     nb         = params["n_breakpoints"]
     ns         = params["n_subtypes"]
     min_seg    = params["min_seg_len"]
-    bp_prior = params.get("bp_prior")
+    bp_prior   = params.get("bp_prior")
     st_id      = cfg["pure_st_to_id_dict"]
-    hxb2_to_ata= cfg["hxb2_to_ata"]
-    ae_split   = cfg["ae_split"]
     id_to_st   = {v: k for k, v in st_id.items()}
     n_st_total = len(st_id)
     ata_len    = cfg["ata_len"]
@@ -659,6 +432,7 @@ def _worker(cfg):
     st_to_seq_dict = cfg["st_to_seq_dict"]
     partial_frac   = cfg["partial_frac"]
     min_frag_len   = cfg["min_frag_len"]
+    mosaic_dict    = cfg["mosaic_dict"]
 
     seq_mm  = np.load(cfg["out_seqs"],   mmap_mode="r+")
     lbl_mm  = np.load(cfg["out_labels"], mmap_mode="r+")
@@ -688,8 +462,8 @@ def _worker(cfg):
                 seq_obj.arr.copy(), 0, rate_arr, rng, n_muts, sub_probs)
             lbl_row = np.zeros((ata_len, n_st_total), dtype=bool)
             mask_row = np.ones(ata_len, dtype=bool)
-            label_segment(lbl_row, mask_row, 0, ata_len, st, st_id, ae_split)
-            # name is of the form: p_<subtype>_<target_year>_<unique_id> to indicate a pure sequence
+
+            label_parent_track(lbl_row, mask_row, 0, ata_len, st, st_id, mosaic_dict, rng)
             name = f"p_{st}_{target_year}_{uuid.uuid4().hex[:8]}"
             ok = True
         else:
@@ -714,7 +488,7 @@ def _worker(cfg):
                     max_parent_year = max(p.year for p in parents.values())
                     target_year = py_rng.randint(max_parent_year, MAX_YEAR)
                     bps = place_breakpoints(seg_st, parents, ata_len, div_window_size,
-                    mdiv, min_seg, rng, force_div, bp_prior)
+                                            mdiv, min_seg, rng, force_div, bp_prior)
                     if bps is not None:
                         break
                 if bps is None:
@@ -725,10 +499,11 @@ def _worker(cfg):
                 lbl_row = np.zeros((ata_len, n_st_total), dtype=bool)
                 mask_row = np.ones(ata_len, dtype=bool)
 
-                # 1) Build chunks and labels
+                # paste segments together and label
                 for si in range(n_seg):
                     s, e = bounds[si], bounds[si + 1]
-                    if e <= s: continue
+                    if e <= s: 
+                        continue
                     chunk = parents[seg_st[si]].arr[s:e].copy()
                     rate_arr = site_rates_dict.get(seg_st[si][0], site_rates_dict['avg'])
                     sub_probs = sub_probs_dict.get(seg_st[si][0], sub_probs_dict['avg'])
@@ -739,20 +514,25 @@ def _worker(cfg):
                     )
                     seq_row[s:e], muts = mutate_sequence_gtr(chunk, s, rate_arr, rng, n_muts, sub_probs)
                     total_muts += muts
-                    label_segment(lbl_row, mask_row, s, e, seg_st[si], st_id, ae_split)
+                    label_parent_track(lbl_row, mask_row, s, e, seg_st[si], st_id, mosaic_dict, rng)
 
-                # 2) Build Ambiguity Mask (Loss Mask)
+                # mask identical stretches around artificial recombination cuts
                 for si in range(n_seg - 1):
                     p1 = parents[seg_st[si]].arr
                     p2 = parents[seg_st[si+1]].arr
                     bp = bps[si]
                     
                     l = bp - 1
-                    while l >= 0 and p1[l] == p2[l]: l -= 1
+                    while l >= 0 and p1[l] == p2[l]: 
+                        l -= 1
                     r = bp
-                    while r < ata_len and p1[r] == p2[r]: r += 1
+                    while r < ata_len and p1[r] == p2[r]: 
+                        r += 1
                     
-                    mask_row[l+1:r] = False
+                    jit = int(rng.integers(5, 15))
+                    l_bound = max(0, l + 1 - jit)
+                    r_bound = min(ata_len, r + jit)
+                    mask_row[l_bound:r_bound] = False
 
                 name = f"r_{'+'.join(dict.fromkeys(seg_st))}_{target_year}_{uuid.uuid4().hex[:8]}"
                 n_bp = len(bps)
@@ -773,20 +553,16 @@ def _worker(cfg):
                 seq_row, total_muts = mutate_sequence_gtr(seq_obj.arr.copy(), 0, rate_arr, rng, n_muts, sub_probs)
                 lbl_row = np.zeros((ata_len, n_st_total), dtype=bool)
                 mask_row = np.ones(ata_len, dtype=bool)
-                label_segment(lbl_row, mask_row, 0, ata_len, st, st_id, ae_split)
+                label_parent_track(lbl_row, mask_row, 0, ata_len, st, st_id, mosaic_dict, rng)
                 name = f"p_{st}_{target_year}_{uuid.uuid4().hex[:8]}"
 
-        # fragment cropping 
-        # Applied branch-agnostically: pure and recombinant sequences are cropped with the same probability, keeping the array shape fixed.
-        # Out-of-window bytes are set to '-', which the cleanup line below converts to 'N'; lbl_row and mask_row are zeroed so those positions contribute nothing to the loss.
+        # partial sequence cropping
         frag_start, frag_end = 0, ata_len
         if partial_frac > 0.0 and py_rng.random() < partial_frac:
-            # Sample fragment windows until one contains actual data (not only N's or gaps)
             for _attempt in range(max_ret):
                 frag_start, frag_end = sample_fragment_window(ata_len, min_frag_len, rng)
                 window_slice = seq_row[frag_start:frag_end]
                 
-                # Check if the window has at least one valid base (not N, n, or '-')
                 has_data = np.any(
                     (window_slice != ord('N')) & 
                     (window_slice != ord('-'))
@@ -794,10 +570,8 @@ def _worker(cfg):
                 if has_data:
                     break
             else:
-                # Fallback if no valid window is found within max_ret (e.g., sequence is all N's)
                 frag_start, frag_end = 0, ata_len
 
-            # Zero out everything outside the window
             seq_row[:frag_start]  = ord("-")
             seq_row[frag_end:]    = ord("-")
             lbl_row[:frag_start]  = False
@@ -805,7 +579,6 @@ def _worker(cfg):
             mask_row[:frag_start] = False
             mask_row[frag_end:]   = False
 
-        # name / n_bp from the final labels (seg_st can't be trusted: AE in gag/pol is labeled A1)
         sts, n_bp_lbl = labels_to_parts(lbl_row, id_to_st)
         uid = name.rsplit("_", 1)[1]
         if name.startswith("r"):
@@ -814,11 +587,9 @@ def _worker(cfg):
             else:
                 name, n_bp = f"p_{sts[0]}_{target_year}_{uid}", 0
         elif len(sts) == 1 and name.split("_")[1] != sts[0]:
-            # pure AE cropped entirely inside gag/pol -> now a pure A1 window
             name = f"p_{sts[0]}_{target_year}_{uid}"
 
-        # cleanup & write
-        seq_row[seq_row == ord("-")] = ord("N")  # gaps to N
+        seq_row[seq_row == ord("-")] = ord("N")
         seq_mm[row_start + li]  = seq_row
         lbl_mm[row_start + li]  = np.packbits(lbl_row, axis=-1)
         mask_mm[row_start + li] = mask_row
@@ -832,7 +603,6 @@ def _worker(cfg):
 if __name__ == "__main__":
     mp.set_start_method("fork", force=True)
 
-    # load pure-subtype alignment
     st_to_seq_dict: dict[str, list[Sequence]] = defaultdict(list)
     hxb2_ata_seq = ""
 
@@ -840,8 +610,15 @@ if __name__ == "__main__":
         if i == 0:
             hxb2_ata_seq = str(rec.seq)
         else:
-            parts = rec.id.split(".")  # Ref.A1.CD.87.PBS6126.MH705153
+            parts = rec.id.split(".")
             subtype = parts[1]
+            
+            # map headers to E and A5
+            if subtype in ["AE", "01_AE", "CRF01_AE"]:
+                subtype = "E"
+            elif subtype in ["A5U", "05_A5U"]:
+                subtype = "A5"
+
             country_code = parts[2]
             two_digit_year = int(parts[3])
             year = 2000 + two_digit_year if two_digit_year < 40 else 1900 + two_digit_year
@@ -850,8 +627,7 @@ if __name__ == "__main__":
                                                     subtype=subtype,
                                                     year=year))
 
-    # SORT st_to_seq_dict like ST_TO_ID_DICT
-    pure_st_list   = list(ST_TO_ID_DICT.keys())
+    pure_st_list = list(ST_TO_ID_DICT.keys())
     st_to_seq_dict_sorted = {st: st_to_seq_dict[st] for st in pure_st_list}
     st_to_seq_dict = st_to_seq_dict_sorted
     del st_to_seq_dict_sorted
@@ -859,7 +635,6 @@ if __name__ == "__main__":
     n_packed       = int(np.ceil(n_subtypes / 8))
     ata_len        = len(hxb2_ata_seq)
 
-    # infer parameters from real CRFs
     df_seg = pd.read_csv(f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_hxb2.csv")
     lo = config.HXB2_START
     hi = lo + config.HXB2_USED_LEN - 1
@@ -870,13 +645,13 @@ if __name__ == "__main__":
     print("Inferred parameters:")
     params = infer_params(df_seg, ata_len)
 
-    # rate arrays and GTR substitution probabilities
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata_seq)
-    ae_split = int(hxb2_to_ata[AE_A1_END_HXB2]) + 1   # first AE position (exclusive end of the A1 zone (pol end))
 
     df_bp = segments_to_breakpoints(df_seg)
     params["bp_prior"] = build_bp_prior(df_bp, hxb2_to_ata, ata_len, lam=BP_PRIOR_LAMBDA)
 
+    mosaic_dict = load_mosaic_definitions(config.CRF_SEGMENTS_BD_ATA)
+    print(f"Loaded mosaic definitions for: {list(mosaic_dict.keys())}")
 
     mutator = SequenceMutator(
         iqtree_dir=f"{WORKSPACE_PATH}/data/output/rates/",
@@ -891,25 +666,21 @@ if __name__ == "__main__":
     print(f"Min site rate   (avg): {avg_rates.min():.6f}")
     print(f"Mean site rate  (avg): {avg_rates.mean():.6f}")
 
-    # info
-    print(f"\nSubtypes       : {pure_st_list}, \n{st_to_seq_dict.keys()}")
+    print(f"\nSubtypes       : {pure_st_list}")
     print(f"ATA length     : {ata_len}")
-    print(f"Output shape   : seq ({N_SEQ},{ata_len})  "
-          f"lbl ({N_SEQ},{ata_len},{n_packed})")
+    print(f"Output shape   : seq ({N_SEQ},{ata_len})  lbl ({N_SEQ},{ata_len},{n_packed})")
     print(f"Recombinant %  : {RP:.0%}")
-    print(f"Window/thresh  : ±{DIV_WINDOW_SIZE} pos, ≥{MIN_DIV} diffs")
+    print(f"Window/thresh  : +-{DIV_WINDOW_SIZE} pos, >= {MIN_DIV} diffs")
     print(f"Workers        : {N_WORKERS}")
     print(f"Realistic      : {REALISTIC}")
     print(f"Force divergent: {FORCE_DIV}")
     print(f"Partial frac   : {PARTIAL_FRAC:.1%}  (min fragment {MIN_FRAG_LEN} ATA pos)")
 
-    # allocate memmaps
     seq_mm  = np.lib.format.open_memmap(out_seqs,   mode="w+", dtype=np.uint8, shape=(N_SEQ, ata_len))
     lbl_mm  = np.lib.format.open_memmap(out_labels, mode="w+", dtype=np.uint8, shape=(N_SEQ, ata_len, n_packed))
     mask_mm = np.lib.format.open_memmap(out_masks,  mode="w+", dtype=bool,     shape=(N_SEQ, ata_len))
     del seq_mm, lbl_mm, mask_mm
 
-    # split work
     chunks = np.array_split(np.arange(N_SEQ), min(N_WORKERS, N_SEQ))
     seeds  = [int(s.generate_state(1)[0])
               for s in np.random.SeedSequence(SEED).spawn(len(chunks))]
@@ -921,14 +692,14 @@ if __name__ == "__main__":
              pure_st_to_id_dict=ST_TO_ID_DICT, hxb2_to_ata=hxb2_to_ata, params=params,
              site_rates_dict=site_rates_dict,
              sub_probs_dict=sub_probs_dict,
-             ata_len=ata_len, ae_split=ae_split,
+             ata_len=ata_len, mosaic_dict=mosaic_dict,
              div_window_size=DIV_WINDOW_SIZE, min_div=MIN_DIV, max_retries=MAX_RETRIES,
              force_divergent=FORCE_DIV, realistic=REALISTIC,
              partial_frac=PARTIAL_FRAC, min_frag_len=MIN_FRAG_LEN)
         for wid, c in enumerate(chunks) if len(c)
     ]
 
-    print(f"\nLaunching {len(worker_args)} workers …")
+    print(f"\nLaunching {len(worker_args)} workers ...")
     with mp.Pool(len(worker_args)) as pool:
         results = list(tqdm(pool.imap(_worker, worker_args),
                             total=len(worker_args), desc="Chunks"))
@@ -945,7 +716,6 @@ if __name__ == "__main__":
     frag_starts  = [r[4] for r in records]
     frag_ends    = [r[5] for r in records]
 
-    # stats
     n_rec     = sum(n.startswith("r") for n in names)
     n_partial = sum(fe - fs < ata_len for fs, fe in zip(frag_starts, frag_ends))
     print(f"\nRecombinant proportion : {n_rec/len(names):.2%}")
@@ -962,7 +732,6 @@ if __name__ == "__main__":
     for st in pure_st_list:
         print(f"  {st:6s}: {st_counts[st]:>6d}  ({st_counts[st]/len(names):6.2%})")
 
-    # metadata
     splits = np.random.default_rng(SEED).choice(
         ["train","val","test"], size=len(names), p=[0.9,0.05,0.05])
     with open(out_meta, "w") as f:
@@ -974,20 +743,19 @@ if __name__ == "__main__":
         for i, name in enumerate(names):
             kind    = "pure" if name.startswith("p") else "recombinant"
             raw     = name.split("_")[1]
-            st_list = raw.split("+")
+            st_parts = raw.split("+")
             f.write(
-                f"{i+1}\t{name}\t{kind}\t{'/'.join(st_list)}\t{len(st_list)}\t"
+                f"{i+1}\t{name}\t{kind}\t{'/'.join(st_parts)}\t{len(st_parts)}\t"
                 f"{n_bps[i]}\t{n_muts[i]}\t{target_years[i]}\t"
                 f"{frag_starts[i]}\t{frag_ends[i]}\t{splits[i]}\n"
             )
 
     print(f"\nFiles: {out_seqs}  {out_labels}  {out_meta}  {out_masks}")
 
-    # Output a FASTA file of the test sequences and a label file containing the labels (subtype per position) for each test sequence.
     test_indices = [i for i, s in enumerate(splits) if s == "test"]
     test_seqs = np.load(out_seqs, mmap_mode="r")[test_indices]
     test_labels = np.load(out_labels, mmap_mode="r")[test_indices]
-    test_dir = Path(WORKSPACE_PATH) / "data" / "output" / "test" /f"syn_v{VERSION}"
+    test_dir = Path(WORKSPACE_PATH) / "data" / "output" / "test" / f"syn_v{VERSION}"
     os.makedirs(test_dir, exist_ok=True)
     out_test_fasta = f"{test_dir}/test_sequences_{N_SEQ}_{RP}_{PARTIAL_FRAC}.fasta"
     out_test_labels = f"{test_dir}/test_labels_{N_SEQ}_{RP}_{PARTIAL_FRAC}.csv"
@@ -1006,12 +774,20 @@ if __name__ == "__main__":
                 keep = ~np.isin(seq_frag, [ord("-"), ord("N")])
                 seq_clean = seq_frag[keep]
                 labels_id = labels_frag[keep]
-                label_names = [ID_TO_ST_DICT[np.argmax(labels_id[j])] for j in range(len(labels_id))]
+
+                label_names = []
+                for j in range(len(labels_id)):
+                    if labels_id[j].any():
+                        label_names.append(ID_TO_ST_DICT[np.argmax(labels_id[j])])
+                    else:
+                        label_names.append("U")
 
                 f.write(f">{names[test_indices[i]]}\n")
                 f.write(f"{''.join(map(chr, seq_clean))}\n")
 
-                regions = []
+                if len(label_names) == 0:
+                    continue
+
                 start, current = 0, label_names[0]
                 for j in range(1, len(label_names)):
                     if label_names[j] != current:
@@ -1019,7 +795,6 @@ if __name__ == "__main__":
                         start, current = j, label_names[j]
                 lf.write(f"{names[test_indices[i]]},{start+1},{len(label_names)},{current},{len(label_names)-start}\n")
 
-    # Print Mutation Distribution Summary
     print("\n  === Generated Mutations per Sequence ===")
     muts_s = pd.Series(n_muts)
     print(f"  Min   : {muts_s.min():.0f}")
@@ -1028,64 +803,21 @@ if __name__ == "__main__":
     print(f"  Max   : {muts_s.max():.0f}")
     print(f"  Std   : {muts_s.std():.1f}")
 
-    # fragment length distribution
     if PARTIAL_FRAC > 0.0:
         frag_dist_path = f"{WORKSPACE_PATH}/figs/fragment_length_dist.html"
         plot_fragment_length_distribution(
             frag_starts, frag_ends, ata_len, MIN_FRAG_LEN, frag_dist_path,
         )
 
-    # generated subtype distribution
     gen_dist_path = f"{WORKSPACE_PATH}/figs/generated_subtype_distribution_with_year.html"
     plot_reference_distribution_with_year(gen_subtype_data, save_path=gen_dist_path)
 
-    # distribution comparison
     compare_generated_vs_real(
         names, out_labels, n_subtypes, ata_len, df_seg, ata_to_hxb2,
     )
 
     df_gen = extract_generated_breakpoints(names, out_labels, n_subtypes, ata_len, ata_to_hxb2)
 
-    visualize_generated_breakpoints(
-        df_gen, 
-        df_real=df_bp)
+    visualize_generated_breakpoints(df_gen, df_real=df_bp)
     n_mode = int(df_gen["n_bp"].mode()[0])
     visualize_breakpoint_rank_profile(df_gen, n_mode, ata_len)
-
-    # sanity check
-    seq_mm = np.load(out_seqs,   mmap_mode="r")
-    lbl_mm = np.load(out_labels, mmap_mode="r")
-    for idx, name in enumerate(names):
-        if name.startswith("r"):
-            lbl = np.unpackbits(lbl_mm[idx], axis=-1)[:, :n_subtypes]
-            any_active = lbl.any(axis=1)
-            present = [pure_st_list[j] for j in range(n_subtypes) if lbl[:, j].any()]
-
-            fs, fe = frag_starts[idx], frag_ends[idx]
-            is_partial = fe - fs < ata_len
-            print(f"\nExample #{idx+1}: {name}"
-                  + (f"  [fragment {fs}:{fe}]" if is_partial else "  [full genome]"))
-            print(f"  Sequence (first 2000 bases): {''.join(map(chr, seq_mm[idx][:2000]))} …")
-            print(f"  Subtypes in labels: {', '.join(present)}")
-
-            for st_name in present:
-                col  = lbl[:, ST_TO_ID_DICT[st_name]]
-                runs = np.diff(np.concatenate([[0], col.astype(int), [0]]))
-                raw_starts = np.where(runs ==  1)[0]
-                raw_ends   = np.where(runs == -1)[0]
-
-                if len(raw_starts) == 0:
-                    continue
-
-                merged_starts = [raw_starts[0]]
-                merged_ends   = []
-                for i in range(len(raw_starts) - 1):
-                    gap = any_active[raw_ends[i] : raw_starts[i + 1]]
-                    if gap.any():
-                        merged_ends.append(raw_ends[i])
-                        merged_starts.append(raw_starts[i + 1])
-                merged_ends.append(raw_ends[-1])
-
-                for s, e in zip(merged_starts, merged_ends):
-                    print(f"    {st_name}: ATA [{s}, {e})  ({e-s} pos)")
-            break

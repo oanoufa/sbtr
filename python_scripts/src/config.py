@@ -9,8 +9,8 @@ PURE_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_PURE_REF.fasta"
 CRF_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_CRF_REF.fasta"
 COMBINED_REF_PATH = f"{WORKSPACE_PATH}/data/HIV1_COMBINED_REF.fasta"
 TOKEN_PATH = f"{WORKSPACE_PATH}/hftoken.txt"
-CRF_SEGMENTS_BD_ATA=f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_brokedown_aln.csv"
-
+CRF_SEGMENTS_BD_ATA=f"{WORKSPACE_PATH}/data/lanl_crf_segments_brokedown_aln.csv"
+MAPPING_PATH = f"{WORKSPACE_PATH}/data/hxb2_ata_mapping.csv"
 
 # GLOBAL PARAMETERS
 ATA_LEN = 10240 # max length of sequences in the dataset is (11954) (16980) (11561) NOW 10240 and multiple of 128 (10240)
@@ -20,10 +20,10 @@ HXB2_END = 9417
 HXB2_USED_LEN = HXB2_END - HXB2_START + 1 # [START, END]
 
 # SEQUENCE GENERATION PARAMETERS
-N_SEQ = 1500000
+N_SEQ = 15000
 RP = 0.95
 TEST_SET_SIZE = 1000
-MAX_YEAR = 2028
+MAX_YEAR = 2027
 MIN_SEG_LEN = 50 # Min length of segments of a subtype in a recombinant sequence (in ATA positions)
 MAX_SUBTYPES = 7
 MAX_BREAKPOINTS = 10
@@ -36,7 +36,7 @@ BP_PRIOR_LAMBDA = 1.0
 
 # CRF REF BANK PARAMETERS
 PCT_PER_CRF_BANK = 0.30 # Adaptive bank size depending on the number of sequences of the CRF
-MIN_PER_CRF_BANK = 2 # Min bank size for each CRF
+MIN_PER_CRF_BANK = 5 # Min bank size for each CRF
 N_TEST = 5 # Test size for each CRF (including one gag and one pol sequence)
 
 # DECODER PARAMETERS
@@ -46,11 +46,18 @@ PROB_ZERO_THRESHOLD = 0.5 # Minimum output prob for a label to be considered a v
 CRF_MATCH_MARGIN = 0.02 # If several CRFs are within this value, take into account the ambiguity
 CRF_ASSIGN_THR = 0.5 # Minimum match to assign a CRF
 PARTIAL_THR = 7000 # Threshold to consider a sequence full (>=7000nt) or partial (<7000nt)
+GATE_MIN_SEG_LEN = 200   # min active positions for a CRF segment to be evaluated by the gate
+GATE_MIN_SUPPORT = 0.5   # min fraction of those positions compatible with the segment subtype
+
+# INPUT CHECKS
+MAX_SEQ_LEN        = 11000
+MIN_INFORMATIVE_BP = 100    # non-N bases after dealigning
+MAX_N_FRACTION     = 0.2    # warning only
 
 # MODEL PARAMETERS
-VERSION = "0.4"
+VERSION = "0.5"
 PAD_LEN = 128
-SEQ_LEN_AFTER_PAD = ((ATA_LEN // PAD_LEN) + 1) * PAD_LEN
+SEQ_LEN_AFTER_PAD = ((ATA_LEN + PAD_LEN - 1) // PAD_LEN) * PAD_LEN
 
 MODEL_CONFIG = {
     # Model
@@ -58,7 +65,7 @@ MODEL_CONFIG = {
     "backbone": "InstaDeepAI/NTv3_650M_pre", # zhihan1996/DNABERT-2-117M InstaDeepAI/NTv3_650M_pre InstaDeepAI/nucleotide-transformer-v2-500m-multi-species
     "tokenizer": "InstaDeepAI/NTv3_650M_pre", # /pasteur/helix/projects/mPath/oanoufa/sbtr/data/model/tokenizer/custom_hiv_tokenizer
     "checkpoint_name": f"sbtr_v{VERSION}.pt",
-    "load_checkpoint": False, # Whether to load from checkpoint to resume training or start fresh training
+    "load_checkpoint": True, # Whether to load from checkpoint to resume training or start fresh training
     "model_version": VERSION,
 
     # Data
@@ -72,7 +79,7 @@ MODEL_CONFIG = {
 
     # Training
     "batch_size": 8,
-    "num_steps_training": 150000,
+    "num_steps_training": 30000,
     # Only batch_size * num_steps_training samples will be used for training (randomly sampled from the training split)
     "log_every_n_steps": 10000,
     "learning_rate": 1e-4,
@@ -120,14 +127,14 @@ CLOCK_RATES = {
         ('G',      1.78, 4.72),
         # ('01_AE',  1.48, 2.99),
         # ('02_AG',  1.29, 4.48),
-        ('AE',      1.48, 2.99),
+        ('E',      1.48, 2.99),
     ]
 }
 CLOCK_RATES['avg'] = sum(CLOCK_RATES.values()) / len(CLOCK_RATES)
 
 ST_TO_ID_DICT = {
-    'A1': 0, 'A2': 1, 'A3': 2, 'A4': 3, 'A5U': 4, 'A6': 5, 'A7': 6, 'A8': 7,
-    'B': 8, 'C': 9, 'D': 10, 'AE': 11, 'F1': 12, 'F2': 13, 'G': 14,
+    'A1': 0, 'A2': 1, 'A3': 2, 'A4': 3, 'A5': 4, 'A6': 5, 'A7': 6, 'A8': 7,
+    'B': 8, 'C': 9, 'D': 10, 'E': 11, 'F1': 12, 'F2': 13, 'G': 14,
     'H': 15, 'J': 16, 'K': 17, 'L': 18, 'N': 19, 'O': 20, 'P': 21,
     }
 
@@ -139,6 +146,7 @@ ST_COLORS = {
     'A3':  '#0C447C',
     'A4':  '#B5D4F4',
     'A5U':  '#B5D47C',
+    'A5':  '#B5D47C',
     'A6':  '#042C53',
     'A7':  '#5B9FD4',
     'A8':  '#2A76C4',
@@ -150,6 +158,7 @@ ST_COLORS = {
     'D':   '#BA7517',
     # AE - coral/pink blend
     'AE':  '#F0997B',
+    'E':  '#F0997B',
     '01_AE': '#F0997B',
     # F family - purple
     'F':   '#7F77DD',
@@ -226,6 +235,11 @@ GENE_COLORS = {
 
 COLOR_SCHEME = ['#072C4B', '#F28089','#71cddd', "a07a99", "#E69F00"]
 
+# 01_AE HANDLING
+# end of pol (HXB2): CRF01_AE is A1 up to here
+AE_A1_END_HXB2 = (GENES_RAW["p31_int"][1] + GENES_RAW["vif"][0]) // 2
+# half-width (ATA positions) of the loss-masked zone at the A1->AE switch; 0 disables. we add this because of the overlap between pol and vif (vif starts at 5041, pol ends at 5096)
+AE_SPLIT_MASK = 30
 
 # DRM and LTR masks
 

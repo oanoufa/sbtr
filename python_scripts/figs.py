@@ -46,6 +46,7 @@ ST_COLORS = config.ST_COLORS
 METRICS_DIR = config.MODEL_CONFIG["metrics_dir"]
 VERSION = config.VERSION
 ATA_LEN = config.ATA_LEN
+PROB_ZERO_THRESHOLD = config.PROB_ZERO_THRESHOLD
 
 JPHMM_TO_SBTR_LTR = {
     "5'-Insertion":"5'LTR",
@@ -53,7 +54,7 @@ JPHMM_TO_SBTR_LTR = {
 }
 
 FRAME_LANES = {1: (0.67, 1.0), 2: (0.33, 0.66), 3: (0.0, 0.33)}
-PAD = 0.015
+PAD = 0.025
 MULTI_EXON = ("tat", "rev")
 
 
@@ -584,31 +585,37 @@ def _gene_runs(subtype_arr, s, e):
         pos += n
 
 
-def _label_layout(entries, n_total, width, fs=7):
-    """
-    width: drawable width in the same unit as fs (pt for matplotlib, px for SVG).
-    Returns labels [(x, y, text, ha, va)] and connectors [[(x, y), ...]],
-    in (bp, lane-fraction) coordinates.
-    """
+def _label_layout(entries, n_total, width, fs=7, lane_h=24, inside=False):
     bp_per_u = n_total / width
     char_w = 0.55 * fs
+    stem = 0.3 * fs / (3 * lane_h)
+    pad = 2 * bp_per_u
     groups = defaultdict(list)
     lane_rects = defaultdict(list)
     for g in entries:
         groups[g["base"]].append(g)
         lane_rects[g["frame"]].append((g["s"], g["e"]))
 
+    lanes = sorted(FRAME_LANES, key=lambda f: FRAME_LANES[f][0])
+    taken = []                               # (x0, x1, side) of placed labels
+
+    def free(x0, x1, keys):
+        return all(not (k in keys and x0 < b + pad and x1 > a - pad)
+                for a, b, k in taken)
+
     labels, connectors = [], []
-    for base, exons in groups.items():
+    # multi-exon genes first (they claim their space), then single exons left to right
+    order = sorted(groups.items(), key=lambda kv: (len(kv[1]) == 1, min(g["s"] for g in kv[1])))
+    for base, exons in order:
         exons = sorted(exons, key=lambda g: g["s"])
         text = base.replace("_", " ")
-        # Multi-exon gene: connector line + one label centered on it
+        tw = len(text) * char_w * bp_per_u
         if len(exons) > 1:
             for a, b in zip(exons[:-1], exons[1:]):
                 xa, xb = (a["s"] + a["e"]) / 2, (b["s"] + b["e"]) / 2
                 if a["frame"] != b["frame"]:
                     y_line = FRAME_LANES[min(a["frame"], b["frame"])][0]
-                    def attach(g):  # edge of the exon facing the line
+                    def attach(g):
                         y0, y1 = FRAME_LANES[g["frame"]]
                         return (y1 - PAD) if y1 <= y_line + 1e-6 else (y0 + PAD)
                     pts = [(xa, attach(a)), (xa, y_line), (xb, y_line), (xb, attach(b))]
@@ -617,38 +624,53 @@ def _label_layout(entries, n_total, width, fs=7):
                     y_line = (y0 + y1) / 2
                     pts = [(a["e"], y_line), (b["s"], y_line)]
                 connectors.append(pts)
-                labels.append(((xa + xb) / 2, y_line + 0.01, text, "center", "bottom"))
+                mx = (xa + xb) / 1.9
+                labels.append((mx, y_line + 0.05, text, "center", "bottom"))
+                taken.append((mx - tw / 2, mx + tw / 2, "multi"))
             continue
 
         g = exons[0]
         y0, y1 = FRAME_LANES[g["frame"]]
         yc = (y0 + y1) / 2
-        tw = len(text) * char_w * bp_per_u
-        margin = 3 * bp_per_u
-        if tw + margin <= g["e"] - g["s"]:
-            labels.append(((g["s"] + g["e"]) / 2, yc, text, "center", "center"))
-            continue
-
-        # Too small: put the name next to the gene (right first, then left)
-        gap = 2 * bp_per_u
+        xc = (g["s"] + g["e"]) / 2
         others = [r for r in lane_rects[g["frame"]] if r != (g["s"], g["e"])]
-        placed = False
-        for side in ("right", "left"):
-            if side == "right":
+
+        side = None
+        if len(lanes) > 1:
+            if g["frame"] == lanes[0]:
+                side = "above"
+            elif g["frame"] == lanes[-1]:
+                side = "below"
+        side = side or "below"
+        lane_key = ("lane", g["frame"])
+
+        def stem_label(sd):
+            if sd == "above":
+                y_lab = y1 + stem
+                connectors.append([(xc, y1 - PAD), (xc, y_lab - 0.005)])
+                labels.append((xc, y_lab, text, "center", "bottom"))
+            else:
+                y_lab = y0 - stem
+                connectors.append([(xc, y0 + PAD), (xc, y_lab + 0.005)])
+                labels.append((xc, y_lab, text, "center", "top"))
+            taken.append((xc - tw / 2, xc + tw / 2, sd))
+
+        # 1) beside the gene first: right, then left
+        gap = 2 * bp_per_u
+        for sd in ("right", "left"):
+            if sd == "right":
                 x0 = g["e"] + gap; x1 = x0 + tw; anchor, ha = x0, "left"
             else:
                 x1 = g["s"] - gap; x0 = x1 - tw; anchor, ha = x1, "right"
             if x0 < 0 or x1 > n_total:
                 continue
-            if all(x1 <= s or x0 >= e for s, e in others):
+            if all(x1 <= s or x0 >= e for s, e in others) and free(x0, x1, (lane_key,)):
                 labels.append((anchor, yc, text, ha, "center"))
-                placed = True
+                taken.append((x0, x1, lane_key))
                 break
-        if not placed:
-            xc = (g["s"] + g["e"]) / 2
-            y_lab = y0 - 0.03
-            connectors.append([(xc, y0 + PAD), (xc, y_lab + 0.005)])
-            labels.append((xc, y_lab, text, "center", "top"))
+        else:
+            # 2) above / below with a short stem, if free; 3) otherwise anyway
+            stem_label(side)
     return labels, connectors
 
 def visualize_sample_probs(
@@ -853,7 +875,7 @@ def visualize_sample_probs(
             fontsize=7,
             ncol=len(legend_handles),
             loc="upper center",
-            bbox_to_anchor=(0.5, -0.15),
+            bbox_to_anchor=(0.2, -0.25),
             frameon=True,
             framealpha=0.85,
             borderpad=0.6,
@@ -893,16 +915,14 @@ _PATTERN_DEFS = (
 )
 _PATTERN_CYCLE = [None, "hatch", "plus", "cross", "dots"]  # None = plain colour
 
-def visualize_sample_probs_light(regions_aligned, hxb2_to_ata, n_total, path,
-                    width=1100, lane_h=24, fs=9):
-    ml, mr, top = 28, 20, 4
-    pw = width - ml - mr
-    sx = pw / n_total
-    H3 = 3 * lane_h
-    height = top + H3 + 46
-    X = lambda x: ml + x * sx
-    Y = lambda y: top + (1 - y) * H3
+def _n(v, nd=1):
+    """Compact number: 123.0 -> '123', 0.50 -> '0.5'."""
+    s = f"{v:.{nd}f}"
+    return s.rstrip("0").rstrip(".") if "." in s else s
 
+def _segments_panel(regions_aligned, hxb2_to_ata, n_total, X, sx, pw, top, lane_h, fs):
+    H3 = 3 * lane_h
+    Y = lambda y: top + (1 - y) * H3
     arr = _subtype_array(regions_aligned, n_total)
     entries = _gene_entries(hxb2_to_ata, n_total)
 
@@ -911,30 +931,33 @@ def visualize_sample_probs_light(regions_aligned, hxb2_to_ata, n_total, path,
         y0, y1 = FRAME_LANES[g["frame"]]
         yt, h = Y(y1 - PAD), (y1 - y0 - 2 * PAD) * H3
         w = (g["e"] - g["s"]) * sx
-        outlines.append(f"M{X(g['s']):.1f} {yt:.1f}h{w:.1f}v{h:.1f}h-{w:.1f}z")
+        outlines.append(f"M{_n(X(g['s']))} {_n(yt)}h{_n(w)}v{_n(h)}h-{_n(w)}z")
         for val, pos, n in _gene_runs(arr, g["s"], g["e"]):
             if val:
                 if val not in seen:
                     seen.append(val)
                 by_st[val].append(
-                    f"M{X(pos):.1f} {yt:.1f}h{n * sx:.1f}v{h:.1f}h-{n * sx:.1f}z")
+                    f"M{_n(X(pos))} {_n(yt)}h{_n(n * sx)}v{_n(h)}h-{_n(n * sx)}z")
 
     order = list(ST_COLORS)
-    present = sorted(seen, key=lambda s: order.index(s) if s in order else len(order))
+    present = sorted((s for s in seen if s != "U"),
+                    key=lambda s: order.index(s) if s in order else len(order))
     pat = {st: _PATTERN_CYCLE[i % len(_PATTERN_CYCLE)] for i, st in enumerate(present)}
-    labels, connectors = _label_layout(entries, n_total, pw, fs=fs)
-    anchor = {"left": "start", "center": "middle", "right": "end"}
-    ay = top + H3 + 5
+    pat["U"] = None
 
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}" font-family="Helvetica, Arial, sans-serif">',
-        _PATTERN_DEFS]
-    for st, parts in by_st.items():
+    labels, connectors = _label_layout(entries, n_total, pw, fs=fs, lane_h=lane_h)
+    anchor = {"left": "start", "center": "middle", "right": "end"}
+
+    out = []
+    for k, (st, parts) in enumerate(by_st.items()):
         d = "".join(parts)
-        out.append(f'<path fill="{ST_COLORS.get(st, "#CCCCCC")}" fill-opacity="0.88" d="{d}"/>')
-        p = pat[st]
-        if p:
-            out.append(f'<path fill="url(#p-{p})" d="{d}"/>')
+        c = ST_COLORS.get(st, "#CCCCCC")
+        if pat[st]:
+            out.append(f'<defs><path id="s{k}" d="{d}"/></defs>')
+            out.append(f'<use href="#s{k}" fill="{c}" fill-opacity="0.88"/>')
+            out.append(f'<use href="#s{k}" fill="url(#p-{pat[st]})"/>')
+        else:
+            out.append(f'<path fill="{c}" fill-opacity="0.88" d="{d}"/>')
     out.append(f'<path fill="none" stroke="#000" stroke-width="0.5" d="{"".join(outlines)}"/>')
     for pts in connectors:
         p = " ".join(f"{X(x):.1f},{Y(y):.1f}" for x, y in pts)
@@ -945,85 +968,125 @@ def visualize_sample_probs_light(regions_aligned, hxb2_to_ata, n_total, path,
         out.append(f'<text x="{X(x):.1f}" y="{Y(y):.1f}" font-size="{fs}" text-anchor="{anchor[ha]}" '
                    f'{base_attr} stroke="#fff" stroke-width="1.2" stroke-opacity="0.7" paint-order="stroke">{escape(txt)}</text>')
     for f, (y0, y1) in FRAME_LANES.items():
-        out.append(f'<text x="{ml - 4}" y="{Y((y0 + y1) / 2):.1f}" font-size="{fs - 2}" fill="#888" '
+        out.append(f'<text x="{X(0) - 4}" y="{Y((y0 + y1) / 2):.1f}" font-size="{fs - 2}" fill="#888" '
                    f'text-anchor="end" dominant-baseline="central">F{f}</text>')
+    return out, seen, pat
 
-    # axis
-    out.append(f'<line x1="{ml}" x2="{ml + pw}" y1="{ay}" y2="{ay}" stroke="#000" stroke-width="0.6"/>')
-    step = max(1, n_total // 10)
-    for t in range(0, n_total + 1, step):
-        out.append(f'<line x1="{X(t):.1f}" x2="{X(t):.1f}" y1="{ay}" y2="{ay + 3}" stroke="#000" stroke-width="0.6"/>')
-        out.append(f'<text x="{X(t):.1f}" y="{ay + 12}" font-size="{fs - 1}" text-anchor="middle">{t}</text>')
-
-    # legend
-    lx = ml
-    for st in seen:
-        out.append(f'<rect x="{lx}" y="{height - 13}" width="9" height="9" fill="{ST_COLORS.get(st, "#CCCCCC")}" stroke="#555" stroke-width="0.4"/>')
-        p = pat[st]
-        if p:
-            out.append(f'<rect x="{lx}" y="{height - 13}" width="9" height="9" fill="url(#p-{p})"/>')
-        out.append(f'<text x="{lx + 12}" y="{height - 5}" font-size="{fs - 1}">{escape(st)}</text>')
-        lx += 22 + 6 * len(st)
-
-    out.append("</svg>")
-    with open(path, "w") as f:
-        f.write("\n".join(out))
-
-def visualize_sample_probs_lines(preds_slice, pure_st_to_id_dict, n_total, path,
-                                 width=1100, height=260, fs=9, min_peak=0.3,
-                                 excluded=frozenset({"U", "5'LTR", "3'LTR"})):
-    ml, mr, top, bot = 34, 20, 8, 46
-    pw, ph = width - ml - mr, height - top - bot
-    X = lambda x: ml + x * pw / n_total
+def _lines_panel(preds_slice, pure_st_to_id_dict, n_total, X, pw, top, ph, fs,
+                 min_peak, excluded, floor=0.01, lw=1.8):
     Y = lambda y: top + (1 - y) * ph
-
-    P = np.asarray(preds_slice)                      # (ata_len, n_subtypes)
+    P = np.asarray(preds_slice)
     step = max(1, n_total // pw)
     idx = np.arange(0, n_total, step)
     xs = idx + step / 2
 
     id_to_st = {v: k for k, v in pure_st_to_id_dict.items()}
-    lines, seen = [], []
+    out, seen = [], []
+    curves = []
+
+    for v in (0, 1):
+        out.append(f'<line x1="{_n(X(0))}" x2="{_n(X(n_total))}" y1="{_n(Y(v))}" y2="{_n(Y(v))}" '
+                f'stroke="#bbb" stroke-width="0.5"/>')
+        out.append(f'<text x="{X(0) - 4}" y="{Y(v):.1f}" font-size="{fs - 1}" fill="#555" '
+                   f'text-anchor="end" dominant-baseline="central">{v:g}</text>')
+    if 0 <= PROB_ZERO_THRESHOLD <= 1:
+        ty = _n(Y(PROB_ZERO_THRESHOLD))
+        out.append(f'<line x1="{_n(X(0))}" x2="{_n(X(n_total))}" y1="{ty}" y2="{ty}" '
+                f'stroke="#000" stroke-width="0.7" stroke-dasharray="4 3"/>')
+        out.append(f'<text x="{_n(X(n_total))}" y="{_n(Y(PROB_ZERO_THRESHOLD) - 2)}" '
+                f'font-size="{fs - 2}" fill="#000" text-anchor="end">thr = {PROB_ZERO_THRESHOLD:g}</text>')
     for i in range(len(id_to_st)):
         st = id_to_st[i]
         if st in excluded or P[:, i].max() <= min_peak:
             continue
         ys = np.maximum.reduceat(P[:, i], idx)
-        pts = " ".join(f"{X(x):.1f},{Y(y):.1f}" for x, y in zip(xs, ys))
-        lines.append(f'<polyline points="{pts}" fill="none" stroke="{ST_COLORS.get(st, "#CCCCCC")}" '
-                     f'stroke-width="1.2" stroke-linejoin="round"/>')
-        seen.append(st)
+        on = ys > floor
+        m = on.copy()
+        m[1:] |= on[:-1]
+        m[:-1] |= on[1:]
+        yy = [round(Y(y), 1) for y in ys]
+        edges = np.diff(np.r_[0, m.astype(int), 0])
+        d = []
+        for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+            keep = [j for j in range(a, b)
+                    if j in (a, b - 1) or not (yy[j] == yy[j - 1] == yy[j + 1])]
+            d.append("M" + " ".join(f"{_n(X(xs[j]), 0)},{_n(yy[j])}" for j in keep))
+        if d:
+            curves.append((ST_COLORS.get(st, "#CCCCCC"), "".join(d)))
+            seen.append(st)
+    out.append("<defs>" + "".join(f'<path id="l{k}" d="{d}"/>'
+               for k, (_, d) in enumerate(curves)) + "</defs>")
+    out.append(f'<g fill="none" stroke="#000" stroke-opacity="0.6" stroke-width="{lw + 1.2:g}" '
+               'stroke-linejoin="round">'
+               + "".join(f'<use href="#l{k}"/>' for k in range(len(curves))) + "</g>")
+    out.append(f'<g fill="none" stroke-width="{lw:g}" stroke-linejoin="round">'
+               + "".join(f'<use href="#l{k}" stroke="{c}"/>'
+                         for k, (c, _) in enumerate(curves)) + "</g>")
+    return out, seen
+
+def visualize_combined_light(regions_aligned, hxb2_to_ata, preds_slice, pure_st_to_id_dict,
+                            n_total, path, width=1100, lines_h=150, lane_h=24, fs=12,
+                            min_peak=0.3, excluded=frozenset({"U", "5'LTR", "3'LTR"}),
+                            gap=10, floor=0.01, lw=1.4):
+    ml, mr, top = 40, 20, 8
+    pw = width - ml - mr
+    sx = pw / n_total
+    X = lambda x: ml + x * sx
+
+    lab_pad = fs // 4
+    seg_top = top + lines_h + gap + lab_pad
+    H3 = 3 * lane_h
+    ay = seg_top + H3 + lab_pad + 2
+    height = ay + fs * 3 + 8
+
+    arr = _subtype_array(regions_aligned, n_total)
+    cov = np.flatnonzero([bool(v) for v in arr])
+    P = np.array(preds_slice, copy=True)
+    if cov.size:
+        P[:cov.min()] = 0
+        P[cov.max() + 1:] = 0
+
+    line_out, line_seen = _lines_panel(P, pure_st_to_id_dict, n_total, X, pw,
+                                       top, lines_h, fs, min_peak, excluded, floor, lw)
+    seg_out, seg_seen, pat = _segments_panel(regions_aligned, hxb2_to_ata, n_total, X, sx,
+                                             pw, seg_top, lane_h, fs)
+    legend_sts = seg_seen + [s for s in line_seen if s not in seg_seen]
 
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-           f'viewBox="0 0 {width} {height}" font-family="Helvetica, Arial, sans-serif">']
+           f'viewBox="0 0 {width} {height}" font-family="Helvetica, Arial, sans-serif">',
+           _PATTERN_DEFS]
 
-    # y grid + labels
-    for v in (0, 0.5, 1):
-        out.append(f'<line x1="{ml}" x2="{ml + pw}" y1="{Y(v):.1f}" y2="{Y(v):.1f}" '
-                   f'stroke="#ddd" stroke-width="0.5"/>')
-        out.append(f'<text x="{ml - 4}" y="{Y(v):.1f}" font-size="{fs - 1}" fill="#555" '
-                   f'text-anchor="end" dominant-baseline="central">{v:g}</text>')
-    out.extend(lines)
+    # vertical gridlines through the line panel
+    step = max(1, n_total // 10)
+    ticks = range(0, n_total + 1, step)
+    for t in ticks:
+        out.append(f'<line x1="{X(t):.1f}" x2="{X(t):.1f}" y1="{top}" y2="{top + lines_h}" '
+                   f'stroke="#eee" stroke-width="0.5"/>')
 
-    # x axis
-    ay = top + ph + 2
+    out.extend(line_out)
+    out.extend(seg_out)
+
+    # shared x axis
     out.append(f'<line x1="{ml}" x2="{ml + pw}" y1="{ay}" y2="{ay}" stroke="#000" stroke-width="0.6"/>')
-    tstep = max(1, n_total // 10)
-    for t in range(0, n_total + 1, tstep):
+    for t in ticks:
         out.append(f'<line x1="{X(t):.1f}" x2="{X(t):.1f}" y1="{ay}" y2="{ay + 3}" stroke="#000" stroke-width="0.6"/>')
-        out.append(f'<text x="{X(t):.1f}" y="{ay + 12}" font-size="{fs - 1}" text-anchor="middle">{t}</text>')
+        out.append(f'<text x="{X(t):.1f}" y="{ay + fs + 4}" font-size="{fs - 1}" text-anchor="middle">{t}</text>')
 
-    # legend (colored line swatches)
+    # shared legend (colour + texture where the segment panel uses one)
+    sw = fs - 1
     lx = ml
-    for st in seen:
-        c = ST_COLORS.get(st, "#CCCCCC")
-        out.append(f'<line x1="{lx}" x2="{lx + 12}" y1="{height - 9}" y2="{height - 9}" stroke="{c}" stroke-width="2"/>')
-        out.append(f'<text x="{lx + 16}" y="{height - 5}" font-size="{fs - 1}">{escape(st)}</text>')
-        lx += 26 + 6 * len(st)
+    for st in legend_sts:
+        c, p = ST_COLORS.get(st, "#CCCCCC"), pat.get(st)
+        out.append(f'<rect x="{lx}" y="{height - sw - 4}" width="{sw}" height="{sw}" fill="{c}" stroke="#555" stroke-width="0.4"/>')
+        if p:
+            out.append(f'<rect x="{lx}" y="{height - sw - 4}" width="{sw}" height="{sw}" fill="url(#p-{p})"/>')
+        out.append(f'<text x="{lx + sw + 3}" y="{height - 5}" font-size="{fs - 1}">{escape(st)}</text>')
+        lx += sw + 14 + 0.6 * (fs - 1) * len(st)
 
     out.append("</svg>")
     with open(path, "w") as f:
         f.write("\n".join(out))
+
 
 def visualize_region_comparison(
     seq_id: str,
@@ -2202,7 +2265,7 @@ if __name__ == "__main__":
     subtypes_with_data = [
         'A',
         'B', 
-        'C', 'D', 'AE', 'F', 'G']
+        'C', 'D', 'E', 'F', 'G']
     names = subtypes_with_data + ['avg']
     diversity_arrays = {}
     

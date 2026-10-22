@@ -5,6 +5,7 @@ import pandas as pd
 import os
 import sys
 import gzip
+import random
 from Bio import SeqIO
 from pathlib import Path
 from torch.utils.data import DataLoader
@@ -34,6 +35,8 @@ PAD_MULTIPLE_OF    = config.PAD_LEN
 COMBINED_REF_PATH = config.COMBINED_REF_PATH
 ATA_LEN            = config.ATA_LEN
 SEED               = MODEL_CONFIG["seed"]
+if MODEL_CONFIG["load_checkpoint"]:
+    SEED = random.randint(0, 100)
 
 
 torch.manual_seed(SEED)
@@ -82,7 +85,6 @@ if __name__ == "__main__":
         num_subtypes = NUM_SUBTYPES,
         smooth_kernel = MODEL_CONFIG["smooth_kernel"],
         embed_layer = MODEL_CONFIG["embed_layer"],
-        custom_vocab_size = len(tokenizer),
     )
 
     model = HFModelForHIVSubtyping.from_pretrained_backbone(model_param)
@@ -183,11 +185,14 @@ if __name__ == "__main__":
             print(f"  WARNING - unexpected keys: {load_result.unexpected_keys}")
 
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        best_val_f1 = checkpoint.get("val_f1", 0.0)
-        last_step = checkpoint["step"]
         curr_train_df = pd.read_csv(train_metrics_dir, sep='\t')
         last_step = curr_train_df['step'].max()
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer, num_warmup_steps=0,
+            num_training_steps=last_step + MODEL_CONFIG["num_steps_training"],
+            last_epoch=last_step - 1,
+        )
+        best_val_f1 = checkpoint.get("val_f1", 0.0)
         print(f"Loaded checkpoint and resuming at step {last_step} (best_val_f1={best_val_f1:.4f})", flush=True)
     else:
         last_step = 0

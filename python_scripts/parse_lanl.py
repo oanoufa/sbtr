@@ -98,7 +98,7 @@ def normalize_subtype(raw: str) -> str:
     if s == 'E':
         return 'E'
     if s == 'A5':
-        return 'A5U'
+        return 'A5'
     if s == 'F':
         return '/'.join(normalize_subtype(p) for p in ['F1', 'F2'])
     if s == 'mix':
@@ -723,7 +723,7 @@ def prepare_pure_alignment(lanl_alignment_path: str,
     # Build coordinate maps from the final HXB2 row
     ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata)
     #  print the mapping as a csv with columns: ata_pos, hxb2_pos 
-    mapping_path = Path(f"{WORKSPACE_PATH}/data/output/hxb2_ata_mapping.csv")
+    mapping_path = config.MAPPING_PATH
     with open(mapping_path, "w") as f:
         f.write("ata_pos,hxb2_pos\n")
         for ata_pos in range(ATA_LEN):
@@ -772,11 +772,12 @@ def prepare_pure_alignment(lanl_alignment_path: str,
                 continue
             arr = np.frombuffer(seq_str.encode(), dtype=np.uint8).copy()
             # arr[~pure_e_cols] = ord("N")
-            # In the end we decided to keep the full sequence for CRF01_AE and consider it a pure subtype, as the A parts of AE also diverged enough to be considered a subsubtype of A.
+            # In the end we decided to keep the full sequence for CRF01_AE and consider it a class in itself. we simplified its structure with A1 on gag pol and AE on the rest
+            # in the very end we label E segments E and A1 segments A1 with a random blur around the breakpoints
             masked_seq = arr.tobytes().decode()
-            new_id_e = str(rec.id).replace("01_AE", "AE")
+            new_id_e = str(rec.id).replace("01_AE", "E")
             pure_result[new_id_e] = masked_seq
-            pure_subtype_count['AE'] += 1
+            pure_subtype_count['E'] += 1
             accession_names_seen.add(accession_name)
 
         if _is_crf26_a5u(subtype):
@@ -787,9 +788,9 @@ def prepare_pure_alignment(lanl_alignment_path: str,
             # arr[~crf26_a_cols] = ord("N")
             # In the end we decided to keep the full sequence for CRF26_A5U and consider it a pure subtype with class A5U
             masked_seq = arr.tobytes().decode()
-            new_id_a = str(rec.id).replace("26_A5U", "A5U").replace("26_A5", "A5U")
+            new_id_a = str(rec.id).replace("26_A5U", "A5").replace("26_A5", "A5")
             pure_result[new_id_a] = masked_seq
-            pure_subtype_count['A5U'] += 1
+            pure_subtype_count['A5'] += 1
             accession_names_seen.add(accession_name)
 
         if _is_crf(subtype):
@@ -892,7 +893,7 @@ if __name__ == "__main__":
     print(f"  Label-sequence archive : {seqs_path}")
 
     # Derive alignment-coord segment CSV from the label sequences
-    csv_path = f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_brokedown_aln.csv"
+    csv_path = config.CRF_SEGMENTS_BD_ATA
     df_aln   = label_sequences_to_segments_csv(label_seqs, csv_path)
     print(f"\nAlignment-coord segments : {csv_path}  ({len(df_aln)} rows)")
     print(df_aln.head(20).to_string(index=False))

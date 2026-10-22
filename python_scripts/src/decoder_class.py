@@ -21,6 +21,16 @@ PARTIAL_THR = config.PARTIAL_THR
 ATA_LEN = config.ATA_LEN
 LTR_LABELS = {"5'LTR", "3'LTR"}
 CRF_SEGMENTS_BD_ATA = config.CRF_SEGMENTS_BD_ATA
+GATE_MIN_SEG_LEN = config.GATE_MIN_SEG_LEN
+GATE_MIN_SUPPORT = config.GATE_MIN_SUPPORT
+
+# Model labels standing for a mosaic of finer CSV subtypes: a query position labelled <key> is compatible with a CSV segment of the key itself or of any listed subtype.
+LABEL_ALIASES = {
+    "AE" : ("A1", "E"),
+    "A5U": ("A5",),       # to check against the 26_A5U rows of the segments CSV
+}
+# CRF-specific labels: a sequence made only of these is never called "pure".
+CRF_LIKE_LABELS = {"E", "A5"}
 
 class CRFReferenceDecoder:
 
@@ -57,7 +67,11 @@ class CRFReferenceDecoder:
                 )
             self.crf_types        = [self._parse_crf_type(n) for n in self.names]
             self.top_k            = TOP_K
-            self._load_crf_segment_matrix(config.CRF_SEGMENTS_BD_ATA)
+            self._load_crf_segment_matrix(CRF_SEGMENTS_BD_ATA)
+            missing = sorted(set(self.crf_types) - set(self.crf_segments))
+            if missing:
+                print(f"[CRFReferenceDecoder] {len(missing)} bank CRF types have no segments "
+                      f"(segment gate skipped for them): {missing[:10]}")
 
         # Base subtype vocabulary size, excluding the synthetic 'U'/LTR
         # labels that may already have been registered by a previous
@@ -89,7 +103,13 @@ class CRFReferenceDecoder:
             self.bank_informative = (
                 (self.bank != uninf[0]) & (self.bank != uninf[1]) & (self.bank != uninf[2])
             )
-
+            # label code -> atomic-subtype bitmask (0 for U/LTR/labels absent from the segment CSV)
+            self.code_to_bits = np.zeros(max(self.code_to_label) + 1, dtype=np.uint32)
+            for code, label in self.code_to_label.items():
+                bits = 0
+                for part in {label, *LABEL_ALIASES.get(label, ())}:
+                    bits |= self.atomic_to_bit.get(part, 0)
+                self.code_to_bits[code] = bits
         print(
             f"[CRFReferenceDecoder] {self.R} refs | "
             f"{len(set(self.crf_types))} CRF types | "
@@ -197,6 +217,13 @@ class CRFReferenceDecoder:
             end = int(row["end"])
             matrix[i, start:end] = subtype_to_mask(row["subtype"])
 
+        self.atomic_to_bit = atomic_to_bit
+        self.crf_segments = {crf: [] for crf in crfs}
+        for row in rows:
+            if row["subtype"] != "U":
+                self.crf_segments[row["crf"]].append(
+                    (int(row["start"]) - 1, int(row["end"]), subtype_to_mask(row["subtype"]))
+                )
         self.segment_crfs = np.asarray(crfs, dtype=object)
         self.segment_crf_to_idx = crf_to_idx
         self.segment_matrix = matrix
@@ -238,6 +265,43 @@ class CRFReferenceDecoder:
             for i, score in enumerate(agreement)
             if i != best_idx and score >= min_agreement
         ]
+
+    def _admissible_crfs(
+        self,
+        num_path: np.ndarray,
+        mask: np.ndarray,
+    ) -> set:
+        """
+        A CRF type is admissible if and only if every atomic subtype that appears
+        in any of its bank reference sequences at the query's active positions is
+        also present in the query's predicted labels at those same positions.
+
+        Formally: let Q = OR of code_to_bits[query[active]],
+                        K = OR of code_to_bits[crf_refs[active]] (per CRF type).
+        Admissible  <=>  K & ~Q == 0  (K ⊆ Q).
+
+        LABEL_ALIASES are resolved automatically through code_to_bits, so a query
+        position labelled "AE" contributes bits for both A1 and E.
+        """
+        active = np.asarray(mask, dtype=bool)
+
+        # Query: union of atomic bits at active positions
+        query_bits = np.uint32(0)
+        for code in np.unique(num_path[active]):
+            query_bits |= self.code_to_bits[int(code)]
+
+        # Bank: per-reference bit-OR at active positions, then per-CRF-type OR
+        bank_active = self.bank[:, active].astype(np.intp)            # (R, n_active)
+        ref_bits    = np.bitwise_or.reduce(                            # (R,)  uint32
+            self.code_to_bits[bank_active], axis=1
+        )
+
+        crf_bits: Dict[str, np.uint32] = {}
+        for i, crf_type in enumerate(self.crf_types):
+            crf_bits[crf_type] = crf_bits.get(crf_type, np.uint32(0)) | ref_bits[i]
+
+        # K ⊆ Q  <=>  K & ~Q == 0
+        return {crf for crf, bits in crf_bits.items() if (bits & ~query_bits) == 0}
 
     def _purity_stats(
         self,
@@ -421,6 +485,7 @@ class CRFReferenceDecoder:
         composition: List[str],
         top_crf_types: List[Dict],
         seq_len: int,
+        active_site_equivalents: Optional[List[Dict]] = None,
     ) -> str:
         """
         Collapse the decoder output into a single final call:
@@ -431,12 +496,10 @@ class CRFReferenceDecoder:
           "recombinant.<comp>.<partial/full>.<len>.unassigned"                          recombinant with no CRF match over crf_assign_thr
         """
 
-        is_pure = len(composition) <= 1 and 'AE' not in composition
-        is_partial =  seq_len < self.partial_thr
+        is_pure = len(composition) <= 1 and not CRF_LIKE_LABELS.intersection(composition)
+        is_partial = seq_len < self.partial_thr
         comp_str = "+".join(composition)
-        crf_candidates = [
-            row for row in top_crf_types
-        ]
+        crf_candidates = list(top_crf_types)
         best_score = crf_candidates[0]["max_score"]
         close_matches = [
             row for row in crf_candidates
@@ -449,23 +512,31 @@ class CRFReferenceDecoder:
             decision = f"recombinant.{comp_str}"
 
         if is_partial:
-            decision += f".partial"
+            decision += ".partial"
         else:
-            decision += f".full"
+            decision += ".full"
             if is_pure:
                 return decision
 
         if best_score < self.crf_assign_thr:
             decision += ".unassigned"
             return decision
-        elif len(close_matches) == 1:
-            closest_crf = close_matches[0]["crf_type"]
-            decision += f".assigned.{closest_crf}"
-            return decision
+
+        # For partial sequences, extend the candidate list with any active-site
+        # equivalents not already represented among the close score-based matches.
+        if is_partial and active_site_equivalents:
+            seen = {r["crf_type"] for r in close_matches}
+            extra = [r for r in active_site_equivalents if r["crf_type"] not in seen]
+            like_list = close_matches + extra
         else:
-            close_crfs = "+".join(row["crf_type"] for row in close_matches)
-            decision += f".like.{close_crfs}"
-            return decision
+            like_list = close_matches
+
+        if len(like_list) == 1:
+            decision += f".assigned.{like_list[0]['crf_type']}"
+        else:
+            decision += ".like." + "+".join(r["crf_type"] for r in like_list)
+
+        return decision
 
     def query(
         self,
@@ -559,18 +630,34 @@ class CRFReferenceDecoder:
 
         top_crf_types = self._aggregate_by_type(self.crf_types, scores, self.top_k)
 
-        best_crf_type = top_crf_types[0]["crf_type"]
-        active_site_equivalents = self._active_site_equivalents(
-            best_crf_type=best_crf_type,
-            query_mask=mask,
-            min_agreement=1.0, # complete match
+        # Full sequences: only CRFs whose segments are supported by the query can be called
+        seq_len = len(str_path_dealigned)
+        decision_scores = scores
+        if seq_len >= self.partial_thr:
+            ok = self._admissible_crfs(num_path, mask)
+            admissible = np.fromiter(
+                (t in ok for t in self.crf_types),
+                dtype=bool, count=self.R,
+            )
+            decision_scores = np.where(admissible, scores, 0.0)
+        decision_crf_types = self._aggregate_by_type(self.crf_types, decision_scores, self.top_k)
+
+        best_crf_type = decision_crf_types[0]["crf_type"]
+        active_site_equivalents = (
+            self._active_site_equivalents(
+                best_crf_type=best_crf_type,
+                query_mask=mask,
+                min_agreement=1.0, # complete match
+            )
+            if decision_crf_types[0]["max_score"] > 0 else []
         )
 
         final_decision = self._final_decision(
             dominant=dominant,
             composition=composition,
-            top_crf_types=top_crf_types,
-            seq_len=len(str_path_dealigned),
+            top_crf_types=decision_crf_types,
+            seq_len=seq_len,
+            active_site_equivalents=active_site_equivalents,
         )
 
         return {
