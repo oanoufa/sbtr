@@ -21,14 +21,9 @@ PARTIAL_THR = config.PARTIAL_THR
 ATA_LEN = config.ATA_LEN
 LTR_LABELS = {"5'LTR", "3'LTR"}
 CRF_SEGMENTS_BD_ATA = config.CRF_SEGMENTS_BD_ATA
-GATE_MIN_SEG_LEN = config.GATE_MIN_SEG_LEN
-GATE_MIN_SUPPORT = config.GATE_MIN_SUPPORT
+PURE_THR = config.PURE_THR
+MIN_COVERAGE = config.MIN_COVERAGE
 
-# Model labels standing for a mosaic of finer CSV subtypes: a query position labelled <key> is compatible with a CSV segment of the key itself or of any listed subtype.
-LABEL_ALIASES = {
-    "AE" : ("A1", "E"),
-    "A5U": ("A5",),       # to check against the 26_A5U rows of the segments CSV
-}
 # CRF-specific labels: a sequence made only of these is never called "pure".
 CRF_LIKE_LABELS = {"E", "A5"}
 
@@ -39,9 +34,7 @@ class CRFReferenceDecoder:
         bank_path: str = None,
     ) -> None:
 
-        # Defaults; overwritten below when a bank is actually loaded. These
-        # must always exist so the class is usable with bank_path=None
-        # (e.g. to compute num_path arrays for a bank being built).
+        # Defaults; overwritten below when a bank is actually loaded. These must always exist so the class is usable with bank_path=None (e.g. to compute num_path arrays for a bank being built).
         self.R = 0
         self.L = ATA_LEN
 
@@ -70,13 +63,9 @@ class CRFReferenceDecoder:
             self._load_crf_segment_matrix(CRF_SEGMENTS_BD_ATA)
             missing = sorted(set(self.crf_types) - set(self.crf_segments))
             if missing:
-                print(f"[CRFReferenceDecoder] {len(missing)} bank CRF types have no segments "
-                      f"(segment gate skipped for them): {missing[:10]}")
+                print(f"[CRFReferenceDecoder] {len(missing)} bank CRF types have no segments: {missing[:10]}")
 
-        # Base subtype vocabulary size, excluding the synthetic 'U'/LTR
-        # labels that may already have been registered by a previous
-        # instantiation of this class (ST_TO_ID_DICT is a shared, mutated
-        # global dict, so we must not let repeated calls inflate self.C).
+        # Base subtype vocabulary size, excluding the synthetic 'U'/LTRlabels that may already have been registered by a previous instantiation of this class (ST_TO_ID_DICT is a shared, mutated global dict, so we must not let repeated calls inflate self.C).
         self.C = len([
             k for k in ST_TO_ID_DICT
             if k not in ("U", "5'LTR", "3'LTR")
@@ -106,10 +95,7 @@ class CRFReferenceDecoder:
             # label code -> atomic-subtype bitmask (0 for U/LTR/labels absent from the segment CSV)
             self.code_to_bits = np.zeros(max(self.code_to_label) + 1, dtype=np.uint32)
             for code, label in self.code_to_label.items():
-                bits = 0
-                for part in {label, *LABEL_ALIASES.get(label, ())}:
-                    bits |= self.atomic_to_bit.get(part, 0)
-                self.code_to_bits[code] = bits
+                self.code_to_bits[code] = self.atomic_to_bit.get(label, 0)
         print(
             f"[CRFReferenceDecoder] {self.R} refs | "
             f"{len(set(self.crf_types))} CRF types | "
@@ -180,7 +166,10 @@ class CRFReferenceDecoder:
     def _load_crf_segment_matrix(self, csv_path: str) -> None:
         rows = []
         with open(csv_path, newline="") as fh:
-            rows = list(csv.DictReader(fh))
+            rows = [
+                row for row in csv.DictReader(fh)
+                if row["crf"] not in ST_TO_ID_DICT
+            ]
 
         crfs = list(dict.fromkeys(row["crf"] for row in rows))
         crf_to_idx = {crf: i for i, crf in enumerate(crfs)}
@@ -266,43 +255,6 @@ class CRFReferenceDecoder:
             if i != best_idx and score >= min_agreement
         ]
 
-    def _admissible_crfs(
-        self,
-        num_path: np.ndarray,
-        mask: np.ndarray,
-    ) -> set:
-        """
-        A CRF type is admissible if and only if every atomic subtype that appears
-        in any of its bank reference sequences at the query's active positions is
-        also present in the query's predicted labels at those same positions.
-
-        Formally: let Q = OR of code_to_bits[query[active]],
-                        K = OR of code_to_bits[crf_refs[active]] (per CRF type).
-        Admissible  <=>  K & ~Q == 0  (K ⊆ Q).
-
-        LABEL_ALIASES are resolved automatically through code_to_bits, so a query
-        position labelled "AE" contributes bits for both A1 and E.
-        """
-        active = np.asarray(mask, dtype=bool)
-
-        # Query: union of atomic bits at active positions
-        query_bits = np.uint32(0)
-        for code in np.unique(num_path[active]):
-            query_bits |= self.code_to_bits[int(code)]
-
-        # Bank: per-reference bit-OR at active positions, then per-CRF-type OR
-        bank_active = self.bank[:, active].astype(np.intp)            # (R, n_active)
-        ref_bits    = np.bitwise_or.reduce(                            # (R,)  uint32
-            self.code_to_bits[bank_active], axis=1
-        )
-
-        crf_bits: Dict[str, np.uint32] = {}
-        for i, crf_type in enumerate(self.crf_types):
-            crf_bits[crf_type] = crf_bits.get(crf_type, np.uint32(0)) | ref_bits[i]
-
-        # K ⊆ Q  <=>  K & ~Q == 0
-        return {crf for crf, bits in crf_bits.items() if (bits & ~query_bits) == 0}
-
     def _purity_stats(
         self,
         label_names: np.ndarray,
@@ -357,7 +309,6 @@ class CRFReferenceDecoder:
         return composition
 
     # core computations
-
     def _agreement_scores(self, query_codes: np.ndarray, mask: np.ndarray) -> np.ndarray:
         mask = mask.astype(bool)
         uninf = (self.code_u, self.code_5ltr, self.code_3ltr)
@@ -369,9 +320,12 @@ class CRFReferenceDecoder:
         n_comparable = comparable.sum(axis=1)
         agree = ((self.bank == query_codes[None, :]) & comparable).sum(axis=1)
 
+        n_query_inf = max(int(query_informative.sum()), 1)
+        coverage = n_comparable / n_query_inf
+
         scores = np.zeros(self.R, dtype=np.float32)
-        has_overlap = n_comparable > 0
-        scores[has_overlap] = agree[has_overlap] / n_comparable[has_overlap]
+        ok = (n_comparable > 0) & (coverage >= MIN_COVERAGE)
+        scores[ok] = agree[ok] / n_comparable[ok]
         return scores
 
     def _sliding_window(
@@ -482,6 +436,7 @@ class CRFReferenceDecoder:
     def _final_decision(
         self,
         dominant: str,
+        dominant_fraction: float,
         composition: List[str],
         top_crf_types: List[Dict],
         seq_len: int,
@@ -496,7 +451,7 @@ class CRFReferenceDecoder:
           "recombinant.<comp>.<partial/full>.<len>.unassigned"                          recombinant with no CRF match over crf_assign_thr
         """
 
-        is_pure = len(composition) <= 1 and not CRF_LIKE_LABELS.intersection(composition)
+        is_pure = dominant_fraction >= PURE_THR and not CRF_LIKE_LABELS.intersection(composition)
         is_partial = seq_len < self.partial_thr
         comp_str = "+".join(composition)
         crf_candidates = list(top_crf_types)
@@ -522,8 +477,7 @@ class CRFReferenceDecoder:
             decision += ".unassigned"
             return decision
 
-        # For partial sequences, extend the candidate list with any active-site
-        # equivalents not already represented among the close score-based matches.
+        # For partial sequences, extend the candidate list with any active-site equivalents not already represented among the close score-based matches.
         if is_partial and active_site_equivalents:
             seen = {r["crf_type"] for r in close_matches}
             extra = [r for r in active_site_equivalents if r["crf_type"] not in seen]
@@ -633,13 +587,6 @@ class CRFReferenceDecoder:
         # Full sequences: only CRFs whose segments are supported by the query can be called
         seq_len = len(str_path_dealigned)
         decision_scores = scores
-        if seq_len >= self.partial_thr:
-            ok = self._admissible_crfs(num_path, mask)
-            admissible = np.fromiter(
-                (t in ok for t in self.crf_types),
-                dtype=bool, count=self.R,
-            )
-            decision_scores = np.where(admissible, scores, 0.0)
         decision_crf_types = self._aggregate_by_type(self.crf_types, decision_scores, self.top_k)
 
         best_crf_type = decision_crf_types[0]["crf_type"]
@@ -654,6 +601,7 @@ class CRFReferenceDecoder:
 
         final_decision = self._final_decision(
             dominant=dominant,
+            dominant_fraction=fraction,
             composition=composition,
             top_crf_types=decision_crf_types,
             seq_len=seq_len,

@@ -70,7 +70,7 @@ class HIVSubtypingMetrics:
 
         self.f1_clade = MultilabelF1Score(num_labels=self.num_clades, average="micro").to(device)
 
-        # --- Per-subtype metrics ---
+        # Per-subtype metrics
         self.f1_per_st = MultilabelF1Score(num_labels=num_subtypes, average="none").to(device)
         self.precision_per_st = MultilabelPrecision(num_labels=num_subtypes, average="none").to(device)
         self.recall_per_st = MultilabelRecall(num_labels=num_subtypes, average="none").to(device)

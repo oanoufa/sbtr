@@ -18,6 +18,7 @@ from src import config
 from src.dataset_class import HIVSequenceDataset, open_memmaps
 from src.model_class import HFModelForHIVSubtyping, HIVSubtypingConfig
 from src.metrics_class import HIVSubtypingMetrics, train_step, validation_step
+from src.benchmark_class import RegionSet, Benchmarker, MaskPolicy, BreakpointConfig
 from figs import visualize_confusion_matrix
 
 from huggingface_hub import login
@@ -216,7 +217,7 @@ if __name__ == "__main__":
 
     for step_idx in tqdm(range(MODEL_CONFIG["num_steps_training"]),
                          desc="Training steps...",
-                         mininterval=300):
+                         mininterval=3600):
         try:
             batch = next(train_iter)
         except StopIteration:
@@ -263,7 +264,6 @@ if __name__ == "__main__":
             model.train()
 
     print(f"\nTraining completed after {MODEL_CONFIG['num_steps_training']} steps.")
-
 
 
 # Save locally

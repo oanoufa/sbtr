@@ -17,41 +17,53 @@ ATA_LEN = 10240 # max length of sequences in the dataset is (11954) (16980) (115
 HXB2_LEN = 9719
 HXB2_START = 790
 HXB2_END = 9417
-HXB2_USED_LEN = HXB2_END - HXB2_START + 1 # [START, END]
+HXB2_USED_LEN = HXB2_END - HXB2_START + 1 # 8628
+
+# PREPROCESSING PARAMETERS
+WEIGHT=1.0 # weight of pure-subtype coverage in [0,1], 1 = CRFs only break ties
+HXB2_ACC='K03455'
+CLUSTERING_IDENTITY=1.0 # drop a sequence if >= this identity to a kept one of its group
+MIN_PER_GROUP=10 # never reduce a subtype/CRF group below this many sequences
+MIN_OVERLAP=0.8 # min fraction of the shorter sequence that must overlap for identity to count
+MIN_POSITIONS = int(HXB2_USED_LEN * 0.98) # min number of non-gap positions in a sequence to keep it
 
 # SEQUENCE GENERATION PARAMETERS
-N_SEQ = 15000
+N_SEQ = 3000000
 RP = 0.95
 TEST_SET_SIZE = 1000
+DEFAULT_FLOOR = 0.04
+FLOORS = {"E": 0.12, "O": 0.02, "N": 0.02, "P": 0.02} # Reduce proba of drawing O,N,P, increase proba of drawing E.
 MAX_YEAR = 2027
 MIN_SEG_LEN = 50 # Min length of segments of a subtype in a recombinant sequence (in ATA positions)
 MAX_SUBTYPES = 7
 MAX_BREAKPOINTS = 10
 PARTIAL_FRAC = 0.50 # Fraction of sequences that are partial (i.e., not full-length)
-MIN_FRAG_LEN = 300 # Min length of a partial sequence (prot is around 300bp)
+MIN_FRAG_LEN = 400 # Min length of a partial sequence (prot is around 300bp in HXB2)
 DIV_WINDOW_SIZE = 200
 MIN_DIV = 15
 MAX_RETRIES = 50
 BP_PRIOR_LAMBDA = 1.0
+CHUNK_SIZE = 256
+CROP_MIN_BP_DIST = 100  # minimum distance allowed between crop boundaries and breakpoints
 
 # CRF REF BANK PARAMETERS
 PCT_PER_CRF_BANK = 0.30 # Adaptive bank size depending on the number of sequences of the CRF
-MIN_PER_CRF_BANK = 5 # Min bank size for each CRF
+MIN_PER_CRF_BANK = 3 # Min bank size for each CRF
 N_TEST = 5 # Test size for each CRF (including one gag and one pol sequence)
 
 # DECODER PARAMETERS
-SLIDING_WINDOW_SIZE = 40 # Twice the size of the smallest segments possible (window centered on position)
-TOP_K = 30 # Number of top CRF reference sequences to consider in the margin
-PROB_ZERO_THRESHOLD = 0.5 # Minimum output prob for a label to be considered a valid prediction (otherwise, label is set to 0)
-CRF_MATCH_MARGIN = 0.02 # If several CRFs are within this value, take into account the ambiguity
+SLIDING_WINDOW_SIZE = 100 # Twice the size of the smallest segments possible (window centered on position)
+TOP_K = 10 # Number of top CRF reference sequences to consider in the margin
+PROB_ZERO_THRESHOLD = 0.7 # Minimum output prob for a label to be considered a valid prediction (otherwise, label is set to 0)
+CRF_MATCH_MARGIN = 0.03 # If several CRFs are within this value, take into account the ambiguity
 CRF_ASSIGN_THR = 0.5 # Minimum match to assign a CRF
-PARTIAL_THR = 7000 # Threshold to consider a sequence full (>=7000nt) or partial (<7000nt)
-GATE_MIN_SEG_LEN = 200   # min active positions for a CRF segment to be evaluated by the gate
-GATE_MIN_SUPPORT = 0.5   # min fraction of those positions compatible with the segment subtype
+PARTIAL_THR = 7000 # Threshold to consider a sequence full (>=7000nt) or partial (<7000nt) (LANL threshold)
+PURE_THR = 0.98 # Threshold of major class share to consider a sequence pure (>=0.98) or recombinant (<0.98)
+MIN_COVERAGE = 0.5 # a CRF can be assigned only if the number of informative positions cover at least MIN_COVERAGE % of the input sequence
 
 # INPUT CHECKS
 MAX_SEQ_LEN        = 11000
-MIN_INFORMATIVE_BP = 100    # non-N bases after dealigning
+MIN_INFORMATIVE_BP = 250    # non-N bases after dealigning
 MAX_N_FRACTION     = 0.2    # warning only
 
 # MODEL PARAMETERS
@@ -65,7 +77,7 @@ MODEL_CONFIG = {
     "backbone": "InstaDeepAI/NTv3_650M_pre", # zhihan1996/DNABERT-2-117M InstaDeepAI/NTv3_650M_pre InstaDeepAI/nucleotide-transformer-v2-500m-multi-species
     "tokenizer": "InstaDeepAI/NTv3_650M_pre", # /pasteur/helix/projects/mPath/oanoufa/sbtr/data/model/tokenizer/custom_hiv_tokenizer
     "checkpoint_name": f"sbtr_v{VERSION}.pt",
-    "load_checkpoint": True, # Whether to load from checkpoint to resume training or start fresh training
+    "load_checkpoint": False, # Whether to load from checkpoint to resume training or start fresh training
     "model_version": VERSION,
 
     # Data
@@ -79,7 +91,7 @@ MODEL_CONFIG = {
 
     # Training
     "batch_size": 8,
-    "num_steps_training": 30000,
+    "num_steps_training": 300000,
     # Only batch_size * num_steps_training samples will be used for training (randomly sampled from the training split)
     "log_every_n_steps": 10000,
     "learning_rate": 1e-4,
@@ -233,7 +245,7 @@ GENE_COLORS = {
     "tat1": "#dd3497", "tat2": "#dd3497", "rev1": "#fa9fb5", "rev2": "#fa9fb5",
 }
 
-COLOR_SCHEME = ['#072C4B', '#F28089','#71cddd', "a07a99", "#E69F00"]
+COLOR_SCHEME = ['#072C4B', '#F28089','#71cddd', "#a07a99", "#E69F00"]
 
 # 01_AE HANDLING
 # end of pol (HXB2): CRF01_AE is A1 up to here

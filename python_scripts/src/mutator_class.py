@@ -15,17 +15,27 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
+from Bio import SeqIO
 
 from . import config
 
 CLOCK_RATES = config.CLOCK_RATES
 MAX_YEAR    = config.MAX_YEAR
-
+PURE_REF_PATH = config.PURE_REF_PATH
 # Constants
 _ACGT_BYTES = np.array([ord("A"), ord("C"), ord("G"), ord("T")], dtype=np.uint8)
 _BASE_TO_ACGT_IDX = np.full(256, -1, dtype=np.int8)
 for _i, _b in enumerate(_ACGT_BYTES):
     _BASE_TO_ACGT_IDX[_b] = _i
+
+# Lookup tables indexed by byte value
+_VALID_LUT = np.zeros(256, dtype=bool)          # True for A, C, G, T (either case)
+for _c in "ACGTacgt":
+    _VALID_LUT[ord(_c)] = True
+
+_UPPER_LUT = np.arange(256, dtype=np.uint8)     # maps a-z to A-Z
+for _c in range(ord("a"), ord("z") + 1):
+    _UPPER_LUT[_c] = _c - 32
 
 _REF_PREFIX            = re.compile(r"^Ref\.")
 _SUBTYPES_WITH_FILES   = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
@@ -33,7 +43,7 @@ _SUBTYPES_WITH_FILES   = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
 # Module-level functions  (import these in parallel workers)
 def parse_iqtree_rates(rate_path: str, ata_len: int, use_classes: bool = True) -> np.ndarray:
     """
-    Parse per-site posterior mean rates from an IQ-TREE .rate file.
+    Parse per-site rates from an IQ-TREE .rate file.
     Returns a float32 array of length ata_len normalized to sum to 1.
     """
     col = 3 if use_classes else 1        # C_Rate (class rate) vs Rate (posterior mean)
@@ -112,33 +122,48 @@ def build_substitution_probs(Q: np.ndarray) -> np.ndarray:
                 sub_probs[i, j] = Q[i, j] / rate_away
     return sub_probs
 
+def _compute_ref_mass(
+    alignment_path:  str,
+    site_rates_dict: Dict[str, np.ndarray],
+    ata_len:         int,
+) -> Dict[str, float]:
+    """Mean valid rate mass of the reference sequences, for each rate array."""
+    masses = {k: [] for k in site_rates_dict}
+    for rec in SeqIO.parse(alignment_path, "fasta"):
+        arr = np.frombuffer(str(rec.seq).encode(), dtype=np.uint8)
+        if len(arr) != ata_len:
+            raise ValueError(f"{rec.id} has {len(arr)} columns, expected {ata_len}")
+        valid = _VALID_LUT[arr]
+        for k, r in site_rates_dict.items():
+            masses[k].append(r[valid].sum(dtype=np.float64))
+    return {k: float(np.mean(v)) for k, v in masses.items()}
 
 def compute_n_muts(
     source_year: int,
     target_year: int,
     rate_arr:    np.ndarray,
+    seg_arr:     np.ndarray,
     seg_start:   int,
-    seg_len:     int,
     subtype:     str = 'avg',
     hxb2_len:    int = config.HXB2_USED_LEN,
-) -> int:
+    ref_mass:    float = 1.0,
+    ) -> int:
     """
     Expected number of GTR substitutions for a genomic segment.
 
-    Parameters
-    ----------
-    source_year : year the sequence was sampled.
-    target_year : year to evolve towards.
-    rate_arr    : per-site rates normalized to sum to 1 over the full genome.
-    seg_start   : first ATA position of the segment.
-    seg_len     : length of the segment.
-    subtype     : key for clock-rate lookup (e.g. 'A1', 'B', 'avg').
-    hxb2_len    : reference genome length for scaling.
+    Only columns holding an unambiguous nucleotide (A/C/G/T) contribute to
+    the segment's rate mass; gaps and N/IUPAC codes do not.  The mass is
+    divided by ref_mass, the mean valid rate mass of the class reference
+    sequences, so that a typical full-length sequence receives
+    clock_rate * hxb2_len * year_delta substitutions.
     """
     year_delta = max(0, target_year - source_year)
+    if year_delta == 0:
+        return 0
     clock_rate = CLOCK_RATES.get(subtype, CLOCK_RATES["avg"])
     total_muts = clock_rate * hxb2_len * year_delta
-    seg_weight = rate_arr[seg_start:seg_start + seg_len].sum()
+    seg_rates  = rate_arr[seg_start:seg_start + len(seg_arr)]
+    seg_weight = seg_rates[_VALID_LUT[seg_arr]].sum(dtype=np.float64) / ref_mass
     return int(round(total_muts * seg_weight))
 
 
@@ -166,10 +191,12 @@ def mutate_sequence_gtr(
     -------
     (mutated_seg_arr, n_muts)
     """
+
     n = len(seg_arr)
+    seg_arr[:] = _UPPER_LUT[seg_arr]
 
     weights = rate_arr[seg_start:seg_start + n].copy()
-    weights[~np.isin(seg_arr, _ACGT_BYTES)] = 0.0
+    weights[~_VALID_LUT[seg_arr]] = 0.0
 
     total = weights.sum()
     if total == 0.0 or n_muts == 0:
@@ -195,6 +222,7 @@ def mutate_sequence_gtr(
 
     seg_arr[v_sites] = _ACGT_BYTES[new_idxs]
     return seg_arr, n_muts
+
 
 
 class SequenceMutator:
@@ -243,7 +271,7 @@ class SequenceMutator:
             iqtree_file = self.iqtree_dir / f"HIV1_{st}_ALIGNED.fasta.iqtree"
 
             print(f"  [SequenceMutator] Parsing IQ-TREE rates for subtype {st}")
-            rates = parse_iqtree_rates(str(rate_file), ata_len, use_classes=True)
+            rates = parse_iqtree_rates(str(rate_file), ata_len, use_classes=False)
 
             self.site_rates_dict[st] = rates
 
@@ -264,11 +292,18 @@ class SequenceMutator:
         )
         self.sub_probs_dict['avg'] = build_substitution_probs(avg_Q)
 
+        self.ref_mass = _compute_ref_mass(PURE_REF_PATH, self.site_rates_dict, ata_len)
+        print(f"  [SequenceMutator] ref_mass: "
+              + ", ".join(f"{k}={v:.3f}" for k, v in self.ref_mass.items()))
+
         print(
             f"  [SequenceMutator] Ready - "
             f"{len(self.site_rates_dict)} rate arrays, "
             f"{len(self.sub_probs_dict)} Q matrices."
         )
+
+        print(f"  [SequenceMutator] Clock rates: "
+              + ", ".join(f"{k}={v:.3e}" for k, v in CLOCK_RATES.items()))
 
     # Internal helpers
 
@@ -279,7 +314,7 @@ class SequenceMutator:
         ``[Ref.]TYPE.COUNTRY.YEAR.NAME.ACCESSION``.
 
         Two-digit rule: year < 40 -> 2000 + year, year >= 40 -> 1900 + year.
-        Falls back to 2000 with a warning on any parsing failure.
+        Falls back to 2020 with a warning on any parsing failure.
         """
         clean = _REF_PREFIX.sub("", record_id)
         parts = clean.split(".")
@@ -341,9 +376,8 @@ class SequenceMutator:
         sub_probs = self.sub_probs_dict[rk]
 
         n_muts = compute_n_muts(
-            source_year, target_year,
-            rate_arr, seg_start, len(arr),
-            subtype=subtype_key,
+            source_year, target_year, rate_arr, arr, seg_start,
+            subtype=subtype_key, ref_mass=self.ref_mass[rk],
         )
         return mutate_sequence_gtr(
             arr.copy(), seg_start, rate_arr, self._rng, n_muts, sub_probs

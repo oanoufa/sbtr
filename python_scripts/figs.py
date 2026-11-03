@@ -29,6 +29,7 @@ from html import escape
 import matplotlib.patheffects as pe
 from matplotlib.patches import Rectangle
 from tqdm import tqdm
+import uuid
 
 
 from python_scripts.src.mutator_class import parse_iqtree_rates
@@ -211,59 +212,57 @@ def visualize_breakpoint_rank_profile(
     fig.write_image(Path(save_path).with_suffix(".svg"))
     print(f"Rank profile saved to: {save_path}", flush=True)
 
+
+_MIX = re.compile(r"[/+,]")
+def is_uncertain(label: str) -> bool:
+    return label == "U" or bool(_MIX.search(label))
+
+def _gen_structure_stats(df_rec, df_gen, ata_len, ata_to_hxb2):
+    """Vectorised per-recombinant statistics from the tables built in seq_gen.build_rec_tables.
+    df_gen rows must be ordered by (seq, rank) and aligned with df_rec (build_rec_tables guarantees it)."""
+    gen_n_bp = df_rec["n_bp"].to_numpy()
+    gen_n_st = df_rec["n_st"].to_numpy()
+
+    n_seg  = gen_n_bp + 1
+    off    = np.cumsum(n_seg) - n_seg
+    total  = int(n_seg.sum())
+    is_first = np.zeros(total, bool); is_first[off] = True
+    is_last  = np.zeros(total, bool); is_last[off + gen_n_bp] = True
+    bp_all = df_gen["pos_ata"].to_numpy()
+
+    starts = np.empty(total, np.int64)
+    ends   = np.empty(total, np.int64)
+    starts[is_first]  = df_rec["first"].to_numpy()
+    starts[~is_first] = bp_all
+    ends[is_last]     = df_rec["last"].to_numpy()
+    ends[~is_last]    = bp_all
+
+    gen_seg_lens_ata = ends - starts
+    a2h = np.asarray(ata_to_hxb2)
+    hxb2_len = a2h[np.minimum(ends - 1, ata_len - 1)] - a2h[starts]
+    gen_seg_lens_hxb2 = hxb2_len[hxb2_len > 0]
+    return gen_n_bp, gen_n_st, gen_seg_lens_ata, gen_seg_lens_hxb2
+
+
 def compare_generated_vs_real(
-        names, out_labels, n_subtypes, ata_len, df_seg, ata_to_hxb2,
+        df_rec, df_gen, ata_len, df_seg, ata_to_hxb2,
         ):
     """
-    Read back generated labels, extract per-recombinant statistics,
-    and compare against real CRF segment data.
-    
+    Compare generated recombinant structure against real CRF segment data.
+
+    df_rec / df_gen come from seq_gen.build_rec_tables (built from the worker records,
+    so the label memmap is not read back).
+
     Segment lengths are converted to HXB2 coordinates via ata_to_hxb2
     for a fair comparison against the real data (which is annotated in HXB2).
     """
-    lbl_mm = np.load(out_labels, mmap_mode="r")
+    gen_n_bp, gen_n_st, gen_seg_lens_ata, gen_seg_lens_hxb2 = _gen_structure_stats(
+        df_rec, df_gen, ata_len, ata_to_hxb2)
+    rec_indices = df_rec["seq"]   # only used for len() in the printout below
 
-    gen_n_bp      = []
-    gen_n_st      = []
-    gen_seg_lens_ata  = []
-    gen_seg_lens_hxb2 = []
-
-    rec_indices = [i for i, n in enumerate(names) if n.startswith("r")]
-
-    for idx in tqdm(rec_indices, desc="Analyzing generated recombinants", mininterval=10):
-        lbl = np.unpackbits(lbl_mm[idx], axis=-1)[:, :n_subtypes]
-
-        # Active subtype at each position (-1 where all labels are False, i.e. N)
-        any_active = lbl.any(axis=1)
-        active = np.full(ata_len, -1, dtype=np.int32)
-        active[any_active] = lbl[any_active].argmax(axis=1)
-
-        labeled_pos = np.where(active >= 0)[0]
-        if len(labeled_pos) < 2:
-            continue
-
-        labeled_st = active[labeled_pos]
-
-        # Detect transitions between adjacent labeled positions
-        change_idx = np.where(np.diff(labeled_st) != 0)[0]
-
-        gen_n_bp.append(len(change_idx))
-        gen_n_st.append(len(np.unique(labeled_st)))
-
-        # Segment boundaries in ATA, then convert to HXB2 lengths
-        bp_ata       = labeled_pos[change_idx + 1]
-        seg_starts   = np.concatenate([[labeled_pos[0]],      bp_ata])
-        seg_ends     = np.concatenate([bp_ata, [labeled_pos[-1] + 1]])
-
-        for s, e in zip(seg_starts, seg_ends):
-            gen_seg_lens_ata.append(int(e) - int(s))
-            e_clamped = min(int(e) - 1, ata_len - 1)
-            hxb2_len  = int(ata_to_hxb2[e_clamped]) - int(ata_to_hxb2[int(s)])
-            if hxb2_len > 0:
-                gen_seg_lens_hxb2.append(hxb2_len)
     # Real CRF statistics
-    is_compound   = df_seg["subtype"].str.contains("/", regex=False)
-    df_pure       = df_seg[~is_compound]
+    is_unc  = df_seg["subtype"].map(is_uncertain)
+    df_pure = df_seg[~is_unc]
 
     real_n_bp     = (df_pure.groupby("crf").size() - 1).clip(lower=0)
     real_n_st     = df_pure.groupby("crf")["subtype"].nunique()
@@ -333,8 +332,9 @@ def compare_generated_vs_real(
         st_real_pct = n_st.value_counts(normalize=True).sort_index().values.tolist()
 
         #segment lengths
-        sl_mu = seg_lens.apply(lambda x: np.log(x)).mean()
-        sl_sigma = seg_lens.apply(lambda x: np.log(x)).std()
+        log_lens = np.log(seg_lens)
+        sl_mu = log_lens.mean()
+        sl_sigma = log_lens.std()
         bin_width = 200
 
         # 1A. Data for the bars (binned percentages)
@@ -427,7 +427,6 @@ def compare_generated_vs_real(
                                   title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">{len(gen_n_bp)} generated recombinants</sup>')
     _plot_distribution_comparison(real_n_bp, real_n_st, real_seg_lens, crf_dist_path,
                                   title=f'<b>Statistical distributions describing recombinant structure</b><br><sup style="color:gray">Data taken from LANL Sequence Database - {len(real_n_bp)} CRFs</sup>')
-
 
 def visualize_diversity(
     diversity_arrays: dict,
@@ -920,45 +919,151 @@ def _n(v, nd=1):
     s = f"{v:.{nd}f}"
     return s.rstrip("0").rstrip(".") if "." in s else s
 
-def _segments_panel(regions_aligned, hxb2_to_ata, n_total, X, sx, pw, top, lane_h, fs):
+def _uid():
+    """Random id prefix so several SVGs on the same page don't clash."""
+    return "f" + uuid.uuid4().hex[:8]
+
+
+def _st_key(st):
+    """Sort key following the ST_COLORS order, unknown subtypes go last."""
+    order = list(ST_COLORS)
+    return order.index(st) if st in order else len(order)
+
+
+def _ticks(n_total, n=10):
+    """Roughly n evenly spaced ticks, always ending exactly at n_total."""
+    step = max(1, n_total // n)
+    ticks = list(range(0, n_total + 1, step))
+    if ticks[-1] != n_total:
+        if n_total - ticks[-1] < step / 2:
+            ticks[-1] = n_total  # too close to the previous tick, swap it so labels don't overlap
+        else:
+            ticks.append(n_total)
+    return ticks
+
+
+def _x_axis(ticks, X, ml, pw, ay, fs):
+    """Draw the shared x axis line, tick marks and tick labels."""
+    out = [f'<line x1="{ml}" x2="{ml + pw}" y1="{ay}" y2="{ay}" stroke="#000" stroke-width="0.6"/>']
+    for t in ticks:
+        out.append(f'<line x1="{X(t):.1f}" x2="{X(t):.1f}" y1="{ay}" y2="{ay + 3}" '
+                   f'stroke="#000" stroke-width="0.6"/>')
+        out.append(f'<text x="{X(t):.1f}" y="{ay + fs + 4}" font-size="{fs - 1}" '
+                   f'text-anchor="middle">{t}</text>')
+    return out
+
+
+def _legend(sts, pat, ml, height, fs, mask_id=None, mask_bg="#888", mask_opacity=0.3):
+    """Draw the legend swatches, plus a Masked swatch if mask_id is given."""
+    sw = fs - 1
+    y = height - sw - 4
+    lx = ml
+    out = []
+    for st in sts:
+        c, p = ST_COLORS.get(st, "#CCCCCC"), pat.get(st)
+        out.append(f'<rect x="{lx:.1f}" y="{y}" width="{sw}" height="{sw}" fill="{c}" '
+                   f'stroke="#555" stroke-width="0.4"/>')
+        if p:
+            out.append(f'<rect x="{lx:.1f}" y="{y}" width="{sw}" height="{sw}" fill="url(#p-{p})"/>')
+        out.append(f'<text x="{lx + sw + 3:.1f}" y="{height - 5}" font-size="{fs - 1}">{escape(st)}</text>')
+        lx += sw + 14 + 0.6 * (fs - 1) * len(st)
+    if mask_id:
+        # same look as in the panel, translucent background with the hatch on top
+        out.append(f'<rect x="{lx:.1f}" y="{y}" width="{sw}" height="{sw}" fill="{mask_bg}" '
+                   f'fill-opacity="{mask_opacity:g}"/>')
+        out.append(f'<rect x="{lx:.1f}" y="{y}" width="{sw}" height="{sw}" fill="url(#{mask_id})" '
+                   f'stroke="#000" stroke-width="0.4"/>')
+        out.append(f'<text x="{lx + sw + 3:.1f}" y="{height - 5}" font-size="{fs - 1}">Masked</text>')
+    return out
+
+
+def _mask_runs(mask, n_total, hatch_value=False):
+    """Return (start, end) runs where mask equals hatch_value, end not included."""
+    m = np.asarray(mask, dtype=bool)
+    if m.ndim != 1 or len(m) != n_total:
+        raise ValueError(f"mask has shape {m.shape}, expected ({n_total},)")
+    hit = (m == hatch_value).astype(np.int8)
+    edges = np.diff(np.r_[0, hit, 0])
+    return list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
+
+
+def _svg_open(width, height):
+    """Opening svg tag with the size and font set."""
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+            f'viewBox="0 0 {width} {height}" font-family="Helvetica, Arial, sans-serif">')
+
+
+def _segments_panel(regions_aligned, hxb2_to_ata, n_total, X, sx, pw, top, lane_h, fs,
+                    uid, mask=None, hatch_value=False, use_patterns=True,
+                    mask_bg="#888", mask_opacity=0.3):
+    """Draw the 3 frame gene panel colored by subtype, with optional mask hatching.
+
+    use_patterns turns the subtype textures on or off. Masked stretches get a translucent
+    band plus hatching inside the gene boxes.
+    Returns the svg parts, the subtypes present, their patterns and the mask pattern id.
+    """
     H3 = 3 * lane_h
     Y = lambda y: top + (1 - y) * H3
     arr = _subtype_array(regions_aligned, n_total)
     entries = _gene_entries(hxb2_to_ata, n_total)
 
-    by_st, outlines, seen = defaultdict(list), [], []
+    def box(s, e, frame):
+        # one place for the box geometry so fills, mask and outlines always line up
+        y0, y1 = FRAME_LANES[frame]
+        w = (e - s) * sx
+        h = (y1 - y0 - 2 * PAD) * H3
+        return f"M{_n(X(s))} {_n(Y(y1 - PAD))}h{_n(w)}v{_n(h)}h-{_n(w)}z"
+
+    by_st, outlines = defaultdict(list), []
     for g in entries:
-        y0, y1 = FRAME_LANES[g["frame"]]
-        yt, h = Y(y1 - PAD), (y1 - y0 - 2 * PAD) * H3
-        w = (g["e"] - g["s"]) * sx
-        outlines.append(f"M{_n(X(g['s']))} {_n(yt)}h{_n(w)}v{_n(h)}h-{_n(w)}z")
+        outlines.append(box(g["s"], g["e"], g["frame"]))
         for val, pos, n in _gene_runs(arr, g["s"], g["e"]):
             if val:
-                if val not in seen:
-                    seen.append(val)
-                by_st[val].append(
-                    f"M{_n(X(pos))} {_n(yt)}h{_n(n * sx)}v{_n(h)}h-{_n(n * sx)}z")
+                by_st[val].append(box(pos, pos + n, g["frame"]))
 
-    order = list(ST_COLORS)
-    present = sorted((s for s in seen if s != "U"),
-                    key=lambda s: order.index(s) if s in order else len(order))
-    pat = {st: _PATTERN_CYCLE[i % len(_PATTERN_CYCLE)] for i, st in enumerate(present)}
+    mask_runs = _mask_runs(mask, n_total, hatch_value) if mask is not None else []
+    mask_parts = []
+    for ms, me in mask_runs:
+        for g in entries:
+            s, e = max(ms, g["s"]), min(me, g["e"])
+            if s < e:
+                mask_parts.append(box(s, e, g["frame"]))
+
+    present = sorted((s for s in by_st if s != "U"), key=_st_key)
+    if use_patterns:
+        pat = {st: _PATTERN_CYCLE[i % len(_PATTERN_CYCLE)] for i, st in enumerate(present)}
+    else:
+        pat = {st: None for st in present}
     pat["U"] = None
-
-    labels, connectors = _label_layout(entries, n_total, pw, fs=fs, lane_h=lane_h)
-    anchor = {"left": "start", "center": "middle", "right": "end"}
 
     out = []
     for k, (st, parts) in enumerate(by_st.items()):
         d = "".join(parts)
         c = ST_COLORS.get(st, "#CCCCCC")
-        if pat[st]:
-            out.append(f'<defs><path id="s{k}" d="{d}"/></defs>')
-            out.append(f'<use href="#s{k}" fill="{c}" fill-opacity="0.88"/>')
-            out.append(f'<use href="#s{k}" fill="url(#p-{pat[st]})"/>')
+        if pat.get(st):
+            pid = f"{uid}_s{k}"
+            out.append(f'<defs><path id="{pid}" d="{d}"/></defs>')
+            out.append(f'<use href="#{pid}" fill="{c}" fill-opacity="0.88"/>')
+            out.append(f'<use href="#{pid}" fill="url(#p-{pat[st]})"/>')
         else:
             out.append(f'<path fill="{c}" fill-opacity="0.88" d="{d}"/>')
+
+    mask_id = None
+    if mask_parts:
+        mask_id = f"{uid}_mask"
+        out.append(f'<defs><pattern id="{mask_id}" width="3" height="3" '
+                   f'patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse">'
+                   f'<line x1="0" y1="0" x2="0" y2="3" stroke="#000" stroke-width="1.2"/>'
+                   f'</pattern></defs>')
+        # translucent background and hatch share the same boxes, so they stay inside the genes
+        d = "".join(mask_parts)
+        out.append(f'<path fill="{mask_bg}" fill-opacity="{mask_opacity:g}" d="{d}"/>')
+        out.append(f'<path fill="url(#{mask_id})" d="{d}"/>')
+
     out.append(f'<path fill="none" stroke="#000" stroke-width="0.5" d="{"".join(outlines)}"/>')
+
+    labels, connectors = _label_layout(entries, n_total, pw, fs=fs, lane_h=lane_h)
+    anchor = {"left": "start", "center": "middle", "right": "end"}
     for pts in connectors:
         p = " ".join(f"{X(x):.1f},{Y(y):.1f}" for x, y in pts)
         out.append(f'<polyline points="{p}" fill="none" stroke="#000" stroke-width="0.6"/>')
@@ -966,41 +1071,53 @@ def _segments_panel(regions_aligned, hxb2_to_ata, n_total, X, sx, pw, top, lane_
         base_attr = {"center": 'dominant-baseline="central"',
                      "top": 'dominant-baseline="hanging"'}.get(va, "")
         out.append(f'<text x="{X(x):.1f}" y="{Y(y):.1f}" font-size="{fs}" text-anchor="{anchor[ha]}" '
-                   f'{base_attr} stroke="#fff" stroke-width="1.2" stroke-opacity="0.7" paint-order="stroke">{escape(txt)}</text>')
+                   f'{base_attr} stroke="#fff" stroke-width="1.2" stroke-opacity="0.7" '
+                   f'paint-order="stroke">{escape(txt)}</text>')
     for f, (y0, y1) in FRAME_LANES.items():
-        out.append(f'<text x="{X(0) - 4}" y="{Y((y0 + y1) / 2):.1f}" font-size="{fs - 2}" fill="#888" '
+        out.append(f'<text x="{X(0) - 4:.1f}" y="{Y((y0 + y1) / 2):.1f}" font-size="{fs - 2}" fill="#888" '
                    f'text-anchor="end" dominant-baseline="central">F{f}</text>')
-    return out, seen, pat
+
+    return out, present, pat, mask_id
+
 
 def _lines_panel(preds_slice, pure_st_to_id_dict, n_total, X, pw, top, ph, fs,
-                 min_peak, excluded, floor=0.01, lw=1.8):
+                 min_peak, excluded, uid, floor=0.01, lw=1.8):
+    """Draw one probability curve per subtype along the genome.
+
+    Returns the svg parts and the subtypes that actually got a curve.
+    """
     Y = lambda y: top + (1 - y) * ph
     P = np.asarray(preds_slice)
     step = max(1, n_total // pw)
     idx = np.arange(0, n_total, step)
-    xs = idx + step / 2
+    xs = np.minimum(idx + step / 2, n_total)  # keep the last bin center inside the plot
 
     id_to_st = {v: k for k, v in pure_st_to_id_dict.items()}
-    out, seen = [], []
-    curves = []
+    # excluded ones (U, LTRs) can have ids past the last preds column, that's fine since we skip them
+    bad = [st for i, st in id_to_st.items() if st not in excluded and i >= P.shape[1]]
+    if bad:
+        raise ValueError(f"no preds column for subtypes {bad}, preds has {P.shape[1]} columns")
+
+    out, seen, curves = [], [], []
 
     for v in (0, 1):
         out.append(f'<line x1="{_n(X(0))}" x2="{_n(X(n_total))}" y1="{_n(Y(v))}" y2="{_n(Y(v))}" '
-                f'stroke="#bbb" stroke-width="0.5"/>')
-        out.append(f'<text x="{X(0) - 4}" y="{Y(v):.1f}" font-size="{fs - 1}" fill="#555" '
+                   f'stroke="#bbb" stroke-width="0.5"/>')
+        out.append(f'<text x="{X(0) - 4:.1f}" y="{Y(v):.1f}" font-size="{fs - 1}" fill="#555" '
                    f'text-anchor="end" dominant-baseline="central">{v:g}</text>')
     if 0 <= PROB_ZERO_THRESHOLD <= 1:
         ty = _n(Y(PROB_ZERO_THRESHOLD))
         out.append(f'<line x1="{_n(X(0))}" x2="{_n(X(n_total))}" y1="{ty}" y2="{ty}" '
-                f'stroke="#000" stroke-width="0.7" stroke-dasharray="4 3"/>')
+                   f'stroke="#000" stroke-width="0.7" stroke-dasharray="4 3"/>')
         out.append(f'<text x="{_n(X(n_total))}" y="{_n(Y(PROB_ZERO_THRESHOLD) - 2)}" '
-                f'font-size="{fs - 2}" fill="#000" text-anchor="end">thr = {PROB_ZERO_THRESHOLD:g}</text>')
-    for i in range(len(id_to_st)):
-        st = id_to_st[i]
+                   f'font-size="{fs - 2}" fill="#000" text-anchor="end">thr = {PROB_ZERO_THRESHOLD:g}</text>')
+
+    for i, st in sorted(id_to_st.items()):
         if st in excluded or P[:, i].max() <= min_peak:
             continue
         ys = np.maximum.reduceat(P[:, i], idx)
         on = ys > floor
+        # widen by one bin each side so curves come down to zero instead of stopping in the air
         m = on.copy()
         m[1:] |= on[:-1]
         m[:-1] |= on[1:]
@@ -1008,26 +1125,33 @@ def _lines_panel(preds_slice, pure_st_to_id_dict, n_total, X, pw, top, ph, fs,
         edges = np.diff(np.r_[0, m.astype(int), 0])
         d = []
         for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+            # drop points sitting in the middle of flat stretches, they add nothing
             keep = [j for j in range(a, b)
                     if j in (a, b - 1) or not (yy[j] == yy[j - 1] == yy[j + 1])]
             d.append("M" + " ".join(f"{_n(X(xs[j]), 0)},{_n(yy[j])}" for j in keep))
         if d:
             curves.append((ST_COLORS.get(st, "#CCCCCC"), "".join(d)))
             seen.append(st)
-    out.append("<defs>" + "".join(f'<path id="l{k}" d="{d}"/>'
-               for k, (_, d) in enumerate(curves)) + "</defs>")
-    out.append(f'<g fill="none" stroke="#000" stroke-opacity="0.6" stroke-width="{lw + 1.2:g}" '
-               'stroke-linejoin="round">'
-               + "".join(f'<use href="#l{k}"/>' for k in range(len(curves))) + "</g>")
-    out.append(f'<g fill="none" stroke-width="{lw:g}" stroke-linejoin="round">'
-               + "".join(f'<use href="#l{k}" stroke="{c}"/>'
-                         for k, (c, _) in enumerate(curves)) + "</g>")
+
+    if curves:
+        out.append("<defs>" + "".join(f'<path id="{uid}_l{k}" d="{d}"/>'
+                   for k, (_, d) in enumerate(curves)) + "</defs>")
+        # dark halo first, then the colored lines on top
+        out.append(f'<g fill="none" stroke="#000" stroke-opacity="0.6" stroke-width="{lw + 1.2:g}" '
+                   'stroke-linejoin="round">'
+                   + "".join(f'<use href="#{uid}_l{k}"/>' for k in range(len(curves))) + "</g>")
+        out.append(f'<g fill="none" stroke-width="{lw:g}" stroke-linejoin="round">'
+                   + "".join(f'<use href="#{uid}_l{k}" stroke="{c}"/>'
+                             for k, (c, _) in enumerate(curves)) + "</g>")
     return out, seen
 
+
 def visualize_combined_light(regions_aligned, hxb2_to_ata, preds_slice, pure_st_to_id_dict,
-                            n_total, path, width=1100, lines_h=150, lane_h=24, fs=12,
-                            min_peak=0.3, excluded=frozenset({"U", "5'LTR", "3'LTR"}),
-                            gap=10, floor=0.01, lw=1.4):
+                             n_total, path, width=1100, lines_h=150, lane_h=24, fs=12,
+                             min_peak=0.3, excluded=frozenset({"U", "5'LTR", "3'LTR"}),
+                             gap=10, floor=0.01, lw=1.4):
+    """Write the full figure, probability curves on top and gene segments below."""
+    uid = _uid()
     ml, mr, top = 40, 20, 8
     pw = width - ml - mr
     sx = pw / n_total
@@ -1039,54 +1163,69 @@ def visualize_combined_light(regions_aligned, hxb2_to_ata, preds_slice, pure_st_
     ay = seg_top + H3 + lab_pad + 2
     height = ay + fs * 3 + 8
 
+    # zero the predictions outside the region actually covered by the sequence
     arr = _subtype_array(regions_aligned, n_total)
     cov = np.flatnonzero([bool(v) for v in arr])
-    P = np.array(preds_slice, copy=True)
+    P = np.array(preds_slice, dtype=float, copy=True)
     if cov.size:
         P[:cov.min()] = 0
         P[cov.max() + 1:] = 0
 
-    line_out, line_seen = _lines_panel(P, pure_st_to_id_dict, n_total, X, pw,
-                                       top, lines_h, fs, min_peak, excluded, floor, lw)
-    seg_out, seg_seen, pat = _segments_panel(regions_aligned, hxb2_to_ata, n_total, X, sx,
-                                             pw, seg_top, lane_h, fs)
-    legend_sts = seg_seen + [s for s in line_seen if s not in seg_seen]
+    line_out, line_seen = _lines_panel(P, pure_st_to_id_dict, n_total, X, pw, top, lines_h,
+                                       fs, min_peak, excluded, uid, floor, lw)
+    seg_out, seg_present, pat, _ = _segments_panel(regions_aligned, hxb2_to_ata, n_total, X, sx,
+                                                   pw, seg_top, lane_h, fs, uid)
+    legend_sts = seg_present + sorted((s for s in line_seen
+                                       if s not in seg_present and s != "U"), key=_st_key)
 
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-           f'viewBox="0 0 {width} {height}" font-family="Helvetica, Arial, sans-serif">',
-           _PATTERN_DEFS]
-
-    # vertical gridlines through the line panel
-    step = max(1, n_total // 10)
-    ticks = range(0, n_total + 1, step)
-    for t in ticks:
+    ticks = _ticks(n_total)
+    out = [_svg_open(width, height), _PATTERN_DEFS]
+    for t in ticks:  # light vertical gridlines behind the curves
         out.append(f'<line x1="{X(t):.1f}" x2="{X(t):.1f}" y1="{top}" y2="{top + lines_h}" '
                    f'stroke="#eee" stroke-width="0.5"/>')
-
     out.extend(line_out)
     out.extend(seg_out)
-
-    # shared x axis
-    out.append(f'<line x1="{ml}" x2="{ml + pw}" y1="{ay}" y2="{ay}" stroke="#000" stroke-width="0.6"/>')
-    for t in ticks:
-        out.append(f'<line x1="{X(t):.1f}" x2="{X(t):.1f}" y1="{ay}" y2="{ay + 3}" stroke="#000" stroke-width="0.6"/>')
-        out.append(f'<text x="{X(t):.1f}" y="{ay + fs + 4}" font-size="{fs - 1}" text-anchor="middle">{t}</text>')
-
-    # shared legend (colour + texture where the segment panel uses one)
-    sw = fs - 1
-    lx = ml
-    for st in legend_sts:
-        c, p = ST_COLORS.get(st, "#CCCCCC"), pat.get(st)
-        out.append(f'<rect x="{lx}" y="{height - sw - 4}" width="{sw}" height="{sw}" fill="{c}" stroke="#555" stroke-width="0.4"/>')
-        if p:
-            out.append(f'<rect x="{lx}" y="{height - sw - 4}" width="{sw}" height="{sw}" fill="url(#p-{p})"/>')
-        out.append(f'<text x="{lx + sw + 3}" y="{height - 5}" font-size="{fs - 1}">{escape(st)}</text>')
-        lx += sw + 14 + 0.6 * (fs - 1) * len(st)
-
+    out.extend(_x_axis(ticks, X, ml, pw, ay, fs))
+    out.extend(_legend(legend_sts, pat, ml, height, fs))
     out.append("</svg>")
+
     with open(path, "w") as f:
         f.write("\n".join(out))
 
+
+def visualize_segment_and_mask_panel(regions_aligned, mask_slice, hxb2_to_ata, n_total, path,
+                                     width=1100, lane_h=24, fs=12, hatch_value=False,
+                                     mask_bg="#888", mask_opacity=0.3):
+    """Write the gene segment figure with masked regions shaded and hatched, no subtype textures.
+
+    Positions where mask_slice equals hatch_value get masked, so pass True if True means masked.
+    """
+    uid = _uid()
+    ml, mr, top = 40, 20, 8
+    pw = width - ml - mr
+    sx = pw / n_total
+    X = lambda x: ml + x * sx
+
+    lab_pad = fs // 4
+    seg_top = top + lab_pad
+    H3 = 3 * lane_h
+    ay = seg_top + H3 + lab_pad + 2
+    height = ay + fs * 3 + 8
+
+    seg_out, seg_present, pat, mask_id = _segments_panel(
+        regions_aligned, hxb2_to_ata, n_total, X, sx, pw, seg_top, lane_h, fs, uid,
+        mask=mask_slice, hatch_value=hatch_value, use_patterns=False,
+        mask_bg=mask_bg, mask_opacity=mask_opacity)
+
+    out = [_svg_open(width, height)]  # no _PATTERN_DEFS needed since textures are off
+    out.extend(seg_out)
+    out.extend(_x_axis(_ticks(n_total), X, ml, pw, ay, fs))
+    out.extend(_legend(seg_present, pat, ml, height, fs, mask_id=mask_id,
+                       mask_bg=mask_bg, mask_opacity=mask_opacity))
+    out.append("</svg>")
+
+    with open(path, "w") as f:
+        f.write("\n".join(out))
 
 def visualize_region_comparison(
     seq_id: str,
@@ -1429,8 +1568,8 @@ def parse_fasta_headers(filepath):
             # Normalize 2-digit years
             if re.fullmatch(r"\d{2}", year_str):
                 yy = int(year_str)
-                # Heuristic: 00-26 → 2000s, 27-99 → 1900s
-                year = 2000 + yy if yy <= 26 else 1900 + yy
+                # Heuristic: 00-50 → 2000s, 51-99 → 1900s
+                year = 2000 + yy if yy <= 50 else 1900 + yy
             elif re.fullmatch(r"\d{4}", year_str):
                 year = int(year_str)
             else:
@@ -1954,7 +2093,7 @@ def pie_infections_sequences_dist(plot_df_path, xlsx_path, save_path):
         rows=1, cols=2,
         specs=[[{'type': 'domain'}, {'type': 'domain'}]],
         subplot_titles=(
-            f"LANL HIV Database Sequences ({n_total_left:,} sequences)",
+            f"LANL HIV Database Sequences<br><sup>{n_total_left:,} sequences</sup>",
             "Global infections, 2020–24<br><sup>Khalid et al., 2026</sup>"
         )
     )
@@ -1963,7 +2102,6 @@ def pie_infections_sequences_dist(plot_df_path, xlsx_path, save_path):
         labels=left_counts['Subtype Group'], values=left_counts['Count'], sort=False,
         marker=dict(colors=[colour_map.get(l, '#a6a6a6') for l in left_counts['Subtype Group']],
                     line=dict(color='#FFFFFF', width=0.5)),
-        # texttemplate="<b>%{label}</b><br>%{value:,}<br>(%{percent})",
         texttemplate="<b>%{label}</b><br>(%{percent})",
         textposition='auto',
         hole=0.3,
@@ -1989,9 +2127,9 @@ def pie_infections_sequences_dist(plot_df_path, xlsx_path, save_path):
     fig.update_layout(
         template="plotly_white",
         title_text='<b>Distribution of HIV-1 subtypes</b>',
-        legend=dict(title="<b>Sequence group</b>", orientation="v",
-                    yanchor="middle", y=0.5, xanchor="left", x=1.02,
-                    bgcolor="rgba(255,255,255,0.8)", bordercolor="lightgray", borderwidth=1),
+        # legend=dict(title="<b>Sequence group</b>", orientation="v",
+        #             yanchor="middle", y=0.5, xanchor="left", x=1.02,
+        #             bgcolor="rgba(255,255,255,0.8)", bordercolor="lightgray", borderwidth=1),
         margin=dict(t=120, b=40, l=40, r=160),
         width=1500, height=650,
         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
@@ -2308,7 +2446,7 @@ if __name__ == "__main__":
     plot_time_per_10k(processing_times, save_path_time)
 
     # subtyping results comparison
-    tools=['comet', 'regav3', 'sbtr']
+    tools=['comet', 'regav3', 'sbtr', 'jphmm']
     genes=['full', 'prot']
     base_path = f"{workspace_path}/data/input_sequences/regav3_testset"
 
@@ -2337,6 +2475,21 @@ if __name__ == "__main__":
         tool_dfs, tools=tools, genes=genes, save_path=save_path,
         metrics=["sensitivity", "precision"], subtypes=subtypes)
 
+    lanl_full_md_path='/pasteur/helix/projects/mPath/oanoufa/sbtr/data/input_sequences/lanl_full/metadata_FULL.tsv'
+    khalid_et_al_data='/pasteur/helix/projects/mPath/oanoufa/sbtr/data/input_sequences/lanl_full/Khalid_2026_HIV1_Tables1_2.xlsx'
+    save_path=f"{workspace_path}/figs/pie_subtype_infections.html"
+    pie_infections_sequences_dist(
+        plot_df_path=lanl_full_md_path,
+        xlsx_path=khalid_et_al_data,
+        save_path=save_path)
+
+    save_path=f"{workspace_path}/figs/infection_map.html"
+    infection_map(
+        xlsx_path=khalid_et_al_data,
+        save_path=save_path,
+        max_pie_diameter=0.25,
+        min_pie_diameter=0.03)
+
 
     path_to_results=f'/pasteur/helix/projects/mPath/oanoufa/sbtr/data/output/test/syn_v{VERSION}/matching_scores_per_subtype.csv'
     df = pd.read_csv(path_to_results)
@@ -2353,18 +2506,3 @@ if __name__ == "__main__":
         save_path=save_path,
         metrics=("sensitivity", "precision"),
     )
-
-    lanl_full_md_path='/pasteur/helix/projects/mPath/oanoufa/sbtr/data/input_sequences/lanl_full/metadata_FULL.tsv'
-    khalid_et_al_data='/pasteur/helix/projects/mPath/oanoufa/sbtr/data/input_sequences/lanl_full/Khalid_2026_HIV1_Tables1_2.xlsx'
-    save_path=f"{workspace_path}/figs/pie_subtype_infections.html"
-    pie_infections_sequences_dist(
-        plot_df_path=lanl_full_md_path,
-        xlsx_path=khalid_et_al_data,
-        save_path=save_path)
-
-    save_path=f"{workspace_path}/figs/infection_map.html"
-    infection_map(
-        xlsx_path=khalid_et_al_data,
-        save_path=save_path,
-        max_pie_diameter=0.25,
-        min_pie_diameter=0.03)

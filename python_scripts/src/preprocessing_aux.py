@@ -1,46 +1,21 @@
-# "parse_lanl.py"
-"""Clean and split LANL HIV reference sequences by subtype."""
+"""
+Auxiliary functions for preprocessing sequences.
+"""
 
+import sys
+from Bio import SeqIO
+from Bio.Seq import Seq
+from python_scripts.src import config
+from pathlib import Path
+import subprocess
 import re
 import pandas as pd
-import requests
-import urllib3
-import os
-from bs4 import BeautifulSoup
-from pathlib import Path
+from bs4 import BeautifulSoup, Tag
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 import numpy as np
-from Bio import SeqIO
-import tempfile
-from argparse import ArgumentParser
 
 from python_scripts.src import config
 
-WORKSPACE_PATH = config.WORKSPACE_PATH
-ATA_LEN = config.ATA_LEN
-
-parser = ArgumentParser()
-parser.add_argument("--input",    type=str,
-                    default=f"{WORKSPACE_PATH}/data/output/LANL_COMBINED.fasta",
-                    help="Input combined LANL alignment (FASTA)")
-parser.add_argument("--pure_out", type=str,
-                    default=f"{WORKSPACE_PATH}/data/output/HIV1_PURE_REF.fasta",
-                    help="Output pure-subtype reference alignment (FASTA)")
-parser.add_argument("--crf_out",  type=str,
-                    default=f"{WORKSPACE_PATH}/data/output/HIV1_CRF_REF.fasta",
-                    help="Output CRF reference alignment (FASTA)")
-parser.add_argument("--combined_out", type=str,
-                    default=f"{WORKSPACE_PATH}/data/output/HIV1_COMBINED_REF.fasta",
-                    help="Output combined reference alignment (FASTA)")
-
-args = parser.parse_args()
-
-lanl_subtype_ref_path = args.input
-pure_ref_path    = args.pure_out
-crf_ref_path     = args.crf_out
-combined_ref_path = args.combined_out
-
-urllib3.disable_warnings()
 
 ST_TO_ID_DICT = config.ST_TO_ID_DICT
 # Harmonising dict for breakpoints taken from LANL
@@ -80,6 +55,7 @@ _CRF01_AE_RE = re.compile(r"^(CRF)?01[_-]?AE$",   re.IGNORECASE)
 _CRF26_A5U_RE= re.compile(r"^(CRF)?26[_-]?A5U?$", re.IGNORECASE)
 _HXB2_ID     = "HXB2_LAI_IIIB_BRU.K03455"
 _PURE_ST: FrozenSet[str] = frozenset(ST_TO_ID_DICT.keys()) # | {'A', 'F'}
+
 
 # Subtype normalisation helpers (breakpoint file parsing)
 def normalize_subtype(raw: str) -> str:
@@ -223,86 +199,115 @@ def parse_breakpoints_file(filepath):
     df_breakpoints = pd.DataFrame(breakpoints)
     return df_segments, df_breakpoints
 
+def _read_html(path):
+    """Read a saved HTML file. Browsers may save it as UTF-8 or as the
+    original ISO-8859-1, so try UTF-8 first and fall back to cp1252."""
+    raw = Path(path).read_bytes()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252")
 
-def scrape_and_parse_lanl_breakpoints(output_path):
-    path = "https://www.hiv.lanl.gov/components/sequence/HIV/crfdb/crfs.comp"
-    r = requests.get(path, verify=False)
-    html_content = r.content.decode('utf-8')
-    soup = BeautifulSoup(html_content, 'html.parser')
-    L = soup.find_all("pre")
-    r.close()
-    segment_re   = re.compile(r'^(\d+)\s+(\d+)\s+(\S+)')
-    blocks_written = 0
 
-    with open(output_path, 'w') as out:
-        out.write(
-            "# Breakpoints from Los Alamos HIV sequence database:\n"
-            "# https://www.hiv.lanl.gov/content/sequence/HIV/CRFs/breakpoints.html\n\n\n"
+def scrape_and_parse_lanl_breakpoints(
+    output_path,
+    html_path="HIV_Circulating_Recombinant_Forms__CRFs_.html",
+    verbose=True,
+):
+    soup = BeautifulSoup(_read_html(html_path), "html.parser")
+
+    # Page version, so you know which snapshot the output came from
+    m_date = re.search(r"last modified:\s*(.+)", soup.get_text())
+    page_date = m_date.group(1).strip() if m_date else "unknown"
+
+    rows = soup.find_all("tr", id=re.compile(r"^tgl_"))
+    if not rows:
+        raise RuntimeError(
+            f"No CRF rows (tr id='tgl_*') found in {html_path}. "
+            "Is this the right file / did the page layout change?"
         )
 
-        for pre in L:
-            parent_tr = pre.find_parent('tr')
-            if parent_tr is None:
-                continue
-            tgl_id = parent_tr.get('id', '')
-            if not tgl_id.startswith('tgl_'):
-                continue
-            crf_name = tgl_id[4:]
+    segment_re = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\S+)")
+    crf_re = re.compile(r"CRF_?(\d+)(?:[_-]?(\w+))?", re.IGNORECASE)
 
-            # Capture the number AND optional suffix (e.g., '01', '01_AE', '55_01B')
-            m_num = re.match(r'CRF_?(\d+)(?:[_-]?(\w+))?', crf_name, re.IGNORECASE)
+    blocks_written = 0
+    skipped = {"hiv2": [], "bad_name": [], "no_segments": []}
+
+    with open(output_path, "w", encoding="utf-8") as out:
+        out.write(
+            "# Breakpoints from Los Alamos HIV sequence database:\n"
+            "# https://www.hiv.lanl.gov/components/sequence/HIV/crfdb/crfs.comp\n"
+            f"# Parsed from local copy: {Path(html_path).name}\n"
+            f"# Page last modified: {page_date}\n\n\n"
+        )
+
+        for row in rows:
+            crf_name = row["id"][4:]
+
+            # HIV-2 CRFs use Mac239 coordinates, not HXB2, so skip them
+            if crf_name.upper().startswith("HIV2"):
+                skipped["hiv2"].append(crf_name)
+                continue
+
+            m_num = crf_re.match(crf_name)
             if m_num is None:
+                skipped["bad_name"].append(crf_name)
                 continue
 
             num_str = m_num.group(1).zfill(2)
-            suffix  = m_num.group(2)
-
-            # Reconstruct into XX_XX format
+            suffix = m_num.group(2)
             crf_key = f"{num_str}_{suffix}" if suffix else num_str
+            crf_key = CRF_CANONICAL.get(crf_key, crf_key)
 
-            parent_td   = pre.parent
-            comment_parts = []
-            for child in parent_td.children:
+            pre = row.find("pre")
+            if pre is None:
+                skipped["no_segments"].append(crf_name)
+                continue
+
+            # Comment = the "Breakpoints from ..." note, i.e. the text
+            # between the last <br> and the <pre>
+            note_parts = []
+            for child in pre.parent.children:
                 if child is pre:
                     break
-                text = child.get_text(separator=' ') if hasattr(child, 'get_text') else str(child)
-                comment_parts.append(text)
-            raw_comment  = re.sub(r'\s+', ' ', ' '.join(comment_parts)).strip()
-            m_bp         = re.search(r'(Breakpoints?\s+.*)', raw_comment, re.IGNORECASE)
-            comment_line = m_bp.group(1).strip() if m_bp else ''
+                if isinstance(child, Tag) and child.name == "br":
+                    note_parts = []  # keep only what follows the last <br>
+                    continue
+                note_parts.append(
+                    child.get_text(" ") if isinstance(child, Tag) else str(child)
+                )
+            comment_line = re.sub(r"\s+", " ", "".join(note_parts)).strip()
 
-            crf_key = CRF_CANONICAL.get(crf_key, crf_key)
+            # Segment lines (works with <br> or newline separators)
+            for br in pre.find_all("br"):
+                br.replace_with("\n")
+
+            seg_lines = []
+            for line in pre.get_text().splitlines():
+                sm = segment_re.match(line)
+                if sm:
+                    label = sm.group(3)
+                    if num_str == "26" and label == "A":
+                        label = "A5"
+                    seg_lines.append(f"{sm.group(1)}\t{sm.group(2)}\t{label}")
+
+            if not seg_lines:
+                skipped["no_segments"].append(crf_name)
+                continue
+
             header_line = f">{crf_key}"
             if comment_line:
                 header_line += f" # {comment_line}"
 
-            raw_lines = [str(br.previous_sibling or '').strip()
-                         for br in pre.find_all('br')]
-            if list(pre.children):
-                last = list(pre.children)[-1]
-                raw_lines.append(str(last).strip() if last else '')
+            out.write(header_line + "\n" + "\n".join(seg_lines) + "\n\n")
+            blocks_written += 1
 
-                seg_lines = []
-                for raw in raw_lines:
-                    sm = segment_re.match(raw)
-                    if sm:
-                        label = sm.group(3)
-                        if num_str == "26" and label == "A":
-                            label = "A5"
-                        seg_lines.append(f"{sm.group(1)}\t{sm.group(2)}\t{label}")
-
-                if not seg_lines:
-                    continue
-
-                out.write(header_line + "\n")
-                for sl in seg_lines:
-                    out.write(sl + "\n")
-                out.write("\n")
-                blocks_written += 1
-            else:
-                print(f"No segment lines found for {crf_name}")
-
-    print(f"Written {blocks_written} CRF blocks to {output_path}")
+    print(f"Written {blocks_written} CRF blocks to {output_path} "
+          f"(page last modified: {page_date})")
+    if verbose:
+        for reason, names in skipped.items():
+            if names:
+                print(f"  Skipped ({reason}): {', '.join(names)}")
 
 
 
@@ -359,36 +364,6 @@ def convert_hxb2_df_to_aln(
         out['length'] = out['end'] - out['start'] + 1
 
     return out
-
-
-# Record classification helpers
-def _extract_subtype(record_id: str) -> Optional[str]:
-    parts = record_id.split(".")
-    if len(parts) >= 2 and parts[0].lower() == "ref":
-        st = parts[1]
-    else:
-        st = parts[0]
-    # A should be A1
-    if st.upper() == "A":
-        return "A1"
-    else:
-        return st
-
-def _is_pure_subtype(subtype: Optional[str]) -> bool:
-    if not subtype:
-        return False
-    return subtype in _PURE_ST
-
-def _is_crf(subtype: Optional[str]) -> bool:
-    if not subtype:
-        return False
-    return bool(_CRF_RE.match(subtype))
-
-def _is_crf01_ae(subtype: Optional[str]) -> bool:
-    return bool(subtype and _CRF01_AE_RE.match(subtype))
-
-def _is_crf26_a5u(subtype: Optional[str]) -> bool:
-    return bool(subtype and _CRF26_A5U_RE.match(subtype))
 
 # CRF label-sequence construction
 def _crf_df_key(label: str, df_by_crf: Dict[str, pd.DataFrame]) -> Optional[str]:
@@ -614,7 +589,8 @@ def build_all_crf_label_sequences(
     label_seqs = dict(sorted(label_seqs.items(), key=lambda x: int(re.match(r'^(?:CRF)?(\d+)', x[0]).group(1))))
     # Add Pure subtypes as their own entries in label_seqs
     for pure in _PURE_ST:
-        label_seqs[pure] = np.full(aln_len, pure, dtype=object)
+        if not pure in ['E', 'A5']:
+            label_seqs[pure] = np.full(aln_len, pure, dtype=object)
 
     return label_seqs
 
@@ -664,236 +640,162 @@ def label_sequences_to_segments_csv(
     df.to_csv(output_path, index=False)
     return df
 
-# Alignment preparation
-def validate_record_id(record_id: str) -> bool:
-    """Check if a LANL record ID is in the expected format.
-    Expected format: 'Ref.SUBTYPE.COUNTRY.YY.NAME.ACCESSION',
-    e.g. 'Ref.A1.CD.87.P4039.MH705157'.
 
-    Parameters
-    ----------
-    record_id : str
-        The record ID to validate.
-
-    Returns
-    -------
-    bool
-        True if the ID matches the expected format, False otherwise.
+def parse_compactmapout(
+    compactmapout_path: Path,
+    ) -> Dict[str, List[int]]:
     """
-
-    # Record should be like 'Ref.A1.CD.87.P4039.MH705157' for instance.
-    parts = record_id.split('.')
-    # Should have at least 4 elements
-    if len(parts) < 5:
-        return False
-    # Country code should be 2 letters in caps
-    # if not re.match(r'^[A-Z]{2}$', parts[2]):
-    #     return False
-    # Year should be 2 digits
-    if not re.match(r'^\d{2}$', parts[3]):
-        return False
-    return True
+    Parse the MAFFT compactmapout file to get the mapping from aligned positions to original positions.
+    Returns a dictionary where keys are sequence names and values are lists of original positions.
     
-def prepare_pure_alignment(lanl_alignment_path: str,
-                           pure_alignment_path: str,
-                           crf_alignment_path: str,
-                           combined_alignment_path: str,
-                           ):
+    The file is structured as follows:
+    
+    # Insertion in added sequence > Position in reference
+    >r_K+G+C_2013
+    2433c - 2444g > 7810v7811
+    >r_A7+C+F2_2019
+    8584a - 8590g > 10908v10909
+    8605a - 8607a > 10966v10967
+    8618g - 8626t > 10995v10996
+    8756t - 8756t > 11220v11221
+
+    The goal is to output a dictionary of sample_name:
     """
-    Read the (already trimmed) LANL reference alignment and separate pure
-    subtypes from CRFs. Column selection, including protection of all HXB2
-    columns, is done upstream by select_cols.py.
+    mapping = {}
+    with open(compactmapout_path, 'r') as f:
+        for line in f:
+            if line.startswith('#'):
+                continue
+            if line.startswith('>'):
+                seq_name = line[1:].strip()
+                mapping[seq_name] = []
+            else:
+                parts = line.strip().split('>')
+                start_pos = parts[0].split('-')[0].strip()[:-1]  # Get the start position
+                end_pos = parts[0].split('-')[1].strip()[:-1]    # Get the end position
+                ata_pos = parts[1].strip().split('v')[0]  # Get the ATA position
+                mapping[seq_name].append((int(ata_pos), int(start_pos), int(end_pos)))  # Store as a tuple of (ATA position, start, end)
+
+    return mapping
+
+
+def dealign_to_records(input_path: Path) -> List:
     """
-    original_records = list(SeqIO.parse(lanl_alignment_path, "fasta"))
-    if not original_records:
-        raise ValueError(f"No sequences found in '{lanl_alignment_path}'.")
+    Automatically detects format (FASTA, FASTQ, PHYLIP, NEXUS, CLUSTAL),
+    strips gaps/dots from alignments or unaligned sequences, and produces 
+    query records ready to be aligned to the reference with MAFFT.
+    """
+    parsed_records = None
+    format_used = None
 
-    hxb2_id = next((r.id for r in original_records if _HXB2_ID in r.id), None)
-    if hxb2_id is None:
-        raise ValueError(f"HXB2 not found. Expected a record whose ID contains: {_HXB2_ID}.")
-    hxb2_ata = next(str(r.seq).upper() for r in original_records if r.id == hxb2_id)
-
-    if len(hxb2_ata) != ATA_LEN:
-        raise ValueError(f"Alignment has {len(hxb2_ata)} columns, config.ATA_LEN is {ATA_LEN}.")
-    n_hxb2 = sum(c != "-" for c in hxb2_ata)
-    if n_hxb2 != _HXB2_USED_LEN:
-        raise ValueError(f"HXB2 has {n_hxb2} residues, expected {_HXB2_USED_LEN} "
-                         f"(HXB2 {HXB2_FIRST_POS}-{HXB2_FIRST_POS + _HXB2_USED_LEN - 1}).")
-
-    # Build coordinate maps from the final HXB2 row
-    ata_to_hxb2, hxb2_to_ata = config.build_hxb2_ata_maps(hxb2_ata)
-    #  print the mapping as a csv with columns: ata_pos, hxb2_pos 
-    mapping_path = config.MAPPING_PATH
-    with open(mapping_path, "w") as f:
-        f.write("ata_pos,hxb2_pos\n")
-        for ata_pos in range(ATA_LEN):
-            hxb2_pos = ata_to_hxb2[ata_pos]
-            f.write(f"{ata_pos},{hxb2_pos}\n")
-    print(f"  New ATA length              : {len(hxb2_ata)}")
-
-    # Classify and collect
-    pure_result: Dict[str, str] = {}
-    crf_result:  Dict[str, str] = {}
-    accession_names_seen: Set[str] = set()
-    pure_subtype_count: Dict[str, int] = {st: 0 for st in _PURE_ST}
-
-    for rec in original_records:
-        subtype  = _extract_subtype(rec.id)
-        old_id   = rec.id
-        year_str = old_id.split('.')[2]
-        if len(year_str) == 4:
-            year_str = year_str[2:]  # Convert 4-digit year to 2-digit if needed
-        new_id   = '.'.join(['Ref'] + [subtype] + [old_id.split('.')[1]] + [year_str] + old_id.split('.')[3:])
-        rec.id   = new_id
-        seq_str  = str(rec.seq).upper()
-        accession_name = rec.id.split('.')[-1]
-        if accession_name in accession_names_seen:
-            print(f"Warning: Duplicate accession '{accession_name}' in '{rec.id}'. Skipping.")
-            continue
-
-        if old_id == hxb2_id or rec.id == 'Ref.' + hxb2_id:
-            hxb2_id = rec.id        # update to rewritten ID
-            pure_result[rec.id] = seq_str
-            accession_names_seen.add(accession_name)
-            continue
-
-        if _is_pure_subtype(subtype):
-            if not validate_record_id(rec.id):
-                print(f"Warning: Record ID '{rec.id}' does not match expected format. Skipping.")
-                continue
-            pure_result[rec.id] = seq_str
-            pure_subtype_count[subtype] += 1
-            accession_names_seen.add(accession_name)
-            continue
-
-        if _is_crf01_ae(subtype):
-            if not validate_record_id(rec.id):
-                print(f"Warning: Record ID '{rec.id}' does not match expected format. Skipping.")
-                continue
-            arr = np.frombuffer(seq_str.encode(), dtype=np.uint8).copy()
-            # arr[~pure_e_cols] = ord("N")
-            # In the end we decided to keep the full sequence for CRF01_AE and consider it a class in itself. we simplified its structure with A1 on gag pol and AE on the rest
-            # in the very end we label E segments E and A1 segments A1 with a random blur around the breakpoints
-            masked_seq = arr.tobytes().decode()
-            new_id_e = str(rec.id).replace("01_AE", "E")
-            pure_result[new_id_e] = masked_seq
-            pure_subtype_count['E'] += 1
-            accession_names_seen.add(accession_name)
-
-        if _is_crf26_a5u(subtype):
-            if not validate_record_id(rec.id):
-                print(f"Warning: Record ID '{rec.id}' does not match expected format. Skipping.")
-                continue
-            arr = np.frombuffer(seq_str.encode(), dtype=np.uint8).copy()
-            # arr[~crf26_a_cols] = ord("N")
-            # In the end we decided to keep the full sequence for CRF26_A5U and consider it a pure subtype with class A5U
-            masked_seq = arr.tobytes().decode()
-            new_id_a = str(rec.id).replace("26_A5U", "A5").replace("26_A5", "A5")
-            pure_result[new_id_a] = masked_seq
-            pure_subtype_count['A5'] += 1
-            accession_names_seen.add(accession_name)
-
-        if _is_crf(subtype):
-            crf_result[rec.id] = seq_str
-            accession_names_seen.add(accession_name)
-
-    # Sort and write
-    def _write_fasta(path: str, primary_id: str, primary_seq: str,
-                     sequences: Dict[str, str]) -> None:
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            dir=os.path.dirname(os.path.abspath(path)),
-            suffix=".fasta"
-        )
+    # Try unaligned sequence formats (FASTA, FASTQ)
+    for fmt in ["fasta", "fastq"]:
         try:
-            with os.fdopen(tmp_fd, "w") as fh:
-                fh.write(f">{primary_id}\n{primary_seq}\n")
-                for rec_id, seq in sequences.items():
-                    if rec_id != primary_id:
-                        fh.write(f">{rec_id}\n{seq}\n")
-            os.replace(tmp_path, path)
+            with open(input_path, "r") as handle:
+                parsed = list(SeqIO.parse(handle, fmt))
+                if parsed:
+                    parsed_records = parsed
+                    format_used = fmt.upper()
+                    break
         except Exception:
-            os.unlink(tmp_path)
-            raise
+            pass
 
-    pure_result     = dict(sorted(pure_result.items(),
-                                  key=lambda x: x[0].split('.')[1]))
-    crf_result      = dict(sorted(crf_result.items(),
-                                  key=lambda x: int(x[0].split('.')[1].split('_')[0])))
-    combined_result = {**pure_result, **crf_result}
+    # Try alignment formats (PHYLIP, NEXUS, CLUSTAL) if unaligned failed
+    if not parsed_records:
+        for fmt in ["phylip", "phylip-relaxed", "nexus", "clustal"]:
+            try:
+                with open(input_path, "r") as handle:
+                    alignment = AlignIO.read(handle, fmt)
+                    if alignment:
+                        # Convert MultipleSeqAlignment into a list of SeqRecords
+                        parsed_records = list(alignment)
+                        format_used = f"Alignment ({fmt.upper()})"
+                        break
+            except Exception:
+                pass
 
-    _write_fasta(pure_alignment_path,     hxb2_id, pure_result[hxb2_id],     pure_result)
-    _write_fasta(crf_alignment_path,      hxb2_id, pure_result[hxb2_id],     crf_result)
-    _write_fasta(combined_alignment_path, hxb2_id, pure_result[hxb2_id],     combined_result)
+    if not parsed_records:
+        raise ValueError(
+            f"Could not parse '{input_path}'. Please check that it is a valid "
+            "FASTA, FASTQ, PHYLIP, NEXUS, or CLUSTAL file."
+        )
+    print(f"Loaded {len(parsed_records)} records using format: {format_used}")
 
-    # Alphabetically sort the pure_subtype_count dictionary for consistent output
-    pure_subtype_count = dict(sorted(pure_subtype_count.items()))
+    records = []
+    for index, record in enumerate(parsed_records):
+        # Skip HXB2 reference if it is the first record
+        if index == 0 and "HXB2" in record.id:
+            continue
+        record.description = ""
+        # Clean sequence: uppercase, remove alignment gaps (- and .), strip leading/trailing Ns
+        seq_str = str(record.seq).upper().replace("-", "").replace(".", "").strip('N')
+        if not seq_str:
+            continue  # Skip if sequence becomes empty after cleaning
+        record.seq = Seq(seq_str)
+        record.id = record.id.replace("Ref.", "")
+        records.append(record)
+        
+    return records
 
-    print(f"Pure alignment written to     : {pure_alignment_path} ({len(pure_result)-1} sequences)")
-    print(f"CRF  alignment written to     : {crf_alignment_path} ({len(crf_result)} sequences)")
-    print(f"Combined alignment written to : {combined_alignment_path} ({len(combined_result)-1} sequences)")
-    print(f"Pure-subtype counts: {pure_subtype_count}")
 
-    return hxb2_id, pure_result, crf_result, combined_result
+def load_reference_ids(
+    reference_path: Path,
+    ) -> Set[str]:
+    """IDs present in the reference alignment, used to strip it back out post-MAFFT."""
+    return {rec.id for rec in SeqIO.parse(str(reference_path), "fasta")}
 
-if __name__ == "__main__":
 
-    # Scrape and parse LANL breakpoints
-    bp_path = f"{WORKSPACE_PATH}/data/output/LANL_scrapped_bp.breakpoints"
-    scrape_and_parse_lanl_breakpoints(bp_path)
+def run_mafft_addfragments(
+    query_records: List,
+    reference_path: Path,
+    mafft_bin: str,
+    threads: int,
+    tmp_dir: Path,
+    ) -> Tuple[Path, Path]:
+    """
+    Align query_records onto reference_path with `mafft --addfragments`.
+    Returns (aligned_fasta_path, compactmapout_path).
+    """
+    query_fasta = tmp_dir / "query.fasta"
+    SeqIO.write(query_records, str(query_fasta), "fasta")
 
-    df_segments, df_breakpoints = parse_breakpoints_file(bp_path)
+    aligned_fasta = tmp_dir / "aligned.fasta"
+    map_file = Path(str(query_fasta) + ".map")  # mafft's --compactmapout naming convention
 
-    print(f"CRFs parsed       : {df_segments['crf'].nunique()}")
-    print(f"Total segments    : {len(df_segments)}")
-    print(f"Total breakpoints : {len(df_breakpoints)}")
+    cmd = [
+        mafft_bin, "--auto", "--keeplength", "--compactmapout", "--quiet",
+        "--thread", str(threads), "--addfragments", str(query_fasta), str(reference_path),
+    ]
+    print(f"Running: {' '.join(cmd)}", flush=True)
+    with open(aligned_fasta, "w") as out_f:
+        result = subprocess.run(cmd, stdout=out_f, stderr=subprocess.PIPE, text=True)
 
-    df_segments.to_csv(
-        f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_hxb2.csv",    index=False)
-    df_breakpoints.to_csv(
-        f"{WORKSPACE_PATH}/data/output/lanl_crf_breakpoints_hxb2.csv", index=False)
-    print("Saved lanl_crf_segments_hxb2.csv and lanl_crf_breakpoints_hxb2.csv\n")
+    if result.returncode != 0:
+        sys.exit(f"ERROR: mafft failed (exit {result.returncode}):\n{result.stderr}")
+    if not aligned_fasta.exists() or aligned_fasta.stat().st_size == 0:
+        sys.exit(f"ERROR: mafft produced an empty alignment.\nstderr:\n{result.stderr}")
+    if not map_file.exists():
+        sys.exit(f"ERROR: expected mafft compactmapout file not found at {map_file}")
 
-    # Prepare pure / CRF reference alignments
-    hxb2_id, pure_result, crf_result, combined_result = prepare_pure_alignment(
-        lanl_subtype_ref_path, pure_ref_path, crf_ref_path, combined_ref_path,
-    )
+    return aligned_fasta, map_file
 
-    # Build per-position label sequences (HXB2 -> alignment)
-    hxb2_gapped = pure_result[hxb2_id]
 
-    # Project the HXB2-coordinate segments/breakpoints tables onto ATA alignment coordinates (same data, expressed as alignment column indices instead of raw HXB2 genome positions).
-    print("Projecting HXB2-coordinate segments/breakpoints onto ATA alignment coordinates …")
-    hxb2_pos_to_aln = build_hxb2_pos_to_aln_col(hxb2_gapped)
+def clean_for_alignment(rec):
+    rec.seq = Seq(str(rec.seq).upper().replace("-", "").replace(".", "").replace("U", "T").strip("N"))
+    rec.description = ""
+    return rec
 
-    hxb2_last_pos = HXB2_FIRST_POS + _HXB2_USED_LEN - 1
-    seg_win = df_segments[(df_segments["end"] >= HXB2_FIRST_POS)
-                          & (df_segments["start"] <= hxb2_last_pos)]
-    bp_win  = df_breakpoints[df_breakpoints["position"].between(HXB2_FIRST_POS, hxb2_last_pos)]
+def align_to_ata(records, ref_path, mafft_bin, threads, tmp_dir):
+    fasta, map_file = run_mafft_addfragments(records, ref_path, mafft_bin, threads, tmp_dir)
+    ref_ids = load_reference_ids(ref_path)
+    ali = [r for r in SeqIO.parse(fasta, "fasta") if r.id not in ref_ids]
+    for r in ali:
+        r.id = ''.join(r.id.split('|')[1:]) if 'ins:' in r.id else r.id
+    return ali, parse_compactmapout(map_file)
 
-    df_segments_aln    = convert_hxb2_df_to_aln(seg_win, hxb2_pos_to_aln, pos_cols=("start", "end"))
-    df_breakpoints_aln = convert_hxb2_df_to_aln(bp_win, hxb2_pos_to_aln, pos_cols=("position",))
 
-    segments_aln_path    = f"{WORKSPACE_PATH}/data/output/lanl_crf_segments_aln.csv"
-    breakpoints_aln_path = f"{WORKSPACE_PATH}/data/output/lanl_crf_breakpoints_aln.csv"
-    df_segments_aln.to_csv(segments_aln_path, index=False)
-    df_breakpoints_aln.to_csv(breakpoints_aln_path, index=False)
-    print(
-        f"Saved {os.path.basename(segments_aln_path)} and "
-        f"{os.path.basename(breakpoints_aln_path)}\n"
-    )
-
-    print("Building CRF label sequences …")
-    label_seqs = build_all_crf_label_sequences(df_segments, hxb2_gapped)
-    aln_len    = len(next(iter(label_seqs.values())))
-    print(f"  {len(label_seqs)} CRFs + PURE subtypes  |  alignment length = {aln_len}")
-
-    # Save the label arrays (intermediary, used by the matching script)
-    seqs_path = f"{WORKSPACE_PATH}/data/output/lanl_crf_label_seqs.npz"
-    np.savez_compressed(seqs_path, **label_seqs)
-    print(f"  Label-sequence archive : {seqs_path}")
-
-    # Derive alignment-coord segment CSV from the label sequences
-    csv_path = config.CRF_SEGMENTS_BD_ATA
-    df_aln   = label_sequences_to_segments_csv(label_seqs, csv_path)
-    print(f"\nAlignment-coord segments : {csv_path}  ({len(df_aln)} rows)")
-    print(df_aln.head(20).to_string(index=False))
+def decode_sample(decoder, sample_name, preds_slice, is_real, hxb2_to_ata, compactmapout_entry=()):
+    probs = preds_slice / (preds_slice.sum(axis=-1, keepdims=True) + 1e-9)
+    return decoder.query(sample_name=sample_name, probs=probs,
+                         compactmapout_entry=list(compactmapout_entry),
+                         hxb2_to_ata=hxb2_to_ata, query_mask=is_real)

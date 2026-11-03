@@ -5,15 +5,13 @@ import torch
 import pandas as pd
 import json
 import gzip
-from Bio import SeqIO, AlignIO
+from Bio import SeqIO
 from Bio.Seq import Seq
 import os
 import sys
-import subprocess
 import tempfile
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
-from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
@@ -24,6 +22,7 @@ import re
 from python_scripts.figs import visualize_sample_probs, visualize_combined_light
 from python_scripts.src import config
 from python_scripts.src.dataset_class import HIVSequenceDataset
+from python_scripts.src.preprocessing_aux import run_mafft_addfragments, load_reference_ids, dealign_to_records, parse_compactmapout, decode_sample
 from python_scripts.src.model_class import HFModelForHIVSubtyping
 from python_scripts.src.decoder_class import CRFReferenceDecoder
 
@@ -102,6 +101,17 @@ parser.add_argument(
   p: Output raw .npy file of predictions
   a: Output attention masks""",
 )
+parser.add_argument(
+    "--no_decoder",
+    action="store_true",
+    help="Stop after the model forward pass: save predictions, is_real masks and names; skip CRF decoding.",
+)
+parser.add_argument(
+    "--save_ali",
+    action="store_true",
+    help="Save the MAFFT alignment fed to the model (query sequences only, reference removed) "
+         "as <input name without extension>_ali.fasta in the output directory.",
+)
 
 args = parser.parse_args()
 
@@ -114,6 +124,8 @@ num_workers   = args.num_cpu
 batch_size    = args.batch_size
 wto           = args.wto
 gpu           = args.gpu
+no_decoder    = args.no_decoder
+save_ali      = args.save_ali
 
 if 'r' in wto:
     print("r in wto: saving subtype regions in a csv", flush=True)
@@ -236,144 +248,6 @@ def check_inputs(
         sys.exit("ERROR: no valid query sequences remain after input checks.")
     return kept
 
-def parse_compactmapout(
-    compactmapout_path: Path,
-    ) -> Dict[str, List[int]]:
-    """
-    Parse the MAFFT compactmapout file to get the mapping from aligned positions to original positions.
-    Returns a dictionary where keys are sequence names and values are lists of original positions.
-    
-    The file is structured as follows:
-    
-    # Insertion in added sequence > Position in reference
-    >r_K+G+C_2013
-    2433c - 2444g > 7810v7811
-    >r_A7+C+F2_2019
-    8584a - 8590g > 10908v10909
-    8605a - 8607a > 10966v10967
-    8618g - 8626t > 10995v10996
-    8756t - 8756t > 11220v11221
-
-    The goal is to output a dictionary of sample_name:
-    """
-    mapping = {}
-    with open(compactmapout_path, 'r') as f:
-        for line in f:
-            if line.startswith('#'):
-                continue
-            if line.startswith('>'):
-                seq_name = line[1:].strip()
-                mapping[seq_name] = []
-            else:
-                parts = line.strip().split('>')
-                start_pos = parts[0].split('-')[0].strip()[:-1]  # Get the start position
-                end_pos = parts[0].split('-')[1].strip()[:-1]    # Get the end position
-                ata_pos = parts[1].strip().split('v')[0]  # Get the ATA position
-                mapping[seq_name].append((int(ata_pos), int(start_pos), int(end_pos)))  # Store as a tuple of (ATA position, start, end)
-
-    return mapping
-
-
-def dealign_to_records(input_path: Path) -> List:
-    """
-    Automatically detects format (FASTA, FASTQ, PHYLIP, NEXUS, CLUSTAL),
-    strips gaps/dots from alignments or unaligned sequences, and produces 
-    query records ready to be aligned to the reference with MAFFT.
-    """
-    parsed_records = None
-    format_used = None
-
-    # Try unaligned sequence formats (FASTA, FASTQ)
-    for fmt in ["fasta", "fastq"]:
-        try:
-            with open(input_path, "r") as handle:
-                parsed = list(SeqIO.parse(handle, fmt))
-                if parsed:
-                    parsed_records = parsed
-                    format_used = fmt.upper()
-                    break
-        except Exception:
-            pass
-
-    # Try alignment formats (PHYLIP, NEXUS, CLUSTAL) if unaligned failed
-    if not parsed_records:
-        for fmt in ["phylip", "phylip-relaxed", "nexus", "clustal"]:
-            try:
-                with open(input_path, "r") as handle:
-                    alignment = AlignIO.read(handle, fmt)
-                    if alignment:
-                        # Convert MultipleSeqAlignment into a list of SeqRecords
-                        parsed_records = list(alignment)
-                        format_used = f"Alignment ({fmt.upper()})"
-                        break
-            except Exception:
-                pass
-
-    if not parsed_records:
-        raise ValueError(
-            f"Could not parse '{input_path}'. Please check that it is a valid "
-            "FASTA, FASTQ, PHYLIP, NEXUS, or CLUSTAL file."
-        )
-    print(f"Loaded {len(parsed_records)} records using format: {format_used}")
-
-    records = []
-    for index, record in enumerate(parsed_records):
-        # Skip HXB2 reference if it is the first record
-        if index == 0 and "HXB2" in record.id:
-            continue
-        record.description = ""
-        # Clean sequence: uppercase, remove alignment gaps (- and .), strip leading/trailing Ns
-        seq_str = str(record.seq).upper().replace("-", "").replace(".", "").strip('N')
-        if not seq_str:
-            continue  # Skip if sequence becomes empty after cleaning
-        record.seq = Seq(seq_str)
-        record.id = record.id.replace("Ref.", "")
-        records.append(record)
-        
-    return records
-
-
-def load_reference_ids(
-    reference_path: Path,
-    ) -> Set[str]:
-    """IDs present in the reference alignment, used to strip it back out post-MAFFT."""
-    return {rec.id for rec in SeqIO.parse(str(reference_path), "fasta")}
-
-
-def run_mafft_addfragments(
-    query_records: List,
-    reference_path: Path,
-    mafft_bin: str,
-    threads: int,
-    tmp_dir: Path,
-    ) -> Tuple[Path, Path]:
-    """
-    Align query_records onto reference_path with `mafft --addfragments`.
-    Returns (aligned_fasta_path, compactmapout_path).
-    """
-    query_fasta = tmp_dir / "query.fasta"
-    SeqIO.write(query_records, str(query_fasta), "fasta")
-
-    aligned_fasta = tmp_dir / "aligned.fasta"
-    map_file = Path(str(query_fasta) + ".map")  # mafft's --compactmapout naming convention
-
-    cmd = [
-        mafft_bin, "--auto", "--keeplength", "--compactmapout", "--quiet",
-        "--thread", str(threads), "--addfragments", str(query_fasta), str(reference_path),
-    ]
-    print(f"Running: {' '.join(cmd)}", flush=True)
-    with open(aligned_fasta, "w") as out_f:
-        result = subprocess.run(cmd, stdout=out_f, stderr=subprocess.PIPE, text=True)
-
-    if result.returncode != 0:
-        sys.exit(f"ERROR: mafft failed (exit {result.returncode}):\n{result.stderr}")
-    if not aligned_fasta.exists() or aligned_fasta.stat().st_size == 0:
-        sys.exit(f"ERROR: mafft produced an empty alignment.\nstderr:\n{result.stderr}")
-    if not map_file.exists():
-        sys.exit(f"ERROR: expected mafft compactmapout file not found at {map_file}")
-
-    return aligned_fasta, map_file
-
 
 # Worker function to run in parallel on CPU worker processes
 def process_single_sample_worker(
@@ -386,16 +260,10 @@ def process_single_sample_worker(
     wto: str,
     ) -> tuple[str, list[str], dict]:
     """Runs CRF decoding on CPU thread/process and prepares data for figure rendering."""
-    preds_normalized = preds_slice / (preds_slice.sum(axis=-1, keepdims=True) + 1e-9)
 
     # 1. CRF Decoder Query
-    crf_result = crf_decoder.query(
-        sample_name=sample_name,
-        probs=preds_normalized,
-        compactmapout_entry=compactmapout_entry,
-        hxb2_to_ata=HXB2_TO_ATA,
-        query_mask=is_real,
-    )
+    crf_result = decode_sample(crf_decoder, sample_name, preds_slice, is_real,
+                               HXB2_TO_ATA, compactmapout_entry)
 
     # 2. String formatting for main CSV
     top5_ref = "  ".join(
@@ -613,6 +481,14 @@ if __name__ == "__main__":
         )
 
     seq_names = [rec.id.split()[0] for rec in records_ali]
+
+    if save_ali:
+        ali_path = out_dir / f"{seq_path.stem}_ali.fasta"
+        for rec in records_ali:
+            rec.description = ""
+        SeqIO.write(records_ali, str(ali_path), "fasta")
+        print(f"User entered --save_ali, alignment saved at: {ali_path}", flush=True)
+
     metadata  = pd.DataFrame({
         "sequence_name": seq_names,
         "split": tag,
@@ -707,7 +583,7 @@ if __name__ == "__main__":
     )
 
 
-    crf_decoder = CRFReferenceDecoder(bank_path=BANK_PATH)
+    crf_decoder = None if no_decoder else CRFReferenceDecoder(bank_path=BANK_PATH)
     # Model forward pass
     print("\nRunning model inference...", flush=True)
 
@@ -733,6 +609,15 @@ if __name__ == "__main__":
     att_mm.flush()
     ploss_mm.flush()
     del inference_loader
+
+    if no_decoder:
+        np.save(out_dir / f"is_real_{tag}.npy", np.stack([gap_masks[n] for n in seq_names]))
+        with open(out_dir / f"names_{tag}.txt", "w") as f:
+            f.write("\n".join(seq_names) + "\n")
+        for p in (out_seqs, out_lbls, out_masks, out_att_path):
+            os.remove(p)
+        print(f"--no_decoder: predictions saved in {out_preds_path}", flush=True)
+        sys.exit(0)
 
     # CRF decoding and figures
     print(f"\nRunning CRF decoding across available CPUs...", flush=True)

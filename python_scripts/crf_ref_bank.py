@@ -20,9 +20,14 @@ from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqIO.FastaIO import FastaWriter
 from huggingface_hub import login
+import copy
+import subprocess
+import shutil
 
+from python_scripts.figs import visualize_combined_light
 from python_scripts.src.mutator_class import SequenceMutator
 from python_scripts.src import config
+from python_scripts.src.preprocessing_aux import clean_for_alignment, align_to_ata, decode_sample
 from python_scripts.src.dataset_class import HIVSequenceDataset
 from python_scripts.src.model_class import HFModelForHIVSubtyping
 from python_scripts.src.decoder_class import CRFReferenceDecoder
@@ -42,6 +47,8 @@ PAD_MULTIPLE_OF    = config.PAD_LEN
 PURE_REF_PATH      = config.PURE_REF_PATH
 VERSION            = config.VERSION
 SEED               = MODEL_CONFIG["seed"]
+PROB_ZERO_THRESHOLD = config.PROB_ZERO_THRESHOLD
+BATCH_SIZE         = MODEL_CONFIG["batch_size"]
 
 import argparse
 
@@ -50,6 +57,16 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument('--crf_file_path', type=str, required=True,
                     help='FASTA file of CRF aligned to the HIV1 subtype reference alignment.')
+parser.add_argument('--bank_selection', choices=['diversity', 'reference'], default='reference',
+                    help="'diversity': farthest-point sampling over the CRF pool. "
+                         "'reference': keep the pool sequences whose accession is in --ref_fasta.")
+parser.add_argument('--ref_fasta', type=str,
+                    default='/pasteur/helix/projects/mPath/oanoufa/sbtr/data/input/HIV1_REF_2026_genome_DNA_seq.fasta.gz',
+                    help="LANL reference FASTA (.fasta or .fasta.gz); only used with --bank_selection reference.")
+parser.add_argument('--sbtr_path', type=str, default=str(Path(__file__).resolve().parent / 'sbtr.py'))
+parser.add_argument('--mafft_bin', type=str, default='mafft')
+parser.add_argument('--num_cpu', type=int, default=1)
+parser.add_argument('--gpu', action='store_true')
 args = parser.parse_args()
 
 CRF_FILE_PATH = Path(args.crf_file_path)
@@ -62,6 +79,30 @@ PCT_PER_CRF_BANK = config.PCT_PER_CRF_BANK # Adaptive bank size depending on the
 MIN_PER_CRF_BANK = config.MIN_PER_CRF_BANK # Min bank size for each CRF
 N_TEST           = config.N_TEST # Min test size for each CRF (including one gag and one pol sequence)
 
+
+_ACC_RE = re.compile(r"^[A-Za-z]{1,2}_?\d{5,8}$")
+
+def _accession(clean_id: str) -> str:
+    """Accession of a LANL-style id (``01_AE.TH.90.CM240.U54771`` -> ``U54771``): last dot-separated
+    field that looks like an accession, else the last field. Upper-cased."""
+    parts = clean_id.split(".")
+    for p in reversed(parts):
+        if _ACC_RE.match(p):
+            return p.upper()
+    return parts[-1].upper()
+
+
+def load_reference_accessions(ref_fasta_path) -> Dict[str, str]:
+    """{accession: type} for every record of a reference FASTA (.fasta / .fasta.gz).
+    type = first dot-separated field once the optional ``Ref.`` prefix is stripped (e.g. ``01_AE``, ``A1``)."""
+    ref_path = Path(ref_fasta_path)
+    opener = gzip.open if ref_path.suffix == ".gz" else open
+    acc_to_type: Dict[str, str] = {}
+    with opener(ref_path, "rt") as fh:
+        for rec in SeqIO.parse(fh, "fasta"):
+            clean = re.sub(r"^Ref\.", "", rec.id)
+            acc_to_type[_accession(clean)] = clean.split(".")[0]
+    return acc_to_type
 
 def _crop_record(rec: SeqRecord, ata_start: int, ata_end: int, suffix: str) -> SeqRecord:
     cropped = rec[ata_start:ata_end]
@@ -133,124 +174,70 @@ def _farthest_point_sampling(
 
     return selected
 
+def _run_sbtr(records, tag, tmp_dir, sbtr_path, mafft_bin, num_cpu, batch_size, gpu):
+    """Run `sbtr.py --no_decoder` on records. Returns (preds memmap, is_real, rows), rows[k] = row of records[k]."""
+    run_dir = Path(tmp_dir) / f"_sbtr_{tag}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    fasta = run_dir / "input.fasta"
+    # index ids: LANL ids clash with the reference ids inside sbtr.py
+    SeqIO.write([SeqRecord(r.seq, id=f"q{k}", description="") for k, r in enumerate(records)],
+                str(fasta), "fasta")
+    cmd = [sys.executable, str(sbtr_path), "--seq", str(fasta), "--out_dir", str(run_dir),
+           "--tag", tag, "--mafft_bin", mafft_bin, "--num_cpu", str(num_cpu),
+           "--batch_size", str(batch_size), "--no_decoder"]
+    if gpu:
+        cmd.append("--gpu")
+    subprocess.run(cmd, check=True)
 
-def _compute_num_paths_for_pool(
-    records: List[SeqRecord],
-    model,
-    tokenizer,
-    device,
-    decoder: CRFReferenceDecoder,
-    hxb2_to_ata: np.ndarray,
-    ata_len: int,
-    n_packed: int,
-    num_subtypes: int,
-    max_length: int,
-    pad_multiple_of: int,
-    num_workers: int,
-    tmp_dir: Path,
-) -> np.ndarray:
-    """
-    Run the subtyping model over `records` and decode each prediction into a
-    per-position label path (num_path) via `decoder.query(...)` (no bank
-    loaded on `decoder`, so it returns the raw num_path array).
+    with open(run_dir / f"names_{tag}.txt") as f:
+        order = {l.strip(): j for j, l in enumerate(f)}
+    missing = [k for k in range(len(records)) if f"q{k}" not in order]
+    if missing:
+        sys.exit(f"ERROR: {len(missing)} sequence(s) dropped by sbtr.py: {missing[:10]}")
+    preds   = np.load(run_dir / f"predictions_{tag}.npy", mmap_mode="r")
+    is_real = np.load(run_dir / f"is_real_{tag}.npy")
+    return preds, is_real, [order[f"q{k}"] for k in range(len(records))]
 
-    Returns
-    -------
-    np.ndarray, shape (len(records), ata_len), dtype int8 — index-aligned
-    with `records`.
-    """
-    N = len(records)
-    tmp_seqs  = tmp_dir / "_tmp_pool_sequences.npy"
-    tmp_lbls  = tmp_dir / "_tmp_pool_labels.npy"
-    tmp_masks = tmp_dir / "_tmp_pool_masks.npy"
 
-    seq_mm  = np.lib.format.open_memmap(str(tmp_seqs),  mode="w+", dtype=np.uint8,
-                                         shape=(N, ata_len))
-    lbl_mm  = np.lib.format.open_memmap(str(tmp_lbls),  mode="w+", dtype=np.uint8,
-                                         shape=(N, ata_len, n_packed))
-    mask_mm = np.lib.format.open_memmap(str(tmp_masks), mode="w+", dtype=bool,
-                                         shape=(N, ata_len))
+def _compute_num_paths_for_pool(records, decoder, hxb2_to_ata, ata_len, sbtr_kw):
+    preds, is_real, rows = _run_sbtr(records, **sbtr_kw)
+    num_paths = np.zeros((len(records), ata_len), dtype=np.int8)
+    for k, rec in enumerate(records):
+        j = rows[k]
+        num_paths[k] = decode_sample(decoder, rec.id, np.asarray(preds[j, :ata_len]),
+                                     is_real[j], hxb2_to_ata)
+    return num_paths, preds, rows
 
-    zero_lbl_packed = np.zeros((ata_len, n_packed), dtype=np.uint8)
-    zero_mask = np.ones(ata_len, dtype=bool)
 
-    is_real_list: List[np.ndarray] = []
-    names: List[str] = []
-    for i, rec in enumerate(records):
-        raw = str(rec.seq).upper()
-        is_real = np.array([c != '-' for c in raw], dtype=bool)
-        is_real_list.append(is_real)
-        names.append(rec.id)
-
-        arr = np.frombuffer(raw.encode(), dtype=np.uint8).copy()
-        arr[arr == ord("-")] = ord("N")
-        seq_mm[i]  = arr
-        lbl_mm[i]  = zero_lbl_packed
-        mask_mm[i] = zero_mask
-
-    seq_mm.flush()
-    lbl_mm.flush()
-    mask_mm.flush()
-
-    metadata = pd.DataFrame({"sequence_name": names, "split": "crf_pool"})
-    pool_dataset = HIVSequenceDataset(
-        seq_mm=seq_mm, lbl_mm=lbl_mm, mask_mm=mask_mm, metadata=metadata,
-        tokenizer=tokenizer, n_subtypes=num_subtypes, hxb2_to_ata=hxb2_to_ata,
-        max_length=max_length, pad_multiple_of=pad_multiple_of, split="crf_pool",
-    )
-    pool_loader = DataLoader(
-        pool_dataset, batch_size=1, shuffle=False, num_workers=num_workers,
-    )
-
-    num_paths = np.zeros((N, ata_len), dtype=np.int8)
-    with torch.no_grad():
-        for i, batch in tqdm(
-            enumerate(pool_loader), total=len(pool_loader),
-            mininterval=30, desc="Scoring CRF pool for diversity selection",
-        ):
-            logits = model(
-                batch["input_ids"].to(device),
-                attention_mask=batch["attention_mask"].to(device),
-            )["subtype_logits"]
-            pred_probs = torch.sigmoid(logits).squeeze(0).cpu().numpy()
-            probs = pred_probs[:ata_len]
-            probs = probs / (probs.sum(axis=-1, keepdims=True) + 1e-9)
-
-            num_path = decoder.query(
-                sample_name=names[i],
-                probs=probs,
-                compactmapout_entry=[],
-                hxb2_to_ata=hxb2_to_ata,
-                query_mask=is_real_list[i],
-            )
-            num_paths[i] = num_path
-
-    del seq_mm, lbl_mm, mask_mm
-    os.remove(tmp_seqs)
-    os.remove(tmp_lbls)
-    os.remove(tmp_masks)
-
-    return num_paths
-
+def _plot_bank_figures(bank_records, bank_num_paths, pool_preds, bank_rows,
+                       decoder, hxb2_to_ata, ata_len, fig_dir):
+    for i, rec in enumerate(bank_records):
+        str_path = np.array([decoder.code_to_label[int(c)] for c in bank_num_paths[i]], dtype=object)
+        regions_aligned = decoder._extract_breakpoints(str_path, skip_label="U")
+        safe_id = re.sub(r"[^\w.\-]", "_", rec.id)
+        visualize_combined_light(
+            regions_aligned=regions_aligned, hxb2_to_ata=hxb2_to_ata,
+            preds_slice=np.asarray(pool_preds[bank_rows[i], :ata_len]),
+            pure_st_to_id_dict=ST_TO_ID_DICT, n_total=ata_len,
+            path=str(fig_dir / f"{safe_id}.svg"),
+            min_peak=PROB_ZERO_THRESHOLD, floor=0.01,
+        )
 
 def build_crf_reference_bank(
     crf_ref_path:    str,
-    model,
-    tokenizer,
-    device,
     hxb2_to_ata:     np.ndarray,
+    sbtr_kw:         dict,
     ata_len:         int,
-    num_subtypes:    int,
-    max_length:      int,
-    pad_multiple_of: int,
-    num_workers:     int,
     tmp_dir:         Path,
     pct_per_crf:     float = 0.10,
     min_per_crf:     int = 1,
     n_test:          int = 5,
     seed:            int = SEED,
     mutator:         Optional[SequenceMutator] = None,
-) -> tuple:
+    fig_dir:         Optional[Path] = None,
+    bank_selection:  str = "diversity",
+    ref_acc_to_type: Optional[Dict[str, str]] = None,
+    ) -> tuple:
     """
     Build a CRF reference bank from a FASTA file.
 
@@ -319,14 +306,24 @@ def build_crf_reference_bank(
 
     #  4. Build (possibly augmented) pools + dynamic bank-size targets
     crf_pool_records:     Dict[str, List[SeqRecord]] = {}
+    ref_ids_by_crf:       Dict[str, set] = {}
+    fallback_crfs:        List[str] = []
     n_bank_target_by_crf: Dict[str, int] = {}
 
     for crf_type, acc_map in crf_groups.items():
         records = list(acc_map.values())
 
-        # Dynamic bank size: pct_per_crf of the unaugmented unique count,
-        # floored at min_per_crf.
+        # Dynamic bank size: pct_per_crf of the unaugmented unique count, floored at min_per_crf.
         n_bank_target = max(round(pct_per_crf * len(records)), min_per_crf)
+
+        if bank_selection == "reference":
+            # originals only, never augmented sequences
+            ref_ids = {r.id for r in records if _accession(r.id) in ref_acc_to_type}
+            if ref_ids:
+                ref_ids_by_crf[crf_type] = ref_ids
+                n_bank_target = len(ref_ids)
+            else:
+                fallback_crfs.append(crf_type)    # no reference for this CRF: diversity selection instead
 
         # Augment the full pool to (n_bank_target + n_test) if needed
         target_total = n_bank_target + n_test
@@ -338,8 +335,7 @@ def build_crf_reference_bank(
         crf_pool_records[crf_type]     = records
         n_bank_target_by_crf[crf_type] = n_bank_target
 
-    #  5. Flatten pools (index-aligned, not id-keyed, to avoid any risk of
-    #     accession collisions across CRF groups) and score with the model.
+    #  5. Flatten pools (index-aligned, not id-keyed, to avoid any risk of accession collisions across CRF groups) and score with the model.
     all_pool_records: List[SeqRecord] = []
     crf_index_ranges: Dict[str, Tuple[int, int]] = {}
     for crf_type, records in crf_pool_records.items():
@@ -347,7 +343,6 @@ def build_crf_reference_bank(
         all_pool_records.extend(records)
         crf_index_ranges[crf_type] = (start, len(all_pool_records))
 
-    n_packed = int(np.ceil(num_subtypes / 8))
     decoder  = CRFReferenceDecoder(bank_path=None)
     uninformative_codes = (decoder.code_u, decoder.code_5ltr, decoder.code_3ltr)
 
@@ -355,18 +350,38 @@ def build_crf_reference_bank(
         f"\n  Scoring {len(all_pool_records)} pool sequence(s) across "
         f"{len(crf_pool_records)} CRF type(s) for diversity-based selection..."
     )
-    pool_num_paths = _compute_num_paths_for_pool(
-        all_pool_records, model=model, tokenizer=tokenizer, device=device,
-        decoder=decoder, hxb2_to_ata=hxb2_to_ata, ata_len=ata_len,
-        n_packed=n_packed, num_subtypes=num_subtypes, max_length=max_length,
-        pad_multiple_of=pad_multiple_of, num_workers=num_workers, tmp_dir=tmp_dir,
-    )
+    # diversity mode needs every pool sequence; reference mode only the selected ones (+ fallback CRFs)
+    score_mask = np.ones(len(all_pool_records), dtype=bool)
+    if bank_selection == "reference":
+        score_mask[:] = False
+        for crf_type, (s0, e0) in crf_index_ranges.items():
+            if crf_type in fallback_crfs:
+                score_mask[s0:e0] = True
+            else:
+                for k in range(s0, e0):
+                    score_mask[k] = all_pool_records[k].id in ref_ids_by_crf[crf_type]
+        matched_acc = {_accession(r.id) for ids in ref_ids_by_crf.values() for r in all_pool_records if r.id in ids}
+        unmatched = sorted(a for a, t in ref_acc_to_type.items() if "_" in t and a not in matched_acc)
+        print(f"  Reference selection: {sum(len(v) for v in ref_ids_by_crf.values())} bank sequences matched "
+              f"over {len(ref_ids_by_crf)} CRF type(s); {len(unmatched)} CRF reference accession(s) of the "
+              f"reference FASTA not found in the CRF pool" + (f": {unmatched[:20]}" if unmatched else ""))
+        if fallback_crfs:
+            print(f"  WARNING: no reference sequence found for {len(fallback_crfs)} CRF type(s), "
+                  f"diversity selection used instead: {fallback_crfs}")
+    score_idx = np.flatnonzero(score_mask)
 
-    #  6. Diversity-based bank selection (farthest-point sampling) + random
-    #     test-set selection from the leftover pool (unchanged behaviour).
+    pool_num_paths = np.zeros((len(all_pool_records), ata_len), dtype=np.int8)
+    scored = [all_pool_records[k] for k in score_idx]
+    pool_num_paths[score_idx], pool_preds, rows = _compute_num_paths_for_pool(
+        scored, decoder, hxb2_to_ata, ata_len, sbtr_kw)
+    pool_row = {int(k): rows[p] for p, k in enumerate(score_idx)}
+
+    #  6. Diversity-based bank selection (farthest-point sampling) + random test-set selection from the leftover pool (unchanged behaviour).
     bank_names:     List[str] = []
     bank_num_paths: List[np.ndarray] = []
+    bank_records:   List[SeqRecord]  = []
     test_set:       List[SeqRecord]  = []
+    bank_pool_idx:  List[int] = []
 
     gag_ata_start, gag_ata_end = int(hxb2_to_ata[GAG_HXB2[0]]), int(hxb2_to_ata[GAG_HXB2[1]])
     pol_ata_start, pol_ata_end = int(hxb2_to_ata[POL_HXB2[0]]), int(hxb2_to_ata[POL_HXB2[1]])
@@ -377,7 +392,9 @@ def build_crf_reference_bank(
         n_bank_target = n_bank_target_by_crf[crf_type]
         n_bank        = min(n_bank_target, len(records))
 
-        if n_bank > 0:
+        if bank_selection == "reference" and crf_type not in fallback_crfs:
+            chosen_idx = [i for i, r in enumerate(records) if r.id in ref_ids_by_crf[crf_type]]
+        elif n_bank > 0:
             dist = _pairwise_hamming_distance(num_paths, uninformative_codes)
             chosen_idx = _farthest_point_sampling(dist, n_bank, seed=seed)
         else:
@@ -387,7 +404,9 @@ def build_crf_reference_bank(
         for i in chosen_idx:
             bank_names.append(records[i].id)
             bank_num_paths.append(num_paths[i])
-
+            bank_records.append(records[i])
+            bank_pool_idx.append(start + i)
+            assert all_pool_records[start + i].id == records[i].id
         leftover = [r for r in records if r.id not in chosen_ids]
         test     = random.sample(leftover, min(n_test, len(leftover)))
 
@@ -401,7 +420,7 @@ def build_crf_reference_bank(
 
         print(
             f"    {crf_type:<12s}: bank {len(chosen_idx)}/{len(records)} "
-            f"(diversity-selected), test {len(test)}/{len(leftover)} leftover"
+            f"({'reference' if crf_type in ref_ids_by_crf else 'diversity'}-selected), test {len(test)}/{len(leftover)} leftover"
         )
 
     reference_bank = (
@@ -409,6 +428,11 @@ def build_crf_reference_bank(
         if bank_num_paths else np.zeros((0, ata_len), dtype=np.int8)
     )
     reference_names = np.array(bank_names)
+    if fig_dir is not None and bank_records:
+        _plot_bank_figures(bank_records, reference_bank, pool_preds,
+                           [pool_row[g] for g in bank_pool_idx],
+                           decoder, hxb2_to_ata, ata_len, Path(fig_dir))
+    shutil.rmtree(Path(tmp_dir) / f"_sbtr_{sbtr_kw['tag']}", ignore_errors=True)
 
     print(
         f"\n  CRF reference bank ready : {len(bank_names)} sequences "
@@ -443,33 +467,33 @@ if __name__ == "__main__":
             ata_len=ATA_LEN,
             seed=42,
         )
-    # Model + tokenizer
-    model_used = "oanoufa/sbtr_ntv3_650M"
-    tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True)
-    model = HFModelForHIVSubtyping.from_pretrained(model_used)
-    device = torch.device(MODEL_CONFIG["device"])
-    model = model.to(device)
-    model.eval()
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
     # CRF reference bank (diversity-selected) + test set
     print(f"\nBuilding CRF reference bank from: {CRF_FILE_PATH}", flush=True)
+    fig_dir = Path(out_dir) / "figs"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    ref_acc_to_type = None
+    if args.bank_selection == "reference":
+        ref_acc_to_type = load_reference_accessions(args.ref_fasta)
+        n_crf_refs = sum("_" in t for t in ref_acc_to_type.values())
+        print(f"Loaded {len(ref_acc_to_type)} reference accessions from {args.ref_fasta} ({n_crf_refs} CRF-type)")
+
+    sbtr_kw = dict(tag="pool", tmp_dir=out_dir, sbtr_path=args.sbtr_path,
+                   mafft_bin=args.mafft_bin, num_cpu=args.num_cpu,
+                   batch_size=BATCH_SIZE, gpu=args.gpu)
     reference_bank, reference_names, test_set = build_crf_reference_bank(
         crf_ref_path=CRF_FILE_PATH,
-        model=model,
-        tokenizer=tokenizer,
-        device=device,
         hxb2_to_ata=hxb2_to_ata,
+        sbtr_kw=sbtr_kw,
         ata_len=ATA_LEN,
-        num_subtypes=NUM_SUBTYPES,
-        max_length=MAX_LENGTH,
-        pad_multiple_of=PAD_MULTIPLE_OF,
-        num_workers=MODEL_CONFIG["num_workers"],
         tmp_dir=out_dir,
         pct_per_crf=PCT_PER_CRF_BANK,
         min_per_crf=MIN_PER_CRF_BANK,
         n_test=N_TEST,
         mutator=mutator,
+        fig_dir=fig_dir,
+        bank_selection=args.bank_selection,
+        ref_acc_to_type=ref_acc_to_type,
     )
 
     print(f"  Reference bank  : {reference_bank.shape}  dtype={reference_bank.dtype}")
@@ -480,8 +504,7 @@ if __name__ == "__main__":
     metadata.to_csv(generated_meta_path, sep="\t", index=False)
     print(f"\nGenerated: {generated_meta_path}")
 
-    # Save the reference bank (num_path per sequence) to a compressed file
-    # for later use in inference.
+    # Save the reference bank (num_path per sequence) to a compressed file for later use in inference.
     out_path = out_dir / "crf_reference_bank.npz"
     if out_path.exists():
         os.remove(out_path)

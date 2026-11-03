@@ -15,8 +15,7 @@ from pathlib import Path
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 import math
-import uuid
-import re
+import shutil
 
 from src import config
 from src.mutator_class import (
@@ -25,12 +24,15 @@ from src.mutator_class import (
     mutate_sequence_gtr,
     _ACGT_BYTES,
 )
+from src.decoder_class import CRFReferenceDecoder
 from figs import (
     plot_fragment_length_distribution,
     plot_reference_distribution_with_year,
+    visualize_segment_and_mask_panel,
     visualize_generated_breakpoints,
     visualize_breakpoint_rank_profile,
     compare_generated_vs_real,
+    is_uncertain,
 )
 
 WORKSPACE_PATH = config.WORKSPACE_PATH
@@ -51,6 +53,7 @@ REALISTIC     = args.realistic
 FORCE_DIV     = args.force_divergent
 N_WORKERS     = args.n_workers or mp.cpu_count()
 
+CHUNK_SIZE    = config.CHUNK_SIZE
 N_SEQ         = config.N_SEQ
 RP            = config.RP
 SEED          = config.MODEL_CONFIG['seed']
@@ -69,6 +72,9 @@ MIN_FRAG_LEN  = config.MIN_FRAG_LEN
 BP_PRIOR_LAMBDA = config.BP_PRIOR_LAMBDA
 ST_TO_ID_DICT = config.ST_TO_ID_DICT
 MAX_YEAR = config.MAX_YEAR
+CROP_MIN_BP_DIST = config.CROP_MIN_BP_DIST
+DEFAULT_FLOOR = config.DEFAULT_FLOOR
+FLOORS = config.FLOORS
 
 out_dir    = f"{WORKSPACE_PATH}/data/output/seq_gen/{N_SEQ}_{RP}_{PARTIAL_FRAC}"
 out_seqs   = f"{out_dir}/sequences_{N_SEQ}_{RP}_{PARTIAL_FRAC}.npy"
@@ -78,9 +84,9 @@ out_meta   = f"{out_dir}/metadata_{N_SEQ}_{RP}_{PARTIAL_FRAC}.tsv"
 os.makedirs(out_dir, exist_ok=True)
 
 SUBTYPE_GROUPS = {
-    "A1": 0, "A2": 0, "A3": 0, "A4": 0, "A5": 0, "A6": 0, "A7": 0, "A8": 0,
+    "A1": 0, "A2": 0, "A3": 0, "A4": 0, "A5": 0, "A6": 0, "A7": 0, "A8": 0, "E": 0,
     "F1": 1, "F2": 1,
-    "E": 2, "C": 2, "G": 2, "H": 2, "J": 2, "K": 2, "L": 2,
+    "C": 2, "G": 2, "H": 2, "J": 2, "K": 2, "L": 2,
     "N": 3, "O": 3, "P": 3,
     "B": 4, "D": 4,
 }
@@ -110,51 +116,67 @@ class Sequence:
     def __len__(self):
         return len(self.arr)
 
-def is_uncertain(label: str) -> bool:
-    _MIX = re.compile(r"[/+,]")
-    return label == "U" or bool(_MIX.search(label))
-
 def load_mosaic_definitions(csv_path: str):
-    # loads segments from csv, coordinates converted from 1 based inclusive to 0 based half open
+    # loads segments from csv 01_AE and 26_A5U for E and A5, coordinates converted from 1 based inclusive to 0 based half open
     df = pd.read_csv(csv_path)
     mosaic_dict = defaultdict(list)
     for _, row in df.iterrows():
         crf_name = str(row["crf"]).strip()
-        st_label = str(row["subtype"]).strip()
-        start_0 = int(row["start"]) - 1
-        end_0 = int(row["end"])
+        if crf_name in ["01_AE", "26_A5U"]:
+            st_label = str(row["subtype"]).strip()
+            start_0 = int(row["start"]) - 1
+            end_0 = int(row["end"])
 
-        # normalize segment label inside the sequence
-        # 01_AE has E segments and A1 segments
-        # A5U has A5 segments and U segments
-        if st_label in ["AE", "01_AE"]:
-            st_label = "E"
-        elif st_label == "A5U":
-            st_label = "A5"
+            if st_label == "A1/E":
+                st_label = "E"
 
-        seg_entry = {
-            "start": start_0,
-            "end": end_0,
-            "label": st_label
-        }
+            seg_entry = {
+                "start": start_0,
+                "end": end_0,
+                "label": st_label
+            }
 
-        # map whatever crf name is in the csv to our parent names E and A5
-        aliases = [crf_name]
-        if crf_name in ["01_AE", "CRF01_AE", "AE", "E"]:
-            aliases.extend(["E", "AE", "01_AE", "CRF01_AE"])
-        if crf_name in ["A5U", "05_A5U", "A5"]:
-            aliases.extend(["A5", "A5U", "05_A5U"])
+            # register alias so parent keys E and A5 find these segments
+            if crf_name in ["01_AE"]:
+                alias = ["E"]
+            if crf_name in ["26_A5U"]:
+                alias = ["A5"]
 
-        for a in set(aliases):
-            mosaic_dict[a].append(seg_entry)
+            for a in set(alias):
+                mosaic_dict[a].append(seg_entry)
 
-    for k in mosaic_dict:
-        mosaic_dict[k].sort(key=lambda x: x["start"])
+    # Sort and merge contiguous/overlapping segments (merge the A1/E that became E with the E segments)
+    final_dict = {}
+    for k, segments in mosaic_dict.items():
+        # Sort by start position first
+        segments.sort(key=lambda x: x["start"])
+        
+        merged = []
+        for seg in segments:
+            if not merged:
+                merged.append(seg.copy())
+            else:
+                last = merged[-1]
+                # Merge if they have the same label and touch/overlap (half-open: start <= last_end)
+                if last["label"] == seg["label"] and seg["start"] <= last["end"]:
+                    last["end"] = max(last["end"], seg["end"])
+                else:
+                    merged.append(seg.copy())
+                    
+        final_dict[k] = merged
+        
+    return final_dict
 
-    return dict(mosaic_dict)
+def check_mosaic_overlaps(mosaic_dict):
+    for k, segs in mosaic_dict.items():
+        end_max, prev = -1, None
+        for seg in segs:  # already sorted by start
+            if seg["start"] < end_max:
+                raise ValueError(f"overlap in mosaic_dict['{k}']: {prev} vs {seg}")
+            if seg["end"] > end_max:
+                end_max, prev = seg["end"], seg
 
-
-def label_parent_track(lbl_row, mask_row, s, e, st, st_id, mosaic_dict, rng=None, mask_bp_buf=30):
+def label_parent_track(lbl_row, mask_row, s, e, st, st_id, mosaic_dict, rng=None, mask_bp_buf=9):
     # labels pure parents or mosaic parents like E and A5
     if st in mosaic_dict:
         for seg in mosaic_dict[st]:
@@ -165,12 +187,13 @@ def label_parent_track(lbl_row, mask_row, s, e, st, st_id, mosaic_dict, rng=None
 
             sub_st = seg["label"]
 
-            # if segment is U or mixed like A1/G zero it out and mask it
+            # if segment is U or mixed like A1/E zero it out and mask it
             if is_uncertain(sub_st) or sub_st not in st_id:
                 mask_row[seg_s:seg_e] = False
                 lbl_row[seg_s:seg_e] = False
             else:
                 lbl_row[seg_s:seg_e, st_id[sub_st]] = True
+                # print(f'Labeled positions {seg_s} to {seg_e} with label {sub_st}')
 
             # jitter loss mask across internal segment boundaries
             if seg["start"] > s:
@@ -184,37 +207,52 @@ def label_parent_track(lbl_row, mask_row, s, e, st, st_id, mosaic_dict, rng=None
                 b_start = max(s, seg["end"] - jit)
                 b_end = min(e, seg["end"] + jit)
                 mask_row[b_start:b_end] = False
+
     else:
         # regular pure subtype sequence
         if s < e and st in st_id:
             lbl_row[s:e, st_id[st]] = True
 
 def labels_to_parts(lbl_row, id_to_st):
+    """Returns (subtype names in order of appearance, structure).
+    structure = (first_labeled_pos, last_labeled_pos_exclusive, bp_ata) or None if nothing is labeled.
+    bp_ata = ATA position of the first labeled position of every new segment."""
     pos = np.flatnonzero(lbl_row.any(axis=1))
     if len(pos) == 0:
-        return ["unknown"], 0
+        return ["unknown"], None
     ids = lbl_row[pos].argmax(axis=1)
     cut = np.flatnonzero(np.diff(ids)) + 1
     sts = list(dict.fromkeys(id_to_st[int(i)] for i in ids[np.r_[0, cut]]))
-    return sts, len(cut)
+    return sts, (int(pos[0]), int(pos[-1]) + 1, pos[cut])
 
-def extract_generated_breakpoints(names, out_labels, n_subtypes, ata_len, ata_to_hxb2):
-    lbl_mm = np.load(out_labels, mmap_mode="r")
-    rows = []
-    for idx, n in enumerate(tqdm(names, desc="Extracting breakpoints", mininterval=10)):
-        if not n.startswith("r"):
-            continue
-        lbl = np.unpackbits(lbl_mm[idx], axis=-1)[:, :n_subtypes]
-        any_active = lbl.any(axis=1)
-        active = np.full(ata_len, -1, dtype=np.int32)
-        active[any_active] = lbl[any_active].argmax(axis=1)
-        lp = np.where(active >= 0)[0]
-        if len(lp) < 2:
-            continue
-        bp_ata = lp[np.where(np.diff(active[lp]) != 0)[0] + 1]
-        for k, b in enumerate(bp_ata):
-            rows.append((idx, k + 1, len(bp_ata), int(b), int(ata_to_hxb2[b])))
-    return pd.DataFrame(rows, columns=["seq", "rank", "n_bp", "pos_ata", "pos"])
+def build_rec_tables(records, ata_to_hxb2):
+    """Build per-recombinant (df_rec) and per-breakpoint (df_gen) tables from worker records.
+    Record layout: (name, n_bp, n_muts, year, frag_start, frag_end, first, last, n_st, bp_ata).
+    Recombinants are the records with a non-empty bp_ata. df_gen rows are ordered by (seq, rank),
+    aligned with df_rec."""
+    idx = [i for i, r in enumerate(records) if len(r[9])]
+    bp_lists = [records[i][9] for i in idx]
+    lens = np.fromiter((len(b) for b in bp_lists), dtype=np.int64, count=len(bp_lists))
+    bp_all = np.concatenate(bp_lists) if bp_lists else np.empty(0, dtype=np.int32)
+    seq = np.asarray(idx, dtype=np.int64)
+
+    df_rec = pd.DataFrame({
+        "seq":   seq,
+        "first": [records[i][6] for i in idx],
+        "last":  [records[i][7] for i in idx],
+        "n_st":  [records[i][8] for i in idx],
+        "n_bp":  lens,
+    })
+    starts = np.cumsum(lens) - lens
+    df_gen = pd.DataFrame({
+        "seq":     np.repeat(seq, lens),
+        "rank":    np.arange(len(bp_all)) - np.repeat(starts, lens) + 1,
+        "n_bp":    np.repeat(lens, lens),
+        "pos_ata": bp_all,
+        # if ata_to_hxb2 is a dict instead of an array: pd.Series(bp_all).map(ata_to_hxb2).to_numpy()
+        "pos":     np.asarray(ata_to_hxb2)[bp_all],
+    })
+    return df_rec, df_gen
 
 def segments_to_breakpoints(df_seg):
     rows = []
@@ -226,6 +264,13 @@ def segments_to_breakpoints(df_seg):
             lo, hi = a.end, b.start
             rows.append((crf, a.subtype, b.subtype, lo, hi, (lo + hi) / 2))
     return pd.DataFrame(rows, columns=["crf", "left", "right", "lo", "hi", "pos"])
+
+def check_single_label(lbl_row, id_to_st, ctx=""):
+    multi = np.flatnonzero(lbl_row.sum(axis=1) > 1)
+    if multi.size:
+        combos = {tuple(id_to_st[j] for j in np.flatnonzero(lbl_row[p])) for p in multi}
+        raise ValueError(f"{ctx}: {multi.size} multi-label positions "
+                         f"[{multi[0]}..{multi[-1]}], combos={combos}")
 
 def infer_params(
     df_seg: pd.DataFrame, ata_len: int,
@@ -266,21 +311,24 @@ def infer_params(
     print(f"  n_bp/CRF  {params['n_breakpoints']}")
     print(f"  subtypes  {dict(zip(pmf.index, (pmf.values*100).round(1)))}")
     print(f"  min_seg   {min_hxb2} HXB2 to {params['min_seg_len']} ATA")
+
     return params
 
-def weighted_subtype_probs(counts: dict, floor: float = 0.015) -> dict:
-    w = {k: math.sqrt(v) for k, v in counts.items()}
-    fixed, free = {}, dict(w)
+def weighted_subtype_probs(counts: dict, floors: dict = FLOORS, default_floor: float = DEFAULT_FLOOR, worker_id: int = 0,
+    ) -> dict:
+    fixed, free = {}, dict(counts)
     while True:
         remaining_mass = 1.0 - sum(fixed.values())
         wsum = sum(free.values())
         probs = {k: remaining_mass * (v / wsum) for k, v in free.items()}
-        below = {k: p for k, p in probs.items() if p < floor}
+        below = {k: p for k, p in probs.items() if p < floors.get(k, default_floor)}
         if not below:
             probs.update(fixed)
+            if worker_id == 0:
+                print("Weighted subtype probabilities:", {k: round(v, 3) for k, v in probs.items()})
             return probs
         for k in below:
-            fixed[k] = floor
+            fixed[k] = floors.get(k, default_floor)
             del free[k]
 
 def sample_subtypes(n, pool, py_rng, st_probs=None):
@@ -295,7 +343,7 @@ def sample_subtypes(n, pool, py_rng, st_probs=None):
         else:
             weights = []
             for st_cand in remain:
-                g = SUBTYPE_GROUPS.get(st_cand, 2)
+                g = SUBTYPE_GROUPS[st_cand]
                 w = min(DIVERGENCE_WEIGHTS[g][SUBTYPE_GROUPS[a]] for a in chosen)
                 weights.append(w)
             total = sum(weights)
@@ -311,12 +359,15 @@ def sample_subtypes(n, pool, py_rng, st_probs=None):
     return chosen
 
 def divergence_profile(seq1, seq2, DIV_WINDOW_SIZE):
+    # windowed count of differences (same result as convolving with a ones kernel, O(L) instead of O(L*W))
     v1 = np.isin(seq1, _ACGT_BYTES)
     v2 = np.isin(seq2, _ACGT_BYTES)
-    diff = ((seq1 != seq2) & v1 & v2).astype(np.float32)
-    window_half = DIV_WINDOW_SIZE // 2
-    kernel = np.ones(2 * window_half + 1, dtype=np.float32)
-    return np.convolve(diff, kernel, mode="same")
+    diff = (seq1 != seq2) & v1 & v2
+    h = DIV_WINDOW_SIZE // 2
+    L = len(diff)
+    c = np.concatenate(([0], np.cumsum(diff, dtype=np.int32)))
+    i = np.arange(L)
+    return (c[np.minimum(i + h + 1, L)] - c[np.maximum(i - h, 0)]).astype(np.float32)
 
 def assign_subtypes_to_segments(n_seg, subtype_pool, py_rng):
     pool = list(subtype_pool)
@@ -402,13 +453,23 @@ def place_breakpoints(seg_subtypes, parents, ata_len,
         return breakpoints
 
 def sample_fragment_window(ata_len: int, min_frag_len: int, rng) -> tuple[int, int]:
+    """Sample a fragment window of length at least min_frag_len from a sequence of length ata_len.
+    The start position is sampled uniformly, and the length is sampled from a log-uniform distribution."""
     start = int(rng.integers(0, ata_len - min_frag_len + 1))
     max_len = ata_len - start
     log_len = rng.uniform(np.log(min_frag_len), np.log(max_len))
     length = int(np.clip(np.round(np.exp(log_len)), min_frag_len, max_len))
     return start, start + length
 
-def _worker(cfg):
+_SHARED = {}
+
+def _init_worker(shared):
+    global _SHARED
+    _SHARED = shared
+
+def _worker(task):
+    cfg        = {**_SHARED, **task}
+    worker_id  = cfg["worker_id"]
     row_start  = cfg["row_start"]
     row_end    = cfg["row_end"]
     chunk_sz   = row_end - row_start
@@ -423,6 +484,7 @@ def _worker(cfg):
     ata_len    = cfg["ata_len"]
     site_rates_dict = cfg["site_rates_dict"]
     sub_probs_dict  = cfg["sub_probs_dict"]
+    ref_mass = cfg["ref_mass"]
     st_list    = cfg["pure_st_list"]
     div_window_size = cfg["div_window_size"]
     mdiv       = cfg["min_div"]
@@ -441,10 +503,11 @@ def _worker(cfg):
     rng    = np.random.default_rng(cfg["worker_seed"])
     py_rng = random.Random(cfg["worker_seed"])
     records  = []
-    st_probs_dict = weighted_subtype_probs({s: len(v) for s, v in st_to_seq_dict.items()})
+    st_probs_dict = weighted_subtype_probs({s: len(v) for s, v in st_to_seq_dict.items()}, floors=FLOORS, default_floor=DEFAULT_FLOOR, worker_id=worker_id)
     st_weights = [st_probs_dict[s] for s in st_list]
 
     for li in range(chunk_sz):
+        uid = f"{row_start + li:08d}"
         is_rec = py_rng.random() <= RP
         is_pure = not is_rec
         ok = False
@@ -457,14 +520,19 @@ def _worker(cfg):
             target_year = py_rng.randint(seq_obj.year, MAX_YEAR)
             rate_arr  = site_rates_dict.get(st[0], site_rates_dict['avg'])
             sub_probs = sub_probs_dict.get(st[0],  sub_probs_dict['avg'])
-            n_muts    = compute_n_muts(seq_obj.year, target_year, rate_arr, 0, len(seq_obj.arr), subtype=seq_obj.subtype)
+            n_muts = compute_n_muts(
+                seq_obj.year, target_year, rate_arr,
+                seq_obj.arr, 0,
+                subtype=seq_obj.subtype,
+                ref_mass=ref_mass.get(st[0], ref_mass['avg']),
+            )
             seq_row, total_muts = mutate_sequence_gtr(
                 seq_obj.arr.copy(), 0, rate_arr, rng, n_muts, sub_probs)
             lbl_row = np.zeros((ata_len, n_st_total), dtype=bool)
             mask_row = np.ones(ata_len, dtype=bool)
 
             label_parent_track(lbl_row, mask_row, 0, ata_len, st, st_id, mosaic_dict, rng)
-            name = f"p_{st}_{target_year}_{uuid.uuid4().hex[:8]}"
+            name = f"p_{st}_{target_year}_{uid}"
             ok = True
         else:
             for _attempt in range(max_ret):
@@ -504,13 +572,17 @@ def _worker(cfg):
                     s, e = bounds[si], bounds[si + 1]
                     if e <= s: 
                         continue
-                    chunk = parents[seg_st[si]].arr[s:e].copy()
+                    parent = parents[seg_st[si]]
+                    chunk = parent.arr[s:e].copy()
                     rate_arr = site_rates_dict.get(seg_st[si][0], site_rates_dict['avg'])
                     sub_probs = sub_probs_dict.get(seg_st[si][0], sub_probs_dict['avg'])
                     chunk_len = e - s
+                    seg_arr = parent.arr[s:s + chunk_len]
                     n_muts = compute_n_muts(
-                        parents[seg_st[si]].year, target_year, rate_arr,
-                        s, chunk_len, subtype=parents[seg_st[si]].subtype
+                        parent.year, target_year, rate_arr,
+                        seg_arr, s,
+                        subtype=parent.subtype,
+                        ref_mass=ref_mass.get(seg_st[si][0], ref_mass['avg']),
                     )
                     seq_row[s:e], muts = mutate_sequence_gtr(chunk, s, rate_arr, rng, n_muts, sub_probs)
                     total_muts += muts
@@ -534,7 +606,7 @@ def _worker(cfg):
                     r_bound = min(ata_len, r + jit)
                     mask_row[l_bound:r_bound] = False
 
-                name = f"r_{'+'.join(dict.fromkeys(seg_st))}_{target_year}_{uuid.uuid4().hex[:8]}"
+                name = f"r_{'+'.join(dict.fromkeys(seg_st))}_{target_year}_{uid}"
                 n_bp = len(bps)
                 ok = True
                 break
@@ -548,27 +620,41 @@ def _worker(cfg):
                 target_year = py_rng.randint(seq_obj.year, MAX_YEAR)
                 n_muts = compute_n_muts(
                     seq_obj.year, target_year, rate_arr,
-                    0, len(seq_obj.arr), subtype=seq_obj.subtype
+                    seq_obj.arr, 0,
+                    subtype=seq_obj.subtype,
+                    ref_mass=ref_mass.get(st[0], ref_mass['avg']),
                 )
                 seq_row, total_muts = mutate_sequence_gtr(seq_obj.arr.copy(), 0, rate_arr, rng, n_muts, sub_probs)
                 lbl_row = np.zeros((ata_len, n_st_total), dtype=bool)
                 mask_row = np.ones(ata_len, dtype=bool)
                 label_parent_track(lbl_row, mask_row, 0, ata_len, st, st_id, mosaic_dict, rng)
-                name = f"p_{st}_{target_year}_{uuid.uuid4().hex[:8]}"
+                name = f"p_{st}_{target_year}_{uid}"
 
+        # Make sure that no positions have several labels
+        check_single_label(lbl_row, id_to_st, name)
         # partial sequence cropping
         frag_start, frag_end = 0, ata_len
         if partial_frac > 0.0 and py_rng.random() < partial_frac:
+            labeled = lbl_row.any(axis=1)  # positions carrying a label (False in unlabeled A5/E zones)
+            # extract breakpoint positions where the label changes along the sequence
+            has_label = lbl_row.any(axis=1)
+            ids = np.where(has_label, lbl_row.argmax(axis=1), -1)
+            bp_positions = np.flatnonzero(np.diff(ids) != 0) + 1
             for _attempt in range(max_ret):
                 frag_start, frag_end = sample_fragment_window(ata_len, min_frag_len, rng)
                 window_slice = seq_row[frag_start:frag_end]
-                
                 has_data = np.any(
-                    (window_slice != ord('N')) & 
-                    (window_slice != ord('-'))
-                )
-                if has_data:
-                    break
+                    (window_slice != ord('N')) &
+                    (window_slice != ord('-')))
+                if not has_data or not labeled[frag_start:frag_end].any():
+                    continue
+                # ensure crop boundaries are not too close to any breakpoint
+                if len(bp_positions) > 0:
+                    dist_start = np.min(np.abs(bp_positions - frag_start))
+                    dist_end = np.min(np.abs(bp_positions - frag_end))
+                    if dist_start < CROP_MIN_BP_DIST or dist_end < CROP_MIN_BP_DIST:
+                        continue
+                break
             else:
                 frag_start, frag_end = 0, ata_len
 
@@ -579,21 +665,25 @@ def _worker(cfg):
             mask_row[:frag_start] = False
             mask_row[frag_end:]   = False
 
-        sts, n_bp_lbl = labels_to_parts(lbl_row, id_to_st)
-        uid = name.rsplit("_", 1)[1]
-        if name.startswith("r"):
-            if len(sts) > 1:
-                name, n_bp = f"r_{'+'.join(sts)}_{target_year}_{uid}", n_bp_lbl
-            else:
-                name, n_bp = f"p_{sts[0]}_{target_year}_{uid}", 0
-        elif len(sts) == 1 and name.split("_")[1] != sts[0]:
+        sts, st_struct = labels_to_parts(lbl_row, id_to_st)
+        n_bp_lbl = 0 if st_struct is None else len(st_struct[2])
+        if len(sts) > 1:
+            name, n_bp = f"r_{'+'.join(sts)}_{target_year}_{uid}", n_bp_lbl
+        else:
+            name, n_bp = f"p_{sts[0]}_{target_year}_{uid}", 0
+        if len(sts) == 1 and name.split("_")[1] != sts[0]:
             name = f"p_{sts[0]}_{target_year}_{uid}"
 
         seq_row[seq_row == ord("-")] = ord("N")
         seq_mm[row_start + li]  = seq_row
         lbl_mm[row_start + li]  = np.packbits(lbl_row, axis=-1)
         mask_mm[row_start + li] = mask_row
-        records.append((name, n_bp, total_muts, target_year, frag_start, frag_end))
+        if len(sts) > 1:   # recombinant: keep its structure so nothing has to re-read the label memmap
+            first, last, bp_ata = st_struct
+            struct = (first, last, len(sts), bp_ata.astype(np.int32))
+        else:
+            struct = (0, 0, 1, np.empty(0, dtype=np.int32))
+        records.append((name, n_bp, total_muts, target_year, frag_start, frag_end, *struct))
 
     seq_mm.flush()
     lbl_mm.flush()
@@ -612,12 +702,6 @@ if __name__ == "__main__":
         else:
             parts = rec.id.split(".")
             subtype = parts[1]
-            
-            # map headers to E and A5
-            if subtype in ["AE", "01_AE", "CRF01_AE"]:
-                subtype = "E"
-            elif subtype in ["A5U", "05_A5U"]:
-                subtype = "A5"
 
             country_code = parts[2]
             two_digit_year = int(parts[3])
@@ -651,6 +735,7 @@ if __name__ == "__main__":
     params["bp_prior"] = build_bp_prior(df_bp, hxb2_to_ata, ata_len, lam=BP_PRIOR_LAMBDA)
 
     mosaic_dict = load_mosaic_definitions(config.CRF_SEGMENTS_BD_ATA)
+    check_mosaic_overlaps(mosaic_dict)
     print(f"Loaded mosaic definitions for: {list(mosaic_dict.keys())}")
 
     mutator = SequenceMutator(
@@ -660,6 +745,7 @@ if __name__ == "__main__":
     )
     site_rates_dict = mutator.site_rates_dict
     sub_probs_dict  = mutator.sub_probs_dict
+    ref_mass = mutator.ref_mass
 
     avg_rates = site_rates_dict['avg']
     print(f"Max site rate   (avg): {avg_rates.max():.6f}")
@@ -681,34 +767,29 @@ if __name__ == "__main__":
     mask_mm = np.lib.format.open_memmap(out_masks,  mode="w+", dtype=bool,     shape=(N_SEQ, ata_len))
     del seq_mm, lbl_mm, mask_mm
 
-    chunks = np.array_split(np.arange(N_SEQ), min(N_WORKERS, N_SEQ))
-    seeds  = [int(s.generate_state(1)[0])
-              for s in np.random.SeedSequence(SEED).spawn(len(chunks))]
+    bounds   = list(range(0, N_SEQ, CHUNK_SIZE)) + [N_SEQ]
+    n_chunks = len(bounds) - 1
+    seeds    = [int(s.generate_state(1)[0])
+                for s in np.random.SeedSequence(SEED).spawn(n_chunks)]
 
-    worker_args = [
-        dict(worker_id=wid, row_start=int(c[0]), row_end=int(c[-1])+1,
-             worker_seed=seeds[wid], out_seqs=out_seqs, out_labels=out_labels, out_masks=out_masks,
-             st_to_seq_dict=dict(st_to_seq_dict), pure_st_list=pure_st_list,
-             pure_st_to_id_dict=ST_TO_ID_DICT, hxb2_to_ata=hxb2_to_ata, params=params,
-             site_rates_dict=site_rates_dict,
-             sub_probs_dict=sub_probs_dict,
-             ata_len=ata_len, mosaic_dict=mosaic_dict,
-             div_window_size=DIV_WINDOW_SIZE, min_div=MIN_DIV, max_retries=MAX_RETRIES,
-             force_divergent=FORCE_DIV, realistic=REALISTIC,
-             partial_frac=PARTIAL_FRAC, min_frag_len=MIN_FRAG_LEN)
-        for wid, c in enumerate(chunks) if len(c)
-    ]
+    shared = dict(
+        out_seqs=out_seqs, out_labels=out_labels, out_masks=out_masks,
+        st_to_seq_dict=dict(st_to_seq_dict), pure_st_list=pure_st_list,
+        pure_st_to_id_dict=ST_TO_ID_DICT, hxb2_to_ata=hxb2_to_ata, params=params,
+        site_rates_dict=site_rates_dict, sub_probs_dict=sub_probs_dict, ref_mass=ref_mass,
+        ata_len=ata_len, mosaic_dict=mosaic_dict,
+        div_window_size=DIV_WINDOW_SIZE, min_div=MIN_DIV, max_retries=MAX_RETRIES,
+        force_divergent=FORCE_DIV, realistic=REALISTIC,
+        partial_frac=PARTIAL_FRAC, min_frag_len=MIN_FRAG_LEN,
+    )
+    tasks = [dict(worker_id=i, row_start=bounds[i], row_end=bounds[i + 1], worker_seed=seeds[i])
+             for i in range(n_chunks)]
 
-    print(f"\nLaunching {len(worker_args)} workers ...")
-    with mp.Pool(len(worker_args)) as pool:
-        results = list(tqdm(pool.imap(_worker, worker_args),
-                            total=len(worker_args), desc="Chunks"))
+    print(f"\nLaunching {min(N_WORKERS, n_chunks)} workers on {n_chunks} chunks of up to {CHUNK_SIZE} rows ...")
+    with mp.Pool(min(N_WORKERS, n_chunks), initializer=_init_worker, initargs=(shared,)) as pool:
+        results = list(tqdm(pool.imap(_worker, tasks), total=n_chunks, desc="Chunks", mininterval=30))
 
-    records = [
-        (n, nbp, nmuts, ty, fs, fe)
-        for chunk in results
-        for n, nbp, nmuts, ty, fs, fe in chunk
-    ]
+    records = [r for chunk in results for r in chunk]
     names        = [r[0] for r in records]
     n_bps        = [r[1] for r in records]
     n_muts       = [r[2] for r in records]
@@ -733,7 +814,7 @@ if __name__ == "__main__":
         print(f"  {st:6s}: {st_counts[st]:>6d}  ({st_counts[st]/len(names):6.2%})")
 
     splits = np.random.default_rng(SEED).choice(
-        ["train","val","test"], size=len(names), p=[0.9,0.05,0.05])
+        ["train","val","test"], size=len(names), p=[0.98,0.01,0.01])
     with open(out_meta, "w") as f:
         f.write(
             "sequence_id\tsequence_name\tpure_or_recombinant\tsubtypes\t"
@@ -752,7 +833,7 @@ if __name__ == "__main__":
 
     print(f"\nFiles: {out_seqs}  {out_labels}  {out_meta}  {out_masks}")
 
-    test_indices = [i for i, s in enumerate(splits) if s == "test"]
+    test_indices = [i for i, s in enumerate(splits) if s == "test"][:TEST_SET_SIZE]
     test_seqs = np.load(out_seqs, mmap_mode="r")[test_indices]
     test_labels = np.load(out_labels, mmap_mode="r")[test_indices]
     test_dir = Path(WORKSPACE_PATH) / "data" / "output" / "test" / f"syn_v{VERSION}"
@@ -761,39 +842,28 @@ if __name__ == "__main__":
     out_test_labels = f"{test_dir}/test_labels_{N_SEQ}_{RP}_{PARTIAL_FRAC}.csv"
     ID_TO_ST_DICT = {v: k for k, v in ST_TO_ID_DICT.items()}
 
-    with open(out_test_fasta, "w") as f:
-        with open(out_test_labels, "w") as lf:
-            lf.write("sample_name,start,end,subtype,length\n")
-            for i, seq in enumerate(test_seqs):
-                if i == TEST_SET_SIZE:
-                    break
-                fs, fe = frag_starts[test_indices[i]], frag_ends[test_indices[i]]
-                seq_frag = seq[fs:fe]
-                labels_frag = np.unpackbits(test_labels[i][fs:fe], axis=-1)[:, :n_subtypes]
+    with open(out_test_fasta, "w") as f, open(out_test_labels, "w") as lf:
+        lf.write("sample_name,start,end,subtype,length\n")
+        for i, seq in enumerate(test_seqs):
+            gi = test_indices[i]
+            fs, fe = frag_starts[gi], frag_ends[gi]
+            seq_frag = seq[fs:fe]
 
-                keep = ~np.isin(seq_frag, [ord("-"), ord("N")])
-                seq_clean = seq_frag[keep]
-                labels_id = labels_frag[keep]
+            keep = (seq_frag != ord("-")) & (seq_frag != ord("N"))
+            seq_clean = seq_frag[keep]
+            lab = np.unpackbits(test_labels[i][fs:fe], axis=-1)[:, :n_subtypes][keep]
+            ids = np.where(lab.any(axis=1), lab.argmax(axis=1), -1)   # -1 = unlabeled ("U")
 
-                label_names = []
-                for j in range(len(labels_id)):
-                    if labels_id[j].any():
-                        label_names.append(ID_TO_ST_DICT[np.argmax(labels_id[j])])
-                    else:
-                        label_names.append("U")
+            f.write(f">{names[gi]}\n{seq_clean.tobytes().decode()}\n")
 
-                f.write(f">{names[test_indices[i]]}\n")
-                f.write(f"{''.join(map(chr, seq_clean))}\n")
+            if len(ids) == 0:
+                continue
 
-                if len(label_names) == 0:
-                    continue
-
-                start, current = 0, label_names[0]
-                for j in range(1, len(label_names)):
-                    if label_names[j] != current:
-                        lf.write(f"{names[test_indices[i]]},{start+1},{j},{current},{j-start}\n")
-                        start, current = j, label_names[j]
-                lf.write(f"{names[test_indices[i]]},{start+1},{len(label_names)},{current},{len(label_names)-start}\n")
+            # run-length encoding of the label track
+            cuts = np.flatnonzero(np.diff(ids)) + 1
+            for s0, e0 in zip(np.r_[0, cuts], np.r_[cuts, len(ids)]):
+                st = ID_TO_ST_DICT[int(ids[s0])] if ids[s0] >= 0 else "U"
+                lf.write(f"{names[gi]},{s0+1},{e0},{st},{e0-s0}\n")
 
     print("\n  === Generated Mutations per Sequence ===")
     muts_s = pd.Series(n_muts)
@@ -812,12 +882,53 @@ if __name__ == "__main__":
     gen_dist_path = f"{WORKSPACE_PATH}/figs/generated_subtype_distribution_with_year.html"
     plot_reference_distribution_with_year(gen_subtype_data, save_path=gen_dist_path)
 
-    compare_generated_vs_real(
-        names, out_labels, n_subtypes, ata_len, df_seg, ata_to_hxb2,
-    )
-
-    df_gen = extract_generated_breakpoints(names, out_labels, n_subtypes, ata_len, ata_to_hxb2)
+    df_rec, df_gen = build_rec_tables(records, ata_to_hxb2)
+    compare_generated_vs_real(df_rec, df_gen, ata_len, df_seg, ata_to_hxb2)
 
     visualize_generated_breakpoints(df_gen, df_real=df_bp)
     n_mode = int(df_gen["n_bp"].mode()[0])
     visualize_breakpoint_rank_profile(df_gen, n_mode, ata_len)
+
+    # visualisation
+    NUM_VIZ_SAMPLES = 100
+
+    viz_dir = Path(out_dir) / "figs"
+    if viz_dir.exists():
+        shutil.rmtree(viz_dir)
+    os.makedirs(viz_dir, exist_ok=True)
+
+    print(f"\nGenerating {NUM_VIZ_SAMPLES} sample visualizations in {viz_dir} ...")
+    
+    # Open memmaps for reading labels and masks
+    read_labels = np.load(out_labels, mmap_mode="r")
+    read_masks = np.load(out_masks, mmap_mode="r")
+    
+    ID_TO_ST_DICT = {v: k for k, v in ST_TO_ID_DICT.items()}
+    decoder  = CRFReferenceDecoder(bank_path=None)
+
+    for i in range(min(NUM_VIZ_SAMPLES, N_SEQ)):
+        # Unpack labels for sample i
+        unpacked_lbl = np.unpackbits(read_labels[i], axis=-1)[:, :n_subtypes]
+
+        # Convert label matrix into the region segments format expected by _segments_panel region_aligned maps each ATA position to its subtype label string or None/U
+        label_names = np.array([
+            ID_TO_ST_DICT[int(np.flatnonzero(pos_lbls)[0])] if np.any(pos_lbls) else "U"
+            for pos_lbls in unpacked_lbl
+        ], dtype=object)
+
+        # Extract contiguous regions using your method
+        regions_aligned = decoder._extract_breakpoints(label_names)
+
+        mask_slice = read_masks[i]
+        fig_path = viz_dir / f"sample_{i:04d}_{names[i]}.svg"
+
+        # Render and save the SVG figure
+        visualize_segment_and_mask_panel(
+            regions_aligned=regions_aligned,
+            mask_slice=mask_slice,
+            hxb2_to_ata=hxb2_to_ata,
+            n_total=ata_len,
+            path=str(fig_path)
+        )
+
+    print(f"Successfully saved {min(NUM_VIZ_SAMPLES, N_SEQ)} figures to {viz_dir}")
