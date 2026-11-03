@@ -18,6 +18,7 @@ from typing import Dict, List, Set, Tuple
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import re
+import shutil
 
 from python_scripts.figs import visualize_sample_probs, visualize_combined_light
 from python_scripts.src import config
@@ -112,6 +113,13 @@ parser.add_argument(
     help="Save the MAFFT alignment fed to the model (query sequences only, reference removed) "
          "as <input name without extension>_ali.fasta in the output directory.",
 )
+parser.add_argument(
+    "--save_map",
+    action="store_true",
+    help="Save the MAFFT compact mapout file (insertion mapping between the query sequences and "
+         "the reference alignment) as <input name without extension>_mapout.txt in the output directory.",
+)
+
 
 args = parser.parse_args()
 
@@ -126,6 +134,7 @@ wto           = args.wto
 gpu           = args.gpu
 no_decoder    = args.no_decoder
 save_ali      = args.save_ali
+save_map      = args.save_map
 
 if 'r' in wto:
     print("r in wto: saving subtype regions in a csv", flush=True)
@@ -438,7 +447,11 @@ if __name__ == "__main__":
     query_records = dealign_to_records(seq_path)
     if len(query_records) == 0:
         sys.exit("ERROR: no query sequences found after dealigning input.")
-    check_inputs(query_records, reference_ids, out_dir / f"id_mapping_{tag}.csv")
+    query_records = check_inputs(
+        query_records, reference_ids,
+        id_mapping_path=out_dir / f"id_mapping_{tag}.csv",
+        skipped_path=out_dir / f"skipped_{tag}.csv",
+    )
     print(f"  Query sequences: {len(query_records)}", flush=True)
 
     with tempfile.TemporaryDirectory(prefix=f"sbtr_{tag}_", ignore_cleanup_errors=True) as tmp_dir_str:
@@ -454,6 +467,12 @@ if __name__ == "__main__":
         )
 
         mafft_mapping = parse_compactmapout(map_file)
+
+        if save_map:
+            map_out_path = out_dir / f"{seq_path.stem}_mapout.txt"
+            if map_file is not None and Path(map_file).exists():
+                shutil.copy(map_file, map_out_path)
+                print(f"User entered --save_map, MAFFT compact mapout saved at: {map_out_path}", flush=True)
 
         records_ali = [
             rec for rec in SeqIO.parse(str(aligned_fasta), "fasta")
@@ -711,7 +730,7 @@ if __name__ == "__main__":
         os.remove(out_preds_path)
 
     if 'a' in wto:
-        print(f"\Attention masks saved: {out_att_path}", flush=True)
+        print(f"\nAttention masks saved: {out_att_path}", flush=True)
     else:
         os.remove(out_att_path)
 

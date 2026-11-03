@@ -995,7 +995,7 @@ def _svg_open(width, height):
 
 def _segments_panel(regions_aligned, hxb2_to_ata, n_total, X, sx, pw, top, lane_h, fs,
                     uid, mask=None, hatch_value=False, use_patterns=True,
-                    mask_bg="#888", mask_opacity=0.3):
+                    mask_bg="#888", mask_opacity=0.3, pat=None):
     """Draw the 3 frame gene panel colored by subtype, with optional mask hatching.
 
     use_patterns turns the subtype textures on or off. Masked stretches get a translucent
@@ -1030,7 +1030,9 @@ def _segments_panel(regions_aligned, hxb2_to_ata, n_total, X, sx, pw, top, lane_
                 mask_parts.append(box(s, e, g["frame"]))
 
     present = sorted((s for s in by_st if s != "U"), key=_st_key)
-    if use_patterns:
+    if pat is not None:                       # externally supplied, shared between panels
+        pat = dict(pat)
+    elif use_patterns:
         pat = {st: _PATTERN_CYCLE[i % len(_PATTERN_CYCLE)] for i, st in enumerate(present)}
     else:
         pat = {st: None for st in present}
@@ -1227,131 +1229,137 @@ def visualize_segment_and_mask_panel(regions_aligned, mask_slice, hxb2_to_ata, n
     with open(path, "w") as f:
         f.write("\n".join(out))
 
+def _bars_panel(regions, n_total, X, top, h, pat, fs):
+    """Single lane of subtype bars. regions are 1-based inclusive (start, end, subtype)."""
+    by_st, labels = defaultdict(list), []
+    for start, end, st in regions:
+        s, e = max(0, int(start) - 1), min(n_total, int(end))  # -> 0-based half-open
+        if s >= e:
+            continue
+        w = X(e) - X(s)
+        by_st[st].append(f"M{_n(X(s))} {_n(top)}h{_n(w)}v{_n(h)}h-{_n(w)}z")
+        txt = str(st)
+        if w > max(0.02 * (X(n_total) - X(0)), len(txt) * fs * 0.6):
+            labels.append((X(s) + w / 2, top + h / 2, txt))
+
+    out = []
+    for st, parts in by_st.items():
+        d = "".join(parts)
+        out.append(f'<path fill="{ST_COLORS.get(st, "#CCCCCC")}" fill-opacity="0.88" d="{d}"/>')
+        if pat.get(st):
+            out.append(f'<path fill="url(#p-{pat[st]})" d="{d}"/>')
+    all_d = "".join(p for parts in by_st.values() for p in parts)
+    out.append(f'<path fill="none" stroke="#000" stroke-width="0.5" d="{all_d}"/>')
+    for x, y, txt in labels:
+        out.append(f'<text x="{x:.1f}" y="{y:.1f}" font-size="{fs - 2}" text-anchor="middle" '
+                   f'dominant-baseline="central" stroke="#fff" stroke-width="1.2" '
+                   f'stroke-opacity="0.7" paint-order="stroke">{escape(txt)}</text>')
+    return out
+
+
 def visualize_region_comparison(
     seq_id: str,
     regions_list: list[dict | list],
     labels_list: list[str],
-    seq_length: int,
-    path: str = None,
-) -> None:
+    n_total: int,
+    hxb2_to_ata=None,
+    path: str | None = None,
+    seq_length: int | None = None,
+    masks: list | None = None,
+    width: int = 1100,
+    lane_h: int = 24,
+    fs: int = 12,
+    panel_gap: int = 14,
+    use_patterns: bool = True,
+    ) -> str | None:
     """
-    Compare N sets of (start, end, subtype) region calls for a single sequence.
+    Stacked comparison of N region sets for one sequence, one labelled panel per set.
 
-    regions_list: List of iterables (or dicts) containing (start, end, subtype) tuples.
-    labels_list: List of string labels corresponding to each region set in regions_list.
+    hxb2_to_ata given -> 3-frame gene panels; regions must be in ALIGNMENT coordinates
+                         (same convention as regions_aligned), n_total = alignment length.
+    hxb2_to_ata None  -> one bar lane per set; regions in SEQUENCE coordinates
+                         (1-based inclusive), n_total = sequence length.
+    masks: gene mode only. Returns the SVG string if path is None.
     """
     if len(regions_list) != len(labels_list):
         raise ValueError("regions_list and labels_list must have the same length.")
-
     n_tracks = len(regions_list)
     if n_tracks == 0:
         raise ValueError("At least one set of regions must be provided.")
+    if n_total <= 0:
+        raise ValueError("n_total must be positive.")
+    if masks is not None and len(masks) != n_tracks:
+        raise ValueError("masks must have the same length as regions_list.")
+    gene_mode = hxb2_to_ata is not None
 
     def _as_tuples(regions):
         return list(regions.values()) if isinstance(regions, dict) else list(regions)
 
-    # Normalize all input region sets into lists of tuples
-    regions_list = [_as_tuples(r) for r in regions_list]
+    def _map_subtypes(regions):
+        conv = lambda t: (t[0], t[1], JPHMM_TO_SBTR_LTR.get(t[2], t[2]))
+        if isinstance(regions, dict):
+            return {k: conv(v) for k, v in regions.items()}
+        return [conv(r) for r in regions]
 
-    FALLBACK_COLOR = "#cccccc"  # grey used for missing/dash data
+    regions_list = [_map_subtypes(r) for r in regions_list]
 
-    def subtype_color(st):
-        return ST_COLORS.get(st, FALLBACK_COLOR)
+    # shared subtype -> pattern mapping so all panels and the legend agree
+    present = {t[2] for r in regions_list for t in _as_tuples(r)} - {"U"}
+    legend_sts = sorted(present, key=_st_key)
+    pat = ({st: _PATTERN_CYCLE[i % len(_PATTERN_CYCLE)] for i, st in enumerate(legend_sts)}
+           if use_patterns else {st: None for st in legend_sts})
+    pat["U"] = None
 
-    # Layout: N rows, dynamic height
-    track_h = 1.0
-    fig = plt.figure(figsize=(14, n_tracks * track_h + 1.2))
-    gs = fig.add_gridspec(
-        n_tracks, 1,
-        height_ratios=[track_h] * n_tracks,
-        hspace=0.80 if n_tracks > 1 else 0.40,
-    )
+    uid = _uid()
+    ml, mr, top = 40, 20, 8
+    pw = width - ml - mr
+    sx = pw / n_total
+    X = lambda x: ml + x * sx
+    lab_pad = fs // 4
+    panel_h = 3 * lane_h if gene_mode else lane_h
+    label_h = fs + 6
 
-    axes = []
-    for i in range(n_tracks):
-        share = axes[0] if i > 0 else None
-        axes.append(fig.add_subplot(gs[i, 0], sharex=share))
+    body, y = [], top
+    if seq_id is not None:
+        title = f"Sequence {seq_id}"
+        if seq_length is not None:
+            title += f"  \u2014  length {seq_length} bp"
+        body.append(f'<text x="{ml}" y="{y + fs + 1}" font-size="{fs + 1}" '
+                    f'font-weight="bold">{escape(title)}</text>')
+        y += fs + 10
 
-    # Helper function to draw an individual track
-    def draw_track(ax, regions, label):
-        ax.set_xlim(0, seq_length)
-        ax.set_ylim(0, 1)
-        for spine in ("top", "right", "left"):
-            ax.spines[spine].set_visible(False)
-        ax.set_yticks([0.5])
-        ax.set_yticklabels([label], fontsize=8)
-        ax.xaxis.set_major_locator(ticker.MultipleLocator(max(1, seq_length // 10)))
-        ax.tick_params(axis='x', labelsize=8)
-
-        for start, end, subtype in regions:
-            if subtype in JPHMM_TO_SBTR_LTR.keys():
-                subtype = JPHMM_TO_SBTR_LTR[subtype]
-            s = max(0, int(start))
-            e = min(seq_length, int(end))
-            if s >= e:
-                continue
-            ax.add_patch(plt.Rectangle(
-                (s, 0.05), e - s, 0.9,
-                fc=subtype_color(subtype),
-                ec="#555555", linewidth=0.4, alpha=0.88,
-            ))
-            if (e - s) > seq_length * 0.02:
-                ax.text(
-                    s + (e - s) / 2, 0.5, str(subtype),
-                    ha="center", va="center",
-                    fontsize=6.5, color="black",
-                    bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.6),
-                )
-
-    # Draw all tracks dynamically
-    for ax, regions, label in zip(axes, regions_list, labels_list):
-        draw_track(ax, regions, label)
-
-    # Hide x-axis tick labels for all but the bottom subplot
-    for ax in axes[:-1]:
-        plt.setp(ax.get_xticklabels(), visible=False)
-
-    axes[-1].set_xlabel("Sequence position (bp)", fontsize=9)
-    axes[0].set_title(f"Sequence {seq_id}  —  length {seq_length} bp", fontsize=10)
-
-    # Shared legend across all N tracks
-    present_subtypes = set()
-    for regions in regions_list:
-        for r in regions:
-            subtype = str(r[2])
-            # .get() simplifies dictionary lookup
-            subtype = JPHMM_TO_SBTR_LTR.get(subtype, subtype)
-            present_subtypes.add(subtype)
-
-    present_subtypes = sorted(present_subtypes)
-    
-    if present_subtypes:
-        legend_handles = [
-            mpatches.Patch(
-                fc=subtype_color(st), ec="#555555", lw=0.4, label=st,
+    panel_top = y
+    for i, (regions, label) in enumerate(zip(regions_list, labels_list)):
+        body.append(f'<text x="{ml}" y="{y + fs}" font-size="{fs}" font-weight="bold" '
+                    f'fill="#222">{escape(str(label))}</text>')
+        y += label_h + lab_pad
+        panel_top = y
+        if gene_mode:
+            seg_out, *_ = _segments_panel(
+                regions, hxb2_to_ata, n_total, X, sx, pw, panel_top, lane_h, fs,
+                f"{uid}_{i}", mask=None if masks is None else masks[i],
+                use_patterns=use_patterns, pat=pat,
             )
-            for st in present_subtypes
-        ]
-        
-        # Adjust legend vertical offset based on number of tracks
-        y_bbox = -0.8 - (0.35 / n_tracks)
-        axes[-1].legend(
-            handles=legend_handles,
-            title="Subtype",
-            title_fontsize=8,
-            fontsize=7,
-            ncol=min(len(legend_handles), 6),
-            loc="upper center",
-            bbox_to_anchor=(0.5, y_bbox),
-            frameon=True,
-            framealpha=0.85,
-            borderpad=0.3,
-            handlelength=1.2,
-        )
+        else:
+            seg_out = _bars_panel(_as_tuples(regions), n_total, X, panel_top, panel_h, pat, fs)
+        body.extend(seg_out)
+        y = panel_top + panel_h + lab_pad + panel_gap
 
+    ay = panel_top + panel_h + lab_pad + 2
+    height = ay + fs * 3 + 8
+
+    out = [_svg_open(width, height), _PATTERN_DEFS]
+    out.extend(body)
+    out.extend(_x_axis(_ticks(n_total), X, ml, pw, ay, fs))
+    out.extend(_legend(legend_sts, pat, ml, height, fs))
+    out.append("</svg>")
+
+    svg = "\n".join(out)
     if path:
-        plt.savefig(path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        with open(path, "w") as f:
+            f.write(svg)
+        return None
+    return svg
 
 
 def visualize_metrics(save_path_loss,
