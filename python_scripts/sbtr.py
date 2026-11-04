@@ -27,12 +27,17 @@ from python_scripts.src.preprocessing_aux import run_mafft_addfragments, load_re
 from python_scripts.src.model_class import HFModelForHIVSubtyping
 from python_scripts.src.decoder_class import CRFReferenceDecoder
 
-ST_TO_ID_DICT      = config.ST_TO_ID_DICT
-NUM_SUBTYPES       = len(ST_TO_ID_DICT)
-MODEL_CONFIG       = config.MODEL_CONFIG
-ATA_LEN            = config.ATA_LEN
-MAX_LENGTH         = config.SEQ_LEN_AFTER_PAD
-PAD_MULTIPLE_OF    = config.PAD_LEN
+ST_TO_ID_DICT       = config.ST_TO_ID_DICT
+NUM_SUBTYPES        = len(ST_TO_ID_DICT)
+MODEL_CONFIG        = config.MODEL_CONFIG
+ATA_LEN             = config.ATA_LEN
+MAX_LENGTH          = config.SEQ_LEN_AFTER_PAD
+PAD_MULTIPLE_OF     = config.PAD_LEN
+HXB2_ACC            = config.HXB2_ACC
+MAX_SEQ_LEN         = config.MAX_SEQ_LEN
+MIN_INFORMATIVE_BP  = config.MIN_INFORMATIVE_BP
+MAX_N_FRACTION      = config.MAX_N_FRACTION
+PROB_ZERO_THRESHOLD = config.PROB_ZERO_THRESHOLD
 
 import argparse
 
@@ -92,34 +97,23 @@ parser.add_argument(
     help="Batch size for forward pass (default: 1, increase for GPU).",
 )
 parser.add_argument(
-    "--wto",
-    type=str,
-    default="",
-    help="""Flags determining extra output files. Combine letters in any order:
-  f: Output prediction figures per sequence (increases runtime)
-  l: Output light svg prediction figures
-  r: Output regions CSV with (start, end, subtype)
-  p: Output raw .npy file of predictions
-  a: Output attention masks""",
-)
-parser.add_argument(
     "--no_decoder",
     action="store_true",
     help="Stop after the model forward pass: save predictions, is_real masks and names; skip CRF decoding.",
 )
 parser.add_argument(
-    "--save_ali",
-    action="store_true",
-    help="Save the MAFFT alignment fed to the model (query sequences only, reference removed) "
-         "as <input name without extension>_ali.fasta in the output directory.",
+    "--wto",
+    type=str,
+    default="",
+    help="""Flags determining extra output files. Combine letters in any order:
+  f: Output png prediction figures per sequence (increases runtime)
+  l: Output light svg prediction figures
+  r: Output regions CSV with (start, end, subtype)
+  p: Output raw .npy file of predictions
+  m: Output attention masks
+  a: Output the MAFFT alignment fed to the model (query sequences only, reference removed)
+  c: Output the MAFFT compact mapout file""",
 )
-parser.add_argument(
-    "--save_map",
-    action="store_true",
-    help="Save the MAFFT compact mapout file (insertion mapping between the query sequences and "
-         "the reference alignment) as <input name without extension>_mapout.txt in the output directory.",
-)
-
 
 args = parser.parse_args()
 
@@ -133,8 +127,6 @@ batch_size    = args.batch_size
 wto           = args.wto
 gpu           = args.gpu
 no_decoder    = args.no_decoder
-save_ali      = args.save_ali
-save_map      = args.save_map
 
 if 'r' in wto:
     print("r in wto: saving subtype regions in a csv", flush=True)
@@ -144,8 +136,13 @@ if 'f' in wto:
     print("f in wto: saving figures in figs folder", flush=True)
 if 'l' in wto:
     print("l in wto: saving light svg figures in figs folder", flush=True)
+if 'm' in wto:
+    print("m in wto: saving attention masks in a npy file", flush=True)
 if 'a' in wto:
-    print("a in wto: saving attention masks in a npy file", flush=True)
+    print("a in wto: saving alignment in a fasta file", flush=True)
+if 'c' in wto:
+    print("c in wto: saving MAFFT compact mapout in a txt file", flush=True)
+
 
 num_workers = min(os.cpu_count(), num_workers)
 if num_workers == 1:
@@ -173,12 +170,12 @@ if not COMBINED_REF_PATH.exists():
     with gzip.open(gz_path, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
         f_out.write(f_in.read())
 
-MAX_SEQ_LEN        = config.MAX_SEQ_LEN
-MIN_INFORMATIVE_BP = config.MIN_INFORMATIVE_BP
-MAX_N_FRACTION     = config.MAX_N_FRACTION
-PROB_ZERO_THRESHOLD = config.PROB_ZERO_THRESHOLD
-VALID_NT           = set("ACGTRYKMSWBDHVN")  # IUPAC DNA
-_BAD_ID_CHARS      = re.compile(r"[^A-Za-z0-9._+\-]")
+VALID_NT            = set("ACGTRYKMSWBDHVN")  # IUPAC DNA
+_BAD_ID_CHARS       = re.compile(r"[^A-Za-z0-9._+\-]")
+
+
+def _is_hxb2(rec_id: str) -> bool:
+    return rec_id == HXB2_ACC or HXB2_ACC in re.split(r"[.|_]", rec_id)
 
 def _preview(items: List[str], n: int = 10) -> str:
     return ", ".join(items[:n]) + (f", ... (+{len(items) - n} more)" if len(items) > n else "")
@@ -468,16 +465,21 @@ if __name__ == "__main__":
 
         mafft_mapping = parse_compactmapout(map_file)
 
-        if save_map:
+        # Queries go to the model; HXB2 is kept only for the saved alignment
+        hxb2_rec_ali = None
+        records_ali = []
+        for rec in SeqIO.parse(str(aligned_fasta), "fasta"):
+            if rec.id in reference_ids:
+                if hxb2_rec_ali is None and _is_hxb2(rec.id):
+                    hxb2_rec_ali = rec
+            else:
+                records_ali.append(rec)
+
+        if 'c' in wto:
             map_out_path = out_dir / f"{seq_path.stem}_mapout.txt"
             if map_file is not None and Path(map_file).exists():
                 shutil.copy(map_file, map_out_path)
-                print(f"User entered --save_map, MAFFT compact mapout saved at: {map_out_path}", flush=True)
-
-        records_ali = [
-            rec for rec in SeqIO.parse(str(aligned_fasta), "fasta")
-            if rec.id not in reference_ids
-        ]
+                print(f"User entered c in wto, MAFFT compact mapout saved at: {map_out_path}", flush=True)
 
     # Delete
     if COMBINED_REF_PATH.exists():
@@ -501,12 +503,15 @@ if __name__ == "__main__":
 
     seq_names = [rec.id.split()[0] for rec in records_ali]
 
-    if save_ali:
+    if 'a' in wto:
         ali_path = out_dir / f"{seq_path.stem}_ali.fasta"
-        for rec in records_ali:
+        out_records = list(records_ali)
+        if hxb2_rec_ali is not None:
+            out_records.insert(0, hxb2_rec_ali)
+        for rec in out_records:
             rec.description = ""
-        SeqIO.write(records_ali, str(ali_path), "fasta")
-        print(f"User entered --save_ali, alignment saved at: {ali_path}", flush=True)
+        SeqIO.write(out_records, str(ali_path), "fasta")
+        print(f"User entered a in wto, alignment saved at: {ali_path}", flush=True)
 
     metadata  = pd.DataFrame({
         "sequence_name": seq_names,
@@ -729,7 +734,7 @@ if __name__ == "__main__":
     else:
         os.remove(out_preds_path)
 
-    if 'a' in wto:
+    if 'm' in wto:
         print(f"\nAttention masks saved: {out_att_path}", flush=True)
     else:
         os.remove(out_att_path)
