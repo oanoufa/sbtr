@@ -8,6 +8,7 @@ import gzip
 from Bio import SeqIO
 from Bio.Seq import Seq
 import os
+import atexit
 import sys
 import tempfile
 from torch.utils.data import DataLoader
@@ -81,6 +82,34 @@ parser.add_argument(
     default="./sbtr_output",
     help="Output directory path (default: ./sbtr_output).",
 )
+
+parser.add_argument(
+    "--model",
+    type=str,
+    default=MODEL_CONFIG["model_name"],
+    help="Hugging Face model id or path to a local model directory "
+         f"(default: {MODEL_CONFIG['model_name']}).",
+)
+parser.add_argument(
+    "--revision",
+    type=str,
+    default=config.MODEL_REVISION,
+    help="Hub revision (tag or commit SHA) of --model; ignored for a local directory "
+         f"(default: {config.MODEL_REVISION}).",
+)
+parser.add_argument(
+    "--version", action="version",
+    version=f"sbtr {config.VERSION} (model {config.MODEL_CONFIG['model_name']}@{config.MODEL_REVISION})",
+)
+
+parser.add_argument(
+    "--backbone",
+    type=str,
+    default=None,
+    help="Local directory with the backbone config and code (overrides the Hub backbone "
+         "named in the model's config.json). Use it for offline runs without a token.",
+)
+
 parser.add_argument(
     "--gpu", action="store_true", help="Enable CUDA GPU acceleration if available."
 )
@@ -94,8 +123,9 @@ parser.add_argument(
     "--batch_size",
     type=int,
     default=1,
-    help="Batch size for forward pass (default: 1, increase for GPU).",
+    help="Batch size for forward pass (default: 1, increase if GPU and/or several CPUs).",
 )
+
 parser.add_argument(
     "--no_decoder",
     action="store_true",
@@ -163,15 +193,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 WORKSPACE_PATH = SCRIPT_DIR.parents[0]
 
 BANK_PATH = Path(f"{WORKSPACE_PATH}/data/reference_bank/crf_reference_bank.npz")
-COMBINED_REF_PATH = Path(f"{WORKSPACE_PATH}/data/HIV1_COMBINED_REF.fasta")
-gz_path = COMBINED_REF_PATH.with_name(COMBINED_REF_PATH.name + ".gz")
+REF_GZ_PATH = Path(f"{WORKSPACE_PATH}/data/HIV1_COMBINED_REF.fasta.gz")
 
-if not COMBINED_REF_PATH.exists():
-    with gzip.open(gz_path, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
-        f_out.write(f_in.read())
-
-VALID_NT            = set("ACGTRYKMSWBDHVN")  # IUPAC DNA
-_BAD_ID_CHARS       = re.compile(r"[^A-Za-z0-9._+\-]")
+VALID_NT = set("ACGTRYKMSWBDHVN")  # IUPAC DNA
+_BAD_ID_CHARS = re.compile(r"[^A-Za-z0-9._+\-]")
 
 
 def _is_hxb2(rec_id: str) -> bool:
@@ -200,8 +225,9 @@ def sanitize_ids(records: List, reference_ids: Set[str], mapping_path: Path = No
         print(f"  [warn] {len(mapping)} sequence ID(s) renamed (special characters, duplicates "
               f"or clash with reference IDs): {_preview([f'{o} -> {n}' for o, n in mapping], 5)}",
               flush=True)
-        if mapping_path is not None:
-            pd.DataFrame(mapping, columns=["original_id", "new_id"]).to_csv(mapping_path, index=False)
+    if mapping_path is not None:
+        pd.DataFrame(mapping, columns=["original_id", "new_id"]).to_csv(mapping_path, index=False)
+        if mapping:
             print(f"  ID mapping saved: {mapping_path}", flush=True)
 
 def check_inputs(
@@ -246,8 +272,9 @@ def check_inputs(
     if skipped:
         print(f"  [warn] {len(skipped)} sequence(s) skipped: "
               f"{_preview([f'{i} ({r})' for i, r in skipped], 5)}", flush=True)
-        if skipped_path is not None:
-            pd.DataFrame(skipped, columns=["sequence_name", "reason"]).to_csv(skipped_path, index=False)
+    if skipped_path is not None:
+        pd.DataFrame(skipped, columns=["sequence_name", "reason"]).to_csv(skipped_path, index=False)
+        if skipped:
             print(f"  Skipped sequences saved: {skipped_path}", flush=True)
 
     if not kept:
@@ -286,7 +313,7 @@ def process_single_sample_worker(
 
     result_line = (
         f"{sample_name},"
-        f"{crf_result['composition_str']}, {crf_result['active_positions']},"
+        f"{crf_result['composition_str']},{crf_result['active_positions']},"
         f"{crf_result['dominant_subtype']},{crf_result['dominant_fraction']:.4f},"
         f"{best_ref_crf},{best_ref_distance:.4f},{top5_ref},{active_site_equivalents_str},"
         f"{crf_result['final_decision']}\n"
@@ -343,6 +370,7 @@ def global_results(
     df[['kind', 'full_or_partial', 'status', 'crf_raw']] = df['final_decision'].apply(
         lambda d: pd.Series(parse_decision(d))
     )
+    df['crf_raw'] = df['crf_raw'].astype('string')
     # For assigned recombinants, crf_raw is a single CRF name; keep as-is.
     # For pure "like" calls, crf_raw is a "+"-joined list of nearest refs, not a CRF assignment.
     df['crf_assigned'] = df['crf_raw'].where(df['status'] == 'assigned')
@@ -363,11 +391,12 @@ def global_results(
     like_mask = df['status'] == 'like'
     like_exploded = (
         df.loc[like_mask, 'crf_raw']
+        .dropna()
         .str.split('+')
         .explode()
     )
     combined_series = pd.concat([
-        df.loc[df['status'] == 'assigned', 'crf_raw'],
+        df.loc[df['status'] == 'assigned', 'crf_raw'].dropna(),
         like_exploded,
     ])
 
@@ -423,6 +452,13 @@ if __name__ == "__main__":
     n_packed = int(np.ceil(NUM_SUBTYPES / 8))
     torch.set_float32_matmul_precision('high')
 
+    # Per-run private copy of the reference (honours TMPDIR; removed at exit, even on sys.exit)
+    ref_tmp = tempfile.TemporaryDirectory(prefix=f"sbtr_ref_{tag}_", ignore_cleanup_errors=True)
+    atexit.register(ref_tmp.cleanup)
+    COMBINED_REF_PATH = Path(ref_tmp.name) / "HIV1_COMBINED_REF.fasta"
+    with gzip.open(REF_GZ_PATH, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
+        shutil.copyfileobj(f_in, f_out)
+
     # Load combined reference (HXB2 coords + mafft target + ID filter)
     print(f"Loading combined reference from: {COMBINED_REF_PATH}", flush=True)
     hxb2_ata_seq = None
@@ -476,14 +512,11 @@ if __name__ == "__main__":
                 records_ali.append(rec)
 
         if 'c' in wto:
-            map_out_path = out_dir / f"{seq_path.stem}_mapout.txt"
+            map_out_path = out_dir / f"{tag}_mapout.txt"
             if map_file is not None and Path(map_file).exists():
                 shutil.copy(map_file, map_out_path)
                 print(f"User entered c in wto, MAFFT compact mapout saved at: {map_out_path}", flush=True)
 
-    # Delete
-    if COMBINED_REF_PATH.exists():
-        COMBINED_REF_PATH.unlink()
     # Clean the potential info added at the beginning of the rec id (r_B+K+A3_2015 became 4ins:5192g-5197a,etc|r_B+K+A3_2015) but stay robust to the eventual presence of other |
     for rec in records_ali:
         rec.id = ''.join(rec.id.split('|')[1:]) if 'ins:' in rec.id else rec.id
@@ -504,7 +537,7 @@ if __name__ == "__main__":
     seq_names = [rec.id.split()[0] for rec in records_ali]
 
     if 'a' in wto:
-        ali_path = out_dir / f"{seq_path.stem}_ali.fasta"
+        ali_path = out_dir / f"{tag}_ali.fasta"
         out_records = list(records_ali)
         if hxb2_rec_ali is not None:
             out_records.insert(0, hxb2_rec_ali)
@@ -559,9 +592,13 @@ if __name__ == "__main__":
     del records_ali
 
     # load model + tokenizer
-    model_used = MODEL_CONFIG["model_name"]
-    tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True, revision="main")
-    model = HFModelForHIVSubtyping.from_pretrained(model_used, trust_remote_code=True, revision="main")
+    model_used = args.model
+    revision = None if Path(model_used).is_dir() else args.revision
+    tokenizer = AutoTokenizer.from_pretrained(model_used, trust_remote_code=True, revision=revision)
+    extra = {"backbone_name": args.backbone, "backbone_revision": None} if args.backbone else {}
+    model = HFModelForHIVSubtyping.from_pretrained(
+        model_used, trust_remote_code=True, revision=revision, **extra
+    )
 
     print(f"\nModel {model_used} with architecture:\n{model}")
     print(f"\nBackbone: {sum(p.numel() for p in model.backbone.parameters()):,} params")
@@ -579,8 +616,8 @@ if __name__ == "__main__":
         split=tag,
     )
     inference_loader = DataLoader(
-        inference_dataset, batch_size=batch_size, # Batch size 1 is much faster
-        shuffle=False, num_workers=num_workers, pin_memory=True
+        inference_dataset, batch_size=batch_size,
+        shuffle=False, num_workers=num_workers, pin_memory=(device.type == "cuda")
     )
 
     out_preds_path = out_dir / f"predictions_{tag}.npy"
@@ -612,7 +649,8 @@ if __name__ == "__main__":
     print("\nRunning model inference...", flush=True)
 
     global_idx = 0
-    with torch.no_grad(), torch.amp.autocast('cuda'): # Mixed precision speeds up inference
+    use_cuda = device.type == "cuda"
+    with torch.no_grad(), torch.amp.autocast(device_type=device.type, enabled=use_cuda): # Mixed precision on GPU only
         for batch in tqdm(inference_loader, desc="Forward pass...", mininterval=30):
             B = batch["input_ids"].shape[0]
 

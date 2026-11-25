@@ -11,6 +11,7 @@ class HIVSubtypingConfig(PretrainedConfig):
     def __init__(
         self,
         backbone_name: str = "InstaDeepAI/NTv3_650M_pre",
+        backbone_revision: str = None,   # commit SHA of the backbone repo; None = latest
         num_subtypes: int = 22,
         smooth_kernel: int = 5,
         embed_layer: int = -1,
@@ -18,6 +19,7 @@ class HIVSubtypingConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
         self.backbone_name = backbone_name
+        self.backbone_revision = backbone_revision
         self.num_subtypes = num_subtypes
         self.smooth_kernel = smooth_kernel
         self.embed_layer = embed_layer
@@ -74,15 +76,19 @@ class HFModelForHIVSubtyping(PreTrainedModel):
         super().__init__(config)
         self.config = config
 
+        rev = config.backbone_revision
         backbone_config = AutoConfig.from_pretrained(
             config.backbone_name,
             trust_remote_code=True,
+            revision=rev,
+            code_revision=rev,
         )
         if not hasattr(backbone_config, "is_decoder"):
             backbone_config.is_decoder = False
         self.backbone = AutoModelForMaskedLM.from_config(
             backbone_config,
             trust_remote_code=True,
+            code_revision=rev,
         )
         embed_dim = getattr(
             backbone_config, "embed_dim", getattr(backbone_config, "hidden_size", 1280)

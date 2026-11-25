@@ -9,10 +9,6 @@ import pandas as pd
 from . import config
 
 MODEL_CONFIG = config.MODEL_CONFIG
-tokenizer  = AutoTokenizer.from_pretrained(
-    MODEL_CONFIG["tokenizer"],
-    trust_remote_code=True,
-    revision="main")
 max_length = config.SEQ_LEN_AFTER_PAD
 pad_multiple_of = config.PAD_LEN
 

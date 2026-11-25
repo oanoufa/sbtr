@@ -1,8 +1,7 @@
-
 # A novel HIV-1 fine-grain subtyping tool leveraging genomic language models
 
 
-<img src="figs/readme/sbtr_full.svg" width="10000">
+<img src="figs/readme/sbtr.svg" width="10000">
 
 <!-- <img src="figs/readme/logo_small.png" width="130" align="left"> -->
 
@@ -11,9 +10,15 @@
 ## How it works
 
 sbtr processes input sequences through an automated end-to-end pipeline:
-1. **Dealign & Align**: Input FASTA sequences or existing alignments are dealigned and aligned against an internal HIV-1 reference alignment using MAFFT.
-2. **Language Model Inference**: Aligned sequences pass through a pre-trained genomic language model that uses [Nucleotide Transformer v3](https://huggingface.co/spaces/InstaDeepAI/ntv3) as a backbone. The model outputs predictions as a 2D array of size (num_subtypes, alignment_length). A value close to 1 in cell i, j means a prediction of subtype i at position j.
-3. **Subtype Classification**: Predictions are compared against model outputs from a reference bank built with 3 sequences of each Circulating Recombinant Forms (CRFs). The comparison is a simple intersection between the input sequence prediction array and each prediction array in the bank. sbtr finally generates per-position and global subtype assignments. An example is given in the readme.
+1. **Dealign & align**: Input FASTA sequences or existing alignments are dealigned and aligned against an internal HIV-1 reference alignment using MAFFT.
+2. **Genomic language model inference**: Aligned sequences pass through a pre-trained genomic language model that uses [Nucleotide Transformer v3](https://huggingface.co/spaces/InstaDeepAI/ntv3) as a backbone. For each position of the alignment, the model outputs an independent probability (sigmoid) for each subtype. The raw output for one sequence is therefore a 2D array of size (alignment_length, num_subtypes). A value close to 1 in cell i, j means a prediction of subtype j at position i.
+3. **Decoding to a 1D label sequence**: The decoder turns this 2D array into a single subtype label per position, using a sliding window:
+   * probabilities under a confidence threshold (`0.7`) are set to 0, and positions where no subtype passes the threshold are given a virtual *unknown* (`U`) label;
+   * a uniform sliding window of 100 positions, centered on each position, smooths each subtype channel (and the `U` channel);
+   * the channel with the highest smoothed value wins, which gives a 1D list of labels at single-nucleotide resolution. Positions before the first and after the last position covered by the sequence are set to `U`.
+
+   Contiguous blocks of identical labels give the subtype regions and breakpoints (`regions_dealigned_<tag>.csv`), and the dominant subtype and composition of the sequence.
+4. **CRF comparison & classification**: The 1D label list is compared to a bank of reference 1D label lists, built by running the same model and decoder on 3 sequences of each Circulating Recombinant Form (CRF). For each reference, the matching score is the fraction of positions with the same label, among the positions that are informative in both the query and the reference (references covering too little of the query are discarded). Scores are aggregated per CRF type (best reference of each type), and sbtr finally generates a global subtype assignment (`final_decision`, see below), combining the purity of the sequence, its length, and the best CRF match. An example is given in the readme.
 
 
 
@@ -93,27 +98,50 @@ apptainer run --nv \
 | `--gpu` | `flag` | `False` | Enable CUDA GPU acceleration. |
 | `--num_cpu` | `int` | `1` | Number of CPUs for concurrent processing. |
 | `--batch_size` | `int` | `1` | Forward pass batch size (increase for GPU runs). |
+| `--no_decoder` | `flag` | `False` | Stop after the model forward pass: save raw predictions, `is_real` masks and sequence names, skip CRF decoding (no `results`/`summary`). |
 | `--wto` | `str` | `""` | Optional outputs to write (see details below). |
 
 ### Output flag (`--wto`)
 The tool always outputs `results_<tag>.csv` and `summary_<tag>.json`. You can request additional outputs by concatenating any combination of these letters to `--wto`:
 
-* `f`: Generate a detailed figure per-sequence showing the prediction array and the 1D prediction *(adds runtime)
-*.
-* `l`: Generate a lightweight svg figure for each sequence showing only the 1D prediction.
 * `r`: Output a region csv containing `(start, end, subtype)` breakpoints.
+* `f`: Generate a detailed png figure per sequence showing the prediction array and the 1D prediction *(adds runtime)*.
+* `l`: Generate a lightweight svg figure for each sequence showing only the 1D prediction. If both `l` and `f` are given, only the light svg figures are produced.
 * `p`: Export raw prediction scores as a NumPy (`.npy`) file.
-* `a`: Save model attention masks.
+* `m`: Save the model attention masks as a NumPy (`.npy`) file.
+* `a`: Save the MAFFT alignment fed to the model as a FASTA file (the HXB2 reference is included as the first record).
+* `c`: Save the MAFFT compact mapout file (map of the insertions removed relative to the reference alignment) as a txt file.
 
 *Example:* `--wto fr` outputs both the prediction figures and the genomic regions csv.
 
 
 ## Outputs
 
-* `results_<tag>.csv`: Final per-position subtype predictions.
+Always written to `--out_dir`:
+
+* `results_<tag>.csv`: One row of global results per input sequence.
 * `summary_<tag>.json`: Run metadata and summary statistics on the input batch of sequences.
-* `regions_dealigned_<tag>.csv` *(optional)*: Genomic coordinates and assigned subtypes.
-* `--out_dir/figs/` *(optional)*: Graphical visualisations of sequence subtype profiles.
+
+Written only when relevant:
+
+* `id_mapping_<tag>.csv`: Written if some sequence IDs had to be renamed (special characters, duplicates, or clash with a reference ID). Columns: `original_id`, `new_id`.
+* `skipped_<tag>.csv`: Written if some sequences were rejected during input checks (non-nucleotide characters, too long, too few informative positions). Columns: `sequence_name`, `reason`.
+
+Optional outputs, selected with `--wto`:
+
+| Flag | File(s) | Content |
+| :--- | :--- | :--- |
+| `r` | `regions_dealigned_<tag>.csv` | Subtype regions `(sample_name, start, end, subtype, length)` for all sequences, in unaligned coordinates. |
+| `f` | `figs/<sample_name>_preds.png` | Detailed figure per sequence (loss mask, genes, prediction heatmap, sliding-window prediction). |
+| `l` | `figs/<sample_name>_light_preds.svg` | Lightweight 1D figure per sequence. Takes precedence over `f`. |
+| `p` | `predictions_<tag>.npy` | Raw model probabilities, `float32` array of shape `(n_sequences, max_length, n_subtypes)` (first `alignment_length` positions are meaningful). |
+| `m` | `attention_masks_<tag>.npy` | Attention masks, boolean array of shape `(n_sequences, max_length)`. |
+| `a` | `<input_name>_ali.fasta` | MAFFT alignment of the input sequences against the reference alignment (HXB2 first, reference sequences removed). |
+| `c` | `<input_name>_mapout.txt` | MAFFT compact mapout file. |
+
+`<input_name>` is the file name of `--seq` without its extension.
+
+With `--no_decoder`, the run stops after the forward pass and writes `predictions_<tag>.npy`, `is_real_<tag>.npy` (positions of the alignment covered by each input sequence) and `names_<tag>.txt` (sequence names, one per line, same order as the arrays). No `results`/`summary` file is produced.
 
 
 ## Example output
@@ -124,18 +152,26 @@ Below is an example run on `65_cpx.CN.11.ANHUI_HF104.KC183778`, a CRF65_cpx reco
 
 The results csv contains one row per sample in the input sequence file. This row details the global results on the sample:
 * `composition` is a string of the subtypes present in the sequence, separated by `_`. Here `AE_B_C`.
+* `active_positions` is the range of alignment positions (`first-last`) covered by the sequence once flanking unassigned (`U`) positions are trimmed, or `none` if nothing is left.
 * `dominant_subtype` is the subtype in majority in the sequence. Here `C`.
 * `dominant_fraction` is the proportion of `dominant_subtype` in the sequence. Here `0.6100`.
 * `ref_best_crf` is the closest matching CRF sequence in the reference bank. Here `65_cpx.CN.10.YNFL02.KC870028`.
 * `ref_best_score` is the matching score of `ref_best_crf`. Here `0.9288`.
 * `ref_top5` is the top 5 of the closest CRFs to the input sequence. They are given with their score as `<crf>:<score>`. Here `65_cpx:0.9288  106_cpx:0.6668  85_BC:0.6428  110_BC:0.6297  82_cpx:0.6237`.
-* `final_decision` is a summary of all columns and sbtr's global opinion on the sequence. It looks like `<pure/recombinant>.<composition>.<full/partial>.<assigned/like/unassigned>.<crf>`. A sequence will be *pure* if only one subtype is detected, *full* if its length is higher or equal than 7000bp, *unassigned* if `ref_best_score` is under `0.5`, *like* if several CRFs have scores within `0.02` of `ref_best_score`, *assigned* if `ref_best_crf` sits alone at the top.
+* `active_site_equivalents` lists (joined by `+`) the other CRFs whose subtype structure is fully compatible with `ref_best_crf` over the `active_positions` of the sequence. It is empty when there is none. For partial sequences, these CRFs are added to the candidates of the final decision, since a short fragment cannot discriminate between them.
+* `final_decision` is a summary of all columns and sbtr's global opinion on the sequence. It looks like `<pure/recombinant>.<composition>.<full/partial>[.<assigned/like/unassigned>[.<crf>]]`:
+  * *pure* if `dominant_fraction` is at least `0.98` (and the sequence does not contain a `E` or `A5` segment, which are always compared to the CRF bank), *recombinant* otherwise. In the decision string, composition is joined with `+`.
+  * *full* if the sequence length is higher or equal than 7000bp, *partial* otherwise.
+  * A *full* pure sequence stops there (e.g. `pure.B.full`). Every other sequence is then compared to the CRF bank:
+  * *unassigned* if `ref_best_score` is under `0.5` (no CRF is appended).
+  * *like* if several CRFs have scores within `0.03` of `ref_best_score` (or, for partial sequences, are active-site equivalents), in which case they are all listed, joined by `+`.
+  * *assigned* if `ref_best_crf` sits alone at the top.
 
 The line corresponding to our example is shown below.
 
 ```csv
-sample_name,composition,dominant_subtype,dominant_fraction,ref_best_crf,ref_best_score,ref_top5,final_decision
-65_cpx.CN.11.ANHUI_HF104.KC183778,AE_B_C,C,0.6100,65_cpx.CN.10.YNFL02.KC870028,0.9288,65_cpx:0.9288  106_cpx:0.6668  85_BC:0.6428  110_BC:0.6297  82_cpx:0.6237,recombinant.AE+B+C.full.assigned.65_cpx
+sample_name,composition,active_positions,dominant_subtype,dominant_fraction,ref_best_crf,ref_best_score,ref_top5,active_site_equivalents,final_decision
+65_cpx.CN.11.ANHUI_HF104.KC183778,AE_B_C,<first>-<last>,C,0.6100,65_cpx.CN.10.YNFL02.KC870028,0.9288,65_cpx:0.9288  106_cpx:0.6668  85_BC:0.6428  110_BC:0.6297  82_cpx:0.6237,,recombinant.AE+B+C.full.assigned.65_cpx
 ```
 
 **2. Summary json**
@@ -262,4 +298,3 @@ The FASTA files in `data/input/diversity` corresponds to all full length genome 
 
 
 All scripts in `python_scripts` were used for preprocessing, data generation, results comparison, or are called by `sbtr.py` when the model is ran.
-

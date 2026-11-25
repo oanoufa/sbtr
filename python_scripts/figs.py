@@ -30,6 +30,7 @@ import matplotlib.patheffects as pe
 from matplotlib.patches import Rectangle
 from tqdm import tqdm
 import uuid
+from scipy import stats
 
 
 from python_scripts.src.mutator_class import parse_iqtree_rates
@@ -59,6 +60,105 @@ PAD = 0.025
 MULTI_EXON = ("tat", "rev")
 
 
+
+
+
+def plot_processing_times(csv_files, labels, confidence=0.95,
+                          log_x=True, log_y=False, title=None,
+                          save_path=None, extrapolations=None):
+    """
+    Line plot of mean processing time (with CI) vs n_it, one line per tool.
+
+    csv_files : list of paths (columns: tool,time_s,time_e,n_it; '#' lines ignored)
+    labels    : list of display names, one per csv. If a csv contains several
+                tools, lines are named "label (tool)".
+    """
+    assert len(csv_files) == len(labels), "one label per csv"
+    palette = COLOR_SCHEME
+    fig = go.Figure()
+    line_idx = 0
+    agg = {}
+
+    for path, label in zip(csv_files, labels):
+        df = pd.read_csv(path, comment="#", skipinitialspace=True)
+
+        df["duration_min"] = df["time"] / 60
+
+        multi = df["tool"].nunique() > 1
+        for tool, sub in df.groupby("tool"):
+            g = sub.groupby("n_it")["duration_min"].agg(["mean", "std", "count"]).sort_index()
+            # t-based CI half-width; 0 when only one replicate
+            tcrit = stats.t.ppf((1 + confidence) / 2, (g["count"] - 1).clip(lower=1))
+            half = (tcrit * g["std"] / np.sqrt(g["count"])).fillna(0)
+
+            name = f"{label} ({tool})" if multi else label
+            color = palette[line_idx % len(palette)]
+            agg[name] = (g["mean"], color)
+            x = g.index.to_numpy()
+
+            fig.add_trace(go.Scatter(
+                x=x, y=g["mean"], mode="lines+markers", name=name,
+                line=dict(color=color), marker=dict(color=color),
+                error_y=dict(type="data", array=half, visible=True,
+                             color=color, thickness=1.5, width=5),  # width = cap size in px
+                customdata=np.stack([half, g["count"]], axis=-1),
+                legendgroup=name,
+                hovertemplate="n_it=%{x}<br>mean=%{y:.2f} min ± %{customdata[0]:.2f}"
+                              "<br>runs=%{customdata[1]}<extra>" + name + "</extra>",
+            ))
+            line_idx += 1
+
+    for spec in extrapolations or []:
+        src_mean, src_color = agg[spec["source"]]
+        ref_n = spec["ref_n"]
+        ns = np.array(spec["ns"])
+        y = src_mean.loc[ref_n] * ns / ref_n / spec.get("divisor", 1)
+
+        own = spec.get("name") is not None
+        name = spec["name"] if own else spec["source"]
+        if own:  # new line with its own color and legend entry
+            color = palette[line_idx % len(palette)]
+            line_idx += 1
+        else:    # continuation of the source line: same color, no legend entry
+            color = src_color
+
+        fig.add_trace(go.Scatter(
+            x=ns, y=y, mode="lines+markers", name=name,
+            legendgroup=name, showlegend=own,
+            line=dict(color=color, dash="dash"),
+            marker=dict(color=color, symbol="circle-open"),
+            hovertemplate="n_it=%{x}<br>%{y:.2f} min (inferred)"
+                          "<extra>" + name + "</extra>",
+        ))
+
+    fig.update_layout(
+        xaxis_title="Number of input sequences",
+        yaxis_title="Processing time (min)",
+        xaxis_type="log" if log_x else "linear",
+        yaxis_type="log" if log_y else "linear",
+        template="plotly_white",
+    )
+
+    if title:
+        fig.update_layout(
+            title=title or f"Processing time vs number of sequences ({int(confidence*100)}% CI)",
+        )
+    X_TICKS = [1, 10, 100, 1000, 10000]
+    Y_TICKS = [1, 2, 5, 10, 20, 100, 200, 500, 1000, 2000, 5000, 10000]
+    x_ticktext = [f"{t:g}" for t in X_TICKS]
+    y_ticktext = [f"{t:g}" for t in Y_TICKS]
+
+    if log_y:
+        fig.update_yaxes(tickmode="array", tickvals=Y_TICKS, ticktext=y_ticktext)
+    if log_x:
+        fig.update_xaxes(tickmode="array", tickvals=X_TICKS, ticktext=x_ticktext)
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(save_path)
+        fig.write_image(save_path.with_suffix(".svg"))
+        print(f"Processing time plot saved to: {save_path.with_suffix('')}.{{html,svg}}", flush=True)
+        fig.write_image(save_path.with_suffix(".pdf"))
 
 def visualize_breakpoints(
     df_bp, 
@@ -318,7 +418,7 @@ def compare_generated_vs_real(
 
     def _plot_distribution_comparison(n_bp, n_st, seg_lens, path, title):
 
-        color_scheme = ['#072C4B', '#F28089', '#71cddd']
+        color_scheme = COLOR_SCHEME
 
         #n_breakpoints / sequence
         n_bp = pd.Series(n_bp)
@@ -1945,13 +2045,13 @@ def forest_grid(tool_dfs, tools, genes, save_path, metrics=("sensitivity", "prec
                 df = gene_tool_dfs[tool].set_index("class")
                 fig.add_trace(
                     go.Bar(
-                        x=x_labels, y=df.loc[keep, metric].values,
+                        x=x_labels, y=df.loc[keep, metric].astype(float).values / 100,
                         marker_color=color[tool],
                         name=tool, legendgroup=tool, showlegend=(row == 1 and col == 1),
                     ),
                     row=row, col=col,
                 )
-            fig.update_yaxes(range=[0, 105], row=row, col=col)
+            fig.update_yaxes(range=[0, 1.05], row=row, col=col)
 
     fig.update_layout(
             template="plotly_white",
@@ -1961,8 +2061,8 @@ def forest_grid(tool_dfs, tools, genes, save_path, metrics=("sensitivity", "prec
             height=350 * len(metrics), 
             width=450 * len(genes),
             legend_title_text="Tool",
-            title="Subtyping tool comparison",
-            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            # title="Subtyping tool comparison",
+            # paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
             margin=dict(l=40, r=80, t=70, b=40),
             legend=dict(
                 x=0.13, y=0.01, xanchor="right", yanchor="bottom",
@@ -1974,6 +2074,7 @@ def forest_grid(tool_dfs, tools, genes, save_path, metrics=("sensitivity", "prec
     fig.write_html(save_path)
     path = Path(save_path)
     fig.write_image(path.with_suffix(".svg"))
+    fig.write_image(path.with_suffix(".pdf"))
 
 def per_subtype_per_position_graph(tool_dfs, tools, save_path, metrics=("sensitivity", "precision"),
                  order_by=None, subtypes=None):
@@ -2020,7 +2121,7 @@ def per_subtype_per_position_graph(tool_dfs, tools, save_path, metrics=("sensiti
                 ),
                 row=row, col=1,
             )
-        fig.update_yaxes(range=[0, 1.05], row=row, col=1)
+        fig.update_yaxes(range=[0.6, 1.0], row=row, col=1)
  
     fig.update_layout(
         template="plotly_white",
@@ -2030,17 +2131,19 @@ def per_subtype_per_position_graph(tool_dfs, tools, save_path, metrics=("sensiti
         height=350 * len(metrics),
         width=max(900, 45 * len(keep)),
         legend_title_text="Tool",
-        title="Subtyping tool comparison",
+        # title="Subtyping tool comparison",
         margin=dict(l=40, r=80, t=70, b=40),
         legend=dict(
             x=0.99, y=0.01, xanchor="right", yanchor="bottom",
-            bgcolor="rgba(255,255,255,0.5)", bordercolor="rgba(0,0,0,0.2)", borderwidth=1,
+            bgcolor="rgba(255,255,255,1.0)", bordercolor="rgba(0,0,0,0.2)", borderwidth=1,
         ),
     )
  
     fig.write_html(save_path)
     path = Path(save_path)
     fig.write_image(path.with_suffix(".svg"))
+    fig.write_image(path.with_suffix(".pdf"),
+                    width=fig.layout.width, height=fig.layout.height - 2)
     print(f"Grid metrics comparison saved at {save_path}")
 
 def pie_infections_sequences_dist(plot_df_path, xlsx_path, save_path):
@@ -2116,7 +2219,7 @@ def pie_infections_sequences_dist(plot_df_path, xlsx_path, save_path):
         # insidetextorientation='auto',
         # rotation=140,
         hovertemplate="<b>%{label}</b><br>Count: %{value:,}<br>Percentage: %{percent}<extra></extra>",
-        legendgroup="subtype", showlegend=True,
+        legendgroup="subtype", showlegend=False,
     ), row=1, col=1)
 
     fig.add_trace(go.Pie(
@@ -2134,13 +2237,13 @@ def pie_infections_sequences_dist(plot_df_path, xlsx_path, save_path):
 
     fig.update_layout(
         template="plotly_white",
-        title_text='<b>Distribution of HIV-1 subtypes</b>',
+        # title_text='<b>Distribution of HIV-1 subtypes</b>',
         # legend=dict(title="<b>Sequence group</b>", orientation="v",
         #             yanchor="middle", y=0.5, xanchor="left", x=1.02,
         #             bgcolor="rgba(255,255,255,0.8)", bordercolor="lightgray", borderwidth=1),
         margin=dict(t=120, b=40, l=40, r=160),
         width=1500, height=650,
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        # paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
     )
 
     fig.write_html(save_path)
@@ -2454,7 +2557,7 @@ if __name__ == "__main__":
     plot_time_per_10k(processing_times, save_path_time)
 
     # subtyping results comparison
-    tools=['comet', 'regav3', 'sbtr', 'jphmm']
+    tools=['sbtr', 'jphmm', 'comet', 'regav3']
     genes=['full', 'prot']
     base_path = f"{workspace_path}/data/input_sequences/regav3_testset"
 
@@ -2475,16 +2578,16 @@ if __name__ == "__main__":
         for name, df in tool_dfs.items()
     }
 
-    for name, df in tool_dfs.items():
-        if name == 'sbtr_prot':
-            print(df)
-
     forest_grid(
         tool_dfs, tools=tools, genes=genes, save_path=save_path,
-        metrics=["sensitivity", "precision"], subtypes=subtypes)
+        metrics=[
+            "sensitivity",
+            "precision",
+            ],
+            subtypes=subtypes)
 
-    lanl_full_md_path='/pasteur/helix/projects/mPath/oanoufa/sbtr/data/input_sequences/lanl_full/metadata_FULL.tsv'
-    khalid_et_al_data='/pasteur/helix/projects/mPath/oanoufa/sbtr/data/input_sequences/lanl_full/Khalid_2026_HIV1_Tables1_2.xlsx'
+    lanl_full_md_path=f'{workspace_path}/data/input_sequences/lanl_full/metadata_FULL.tsv'
+    khalid_et_al_data=f'{workspace_path}/data/input_sequences/lanl_full/Khalid_2026_HIV1_Tables1_2.xlsx'
     save_path=f"{workspace_path}/figs/pie_subtype_infections.html"
     pie_infections_sequences_dist(
         plot_df_path=lanl_full_md_path,
@@ -2499,7 +2602,7 @@ if __name__ == "__main__":
         min_pie_diameter=0.03)
 
 
-    path_to_results=f'/pasteur/helix/projects/mPath/oanoufa/sbtr/data/output/test/syn_v{VERSION}/matching_scores_per_subtype.csv'
+    path_to_results=f'{workspace_path}/data/output/test/syn_v{VERSION}/matching_scores_per_subtype.csv'
     df = pd.read_csv(path_to_results)
 
     tool_dfs = {
@@ -2507,10 +2610,74 @@ if __name__ == "__main__":
         "jpHMM": df[df["methods_compared"] == "jpHMM_True"],
     }
 
-    save_path=f"{workspace_path}/figs/per_subtype_per_position_comparison.html"
+    save_path=f"{workspace_path}/figs/ppb_sbtr_jphmm_true.html"
     per_subtype_per_position_graph(
         tool_dfs,
         tools=["sbtr", "jpHMM"],
         save_path=save_path,
         metrics=("sensitivity", "precision"),
+    )
+
+
+    path_to_results=f'{workspace_path}/data/output/inference/rega3_full_trimmed/matching_scores_per_subtype.csv'
+    df = pd.read_csv(path_to_results)
+
+    tool_dfs = {
+        "sbtr (Preds) vs jpHMM (True)": df[df["methods_compared"] == "sbtr_jpHMM"],
+    }
+
+    subtypes=['A1', 'A6', 'B', 'C', 'D', 'E', 'F1', 'F2', 'G', 'H', 'J', 'K']
+    save_path=f"{workspace_path}/figs/ppb_sbtr_jphmm.html"
+    per_subtype_per_position_graph(
+        tool_dfs,
+        tools=["sbtr (Preds) vs jpHMM (True)"],
+        save_path=save_path,
+        metrics=("sensitivity", "precision"),
+        subtypes=subtypes,
+    )
+
+
+    sbtr_gpu_8cores=f"{workspace_path}/data/speed_test/processing_times_sbtr_gpu_8cores_agg.csv"
+    sbtr_gpu_16_cores = f"{workspace_path}/data/speed_test/processing_times_sbtr_gpu_16cores_agg.csv"
+    sbtr_nogpu_1core = f"{workspace_path}/data/speed_test/processing_times_sbtr_nogpu_1core_agg.csv"
+    sbtr_nogpu_4cores = f"{workspace_path}/data/speed_test/processing_times_sbtr_nogpu_4cores_agg.csv"
+    sbtr_nogpu_8cores = f"{workspace_path}/data/speed_test/processing_times_sbtr_nogpu_8cores_agg.csv"
+
+    jphmm_1_core=f"{workspace_path}/data/speed_test/processing_times_jphmm_agg.csv"
+    # jphmm_rt=f"{workspace_path}/data/speed_test/processing_times_jphmm_10_rt.csv"
+    # jphmm_prot=f"{workspace_path}/data/speed_test/processing_times_jphmm_10_prot.csv"
+
+    # Infer jphmm_8_cores by dividing by 8 jphmm_1_core
+    extrapolations=[
+        # jpHMM_1core: dashed continuation from 100 to 1000 and 10000
+        dict(source="jpHMM_1core", ref_n=100, ns=[100, 1000, 10000]),
+        # jpHMM_8cores: jpHMM_1core / 8, dashed, from 100 to 10000
+        dict(source="jpHMM_1core", ref_n=100, ns=[100, 1000, 10000],
+             divisor=8, name="jpHMM_8cores (inferred)"),
+    ]
+
+    save_path=f"{workspace_path}/figs/processing_times_evolution.html"
+    plot_processing_times(
+        [sbtr_gpu_8cores,
+        jphmm_1_core,
+        # jphmm_rt,
+        # jphmm_prot,
+        # sbtr_gpu_16_cores,
+        # sbtr_nogpu_1core,
+        # sbtr_nogpu_4cores,
+        sbtr_nogpu_8cores,
+        ],
+        ["sbtr_gpu_8cores",
+        "jpHMM_1core",
+        # "jpHMM_RT",
+        # "jpHMM_protease",
+        # "sbtr_gpu_16_cores",
+        # "sbtr_nogpu_1core",
+        # "sbtr_nogpu_4cores",
+        "sbtr_nogpu_8cores",
+        ],
+        log_y=True,
+        title=None,
+        save_path=save_path,
+        extrapolations=extrapolations
     )

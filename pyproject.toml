@@ -4,26 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sbtr"
-version = "0.5.0"
+dynamic = ["version"]
 requires-python = "==3.11.*"
 dependencies = [
-    "biopython==1.87",
-    "bs4>=0.0.2",
-    "huggingface-hub==1.11.0",
-    "kaleido==0.2.1",
-    "matplotlib==3.10.8",
-    "numpy==2.4.3",
-    "openpyxl>=3.1.5",
-    "pandas==3.0.2",
-    "plotly==6.7.0",
-    "requests>=2.34.2",
-    "scipy==1.17.1",
-    "torch==2.11.0",
-    "torchmetrics==1.9.0",
-    "tqdm==4.67.3",
-    "transformers==5.6.1",
-    "uv==0.12.20",
+    "biopython>=1.84",
+    "huggingface-hub>=1.0",
+    "matplotlib>=3.9",
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "plotly>=6.0",
+    "kaleido>=0.2.1",
+    "scipy>=1.13",
+    "torch>=2.5",
+    "tqdm>=4.66",
+    "transformers>=5.6",
 ]
+
+[project.optional-dependencies]
+train = ["torchmetrics>=1.4", "openpyxl>=3.1", "requests>=2.32"]
+
+[tool.setuptools.dynamic]
+version = {attr = "python_scripts._version.__version__"}
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }

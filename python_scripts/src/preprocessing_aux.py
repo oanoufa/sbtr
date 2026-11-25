@@ -3,7 +3,7 @@ Auxiliary functions for preprocessing sequences.
 """
 
 import sys
-from Bio import SeqIO
+from Bio import AlignIO, SeqIO
 from Bio.Seq import Seq
 from python_scripts.src import config
 from pathlib import Path
@@ -697,7 +697,7 @@ def dealign_to_records(input_path: Path) -> List:
                     parsed_records = parsed
                     format_used = fmt.upper()
                     break
-        except Exception:
+        except ValueError:
             pass
 
     # Try alignment formats (PHYLIP, NEXUS, CLUSTAL) if unaligned failed
@@ -711,7 +711,7 @@ def dealign_to_records(input_path: Path) -> List:
                         parsed_records = list(alignment)
                         format_used = f"Alignment ({fmt.upper()})"
                         break
-            except Exception:
+            except ValueError:
                 pass
 
     if not parsed_records:

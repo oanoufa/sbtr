@@ -3,6 +3,7 @@
 import torch
 import numpy as np
 from typing import Tuple
+from python_scripts._version import __version__ as SBTR_VERSION
 
 WORKSPACE_PATH = "/pasteur/helix/projects/mPath/oanoufa/sbtr"
 PURE_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_PURE_REF.fasta"
@@ -68,6 +69,7 @@ MAX_N_FRACTION     = 0.2    # warning only
 
 # MODEL PARAMETERS
 VERSION = "0.5"
+MODEL_REVISION = f"v{SBTR_VERSION}"
 PAD_LEN = 128
 SEQ_LEN_AFTER_PAD = ((ATA_LEN + PAD_LEN - 1) // PAD_LEN) * PAD_LEN
 

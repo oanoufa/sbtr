@@ -20,9 +20,11 @@ CRF_ASSIGN_THR = config.CRF_ASSIGN_THR
 PARTIAL_THR = config.PARTIAL_THR
 ATA_LEN = config.ATA_LEN
 LTR_LABELS = {"5'LTR", "3'LTR"}
-CRF_SEGMENTS_BD_ATA = config.CRF_SEGMENTS_BD_ATA
 PURE_THR = config.PURE_THR
 MIN_COVERAGE = config.MIN_COVERAGE
+
+WORKSPACE_PATH = Path(__file__).resolve().parents[2]
+CRF_SEGMENTS_BD_ATA = WORKSPACE_PATH / "data" / "lanl_crf_segments_brokedown_aln.csv"
 
 # CRF-specific labels: a sequence made only of these is never called "pure".
 CRF_LIKE_LABELS = {"E", "A5"}
@@ -163,7 +165,7 @@ class CRFReferenceDecoder:
         return regions
 
 
-    def _load_crf_segment_matrix(self, csv_path: str) -> None:
+    def _load_crf_segment_matrix(self, csv_path) -> None:
         rows = []
         with open(csv_path, newline="") as fh:
             rows = [
@@ -445,7 +447,7 @@ class CRFReferenceDecoder:
         """
         Collapse the decoder output into a single final call:
           "pure.<subtype>.full.<len>"                                                   confident full single-subtype sequence
-          "pure.<subtype>.partial.<len>.<like/(un)assigned>.<close(st)_match(es)>"      partial single-subtype sequence that could also come from a recombinant
+          "pure.<subtype>.partial.<len>.<like/unassigned>.<close(st)_match(es)>"        partial single-subtype sequence that could also come from a recombinant
           "recombinant.<comp>.<partial/full>.<len>.like.<close_matches>"                close to several CRFs within crf_match_margin
           "recombinant.<comp>.<partial/full>.<len>.assigned.<closest_crf>"              recombinant with one CRF match on top of the rest
           "recombinant.<comp>.<partial/full>.<len>.unassigned"                          recombinant with no CRF match over crf_assign_thr
@@ -485,7 +487,7 @@ class CRFReferenceDecoder:
         else:
             like_list = close_matches
 
-        if len(like_list) == 1:
+        if len(like_list) == 1 and not is_partial:
             decision += f".assigned.{like_list[0]['crf_type']}"
         else:
             decision += ".like." + "+".join(r["crf_type"] for r in like_list)
