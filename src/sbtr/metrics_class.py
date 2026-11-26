@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import pandas as pd
 import os
-from . import config
+from sbtr import config
 from typing import Dict, Union
 
 workspace_path = config.WORKSPACE_PATH

@@ -1,1 +1,0 @@
-"""Main sbtr scripts."""

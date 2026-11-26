@@ -6,23 +6,21 @@ import argparse
 import os
 import re
 import sys
+import shutil
 import tempfile
 from collections import defaultdict, Counter
 
 import numpy as np
 from Bio import SeqIO
 
-from python_scripts.src import config
-from python_scripts.src import preprocessing_aux as bp
+from sbtr import config
+from sbtr import preprocessing_aux as bp
+
 
 
 def parse_args():
-    out = f"{config.WORKSPACE_PATH}/data/output"
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("-i", "--input", required=True, help="combined aligned FASTA (SFL + LANL refs)")
-    p.add_argument("--pure-out", default=f"{out}/HIV1_PURE_REF.fasta")
-    p.add_argument("--crf-out", default=f"{out}/HIV1_CRF_REF.fasta")
-    p.add_argument("--combined-out", default=f"{out}/HIV1_COMBINED_REF.fasta")
     p.add_argument("--pooled", action="store_true",
                    help="pool all pure sequences instead of averaging per subtype")
     p.add_argument("--no-dedup", action="store_true", help="skip redundancy removal")
@@ -31,6 +29,11 @@ def parse_args():
                         "identity (or covered fraction for too_short rows), reason")
     return p.parse_args()
 
+
+
+COMBINED_REF_PATH = config.COMBINED_REF_PATH
+PURE_REF_PATH = config.PURE_REF_PATH
+CRF_REF_PATH = config.CRF_REF_PATH
 
 WORKSPACE_PATH = config.WORKSPACE_PATH
 OUT_DIR = f"{WORKSPACE_PATH}/data/output"
@@ -374,11 +377,17 @@ def select_columns(pure_cov, crf_cov, overall, n_keep, w, protected):
 
 def write_hxb2_mapping(hxb2_gapped):
     ata_to_hxb2, _ = config.build_hxb2_ata_maps(hxb2_gapped)
-    with open(config.MAPPING_PATH, "w") as f:
+
+    mapping_out = f"{config.WORKSPACE_PATH}/data/lanl_crf_segments_brokedown_aln.csv"
+
+    with open(mapping_out, "w") as f:
         f.write("ata_pos,hxb2_pos\n")
         for ata_pos in range(len(hxb2_gapped)):
             f.write(f"{ata_pos},{ata_to_hxb2[ata_pos]}\n")
-    print(f"HXB2 <-> ATA mapping written to {config.MAPPING_PATH}")
+    print(f"HXB2 <-> ATA mapping written to {mapping_out}")
+    # Also ship a copy with the package
+    shutil.copy2(mapping_out, config.MAPPING_PATH)
+
 
 
 def split_and_write(ids, arr, ref_idx, pure_path, crf_path, combined_path):
@@ -439,10 +448,14 @@ def build_label_tracks(df_segments, df_breakpoints, hxb2_gapped):
     np.savez_compressed(seqs_path, **label_seqs)
     print(f"  Label-sequence archive : {seqs_path}")
 
-    df_aln = bp.label_sequences_to_segments_csv(label_seqs, config.CRF_SEGMENTS_BD_ATA)
+    brokedown_aln_out = f"{config.WORKSPACE_PATH}/data/lanl_crf_segments_brokedown_aln.csv"
+
+    df_aln = bp.label_sequences_to_segments_csv(label_seqs, brokedown_aln_out)
     print(f"Alignment-coord segments : {config.CRF_SEGMENTS_BD_ATA} ({len(df_aln)} rows)")
     print(df_aln.head(20).to_string(index=False))
 
+    # Also ship a copy with the package
+    shutil.copy2(brokedown_aln_out, config.CRF_SEGMENTS_BD_ATA)
 
 if __name__ == "__main__":
     args = parse_args()
@@ -507,5 +520,16 @@ if __name__ == "__main__":
     assert int((arr[ref_idx] != GAP).sum()) == HXB2_USED_LEN
     write_hxb2_mapping(hxb2_gapped)
 
-    split_and_write(ids, arr, ref_idx, args.pure_out, args.crf_out, args.combined_out)
+    combined_out = Path(config.WORKSPACE_PATH) / "data" / "HIV1_COMBINED_REF.fasta"
+    combined_gz = combined_out.with_name(combined_out.name + ".gz")
+
+    split_and_write(ids, arr, ref_idx, PURE_REF_PATH, CRF_REF_PATH, str(combined_out))
     build_label_tracks(df_segments, df_breakpoints, hxb2_gapped)
+
+    with open(combined_out, "rb") as f_in, gzip.open(combined_gz, "wb", compresslevel=9) as f_out:
+        shutil.copyfileobj(f_in, f_out)
+
+    # Copy the gzipped file into the package
+    dest = Path(config.REF_GZ_PATH)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(combined_gz, dest)

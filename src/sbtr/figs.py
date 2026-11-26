@@ -33,8 +33,8 @@ import uuid
 from scipy import stats
 
 
-from python_scripts.src.mutator_class import parse_iqtree_rates
-from python_scripts.src import config
+from sbtr.mutator_class import parse_iqtree_rates
+from sbtr import config
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 

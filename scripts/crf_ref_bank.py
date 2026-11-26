@@ -24,13 +24,13 @@ import copy
 import subprocess
 import shutil
 
-from python_scripts.figs import visualize_combined_light
-from python_scripts.src.mutator_class import SequenceMutator
-from python_scripts.src import config
-from python_scripts.src.preprocessing_aux import clean_for_alignment, align_to_ata, decode_sample
-from python_scripts.src.dataset_class import HIVSequenceDataset
-from python_scripts.src.model_class import HFModelForHIVSubtyping
-from python_scripts.src.decoder_class import CRFReferenceDecoder
+from sbtr.figs import visualize_combined_light
+from sbtr.mutator_class import SequenceMutator
+from sbtr import config
+from sbtr.preprocessing_aux import clean_for_alignment, align_to_ata, decode_sample
+from sbtr.dataset_class import HIVSequenceDataset
+from sbtr.model_class import HFModelForHIVSubtyping
+from sbtr.decoder_class import CRFReferenceDecoder
 
 TOKEN_PATH = config.TOKEN_PATH
 with open(TOKEN_PATH, 'r') as f:
@@ -510,6 +510,9 @@ if __name__ == "__main__":
         os.remove(out_path)
 
     np.savez_compressed(out_path, reference_bank=reference_bank, reference_names=reference_names)
+
+    # Also ship a copy with the package
+    shutil.copy2(out_path, config.BANK_PATH)
 
     print(f"\nSaved CRF reference bank to: {out_path} with shape {reference_bank.shape}")
 

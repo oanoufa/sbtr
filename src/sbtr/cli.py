@@ -21,12 +21,11 @@ from concurrent.futures import ThreadPoolExecutor
 import re
 import shutil
 
-from python_scripts.figs import visualize_sample_probs, visualize_combined_light
-from python_scripts.src import config
-from python_scripts.src.dataset_class import HIVSequenceDataset
-from python_scripts.src.preprocessing_aux import run_mafft_addfragments, load_reference_ids, dealign_to_records, parse_compactmapout, decode_sample
-from python_scripts.src.model_class import HFModelForHIVSubtyping
-from python_scripts.src.decoder_class import CRFReferenceDecoder
+from sbtr import config
+from sbtr.dataset_class import HIVSequenceDataset
+from sbtr.preprocessing_aux import run_mafft_addfragments, load_reference_ids, dealign_to_records, parse_compactmapout, decode_sample
+from sbtr.model_class import HFModelForHIVSubtyping
+from sbtr.decoder_class import CRFReferenceDecoder
 
 ST_TO_ID_DICT       = config.ST_TO_ID_DICT
 NUM_SUBTYPES        = len(ST_TO_ID_DICT)
@@ -91,6 +90,14 @@ parser.add_argument(
          f"(default: {MODEL_CONFIG['model_name']}).",
 )
 parser.add_argument(
+    "--backbone",
+    type=str,
+    default=None,
+    help="Local directory with the backbone config and code (overrides the Hub backbone "
+         "named in the model's config.json). Use it for offline runs without a token.",
+)
+
+parser.add_argument(
     "--revision",
     type=str,
     default=config.MODEL_REVISION,
@@ -100,14 +107,6 @@ parser.add_argument(
 parser.add_argument(
     "--version", action="version",
     version=f"sbtr {config.VERSION} (model {config.MODEL_CONFIG['model_name']}@{config.MODEL_REVISION})",
-)
-
-parser.add_argument(
-    "--backbone",
-    type=str,
-    default=None,
-    help="Local directory with the backbone config and code (overrides the Hub backbone "
-         "named in the model's config.json). Use it for offline runs without a token.",
 )
 
 parser.add_argument(
@@ -145,58 +144,7 @@ parser.add_argument(
   c: Output the MAFFT compact mapout file""",
 )
 
-args = parser.parse_args()
 
-seq_path      = Path(args.seq)
-mafft_bin     = args.mafft_bin
-tag           = args.tag
-out_dir       = Path(args.out_dir)
-out_dir.mkdir(parents=True, exist_ok=True)
-num_workers   = args.num_cpu
-batch_size    = args.batch_size
-wto           = args.wto
-gpu           = args.gpu
-no_decoder    = args.no_decoder
-
-if 'r' in wto:
-    print("r in wto: saving subtype regions in a csv", flush=True)
-if 'p' in wto:
-    print("p in wto: saving prediction array in a npy file", flush=True)
-if 'f' in wto:
-    print("f in wto: saving figures in figs folder", flush=True)
-if 'l' in wto:
-    print("l in wto: saving light svg figures in figs folder", flush=True)
-if 'm' in wto:
-    print("m in wto: saving attention masks in a npy file", flush=True)
-if 'a' in wto:
-    print("a in wto: saving alignment in a fasta file", flush=True)
-if 'c' in wto:
-    print("c in wto: saving MAFFT compact mapout in a txt file", flush=True)
-
-
-num_workers = min(os.cpu_count(), num_workers)
-if num_workers == 1:
-    print(f"Using {num_workers} CPU", flush=True)
-else:
-    print(f"Using {num_workers} CPUs", flush=True)
-
-device = "cuda" if torch.cuda.is_available() and gpu else "cpu"
-print(f"Using device: {device}", flush=True)
-if torch.cuda.is_available():
-    print(f"CUDA device count: {torch.cuda.device_count()}")
-    for i in range(torch.cuda.device_count()):
-        print(f"  cuda:{i} → {torch.cuda.get_device_name(i)}")
-device = torch.device(device) if isinstance(device, str) else device
-
-# Points to the directory where this python file is located
-SCRIPT_DIR = Path(__file__).resolve().parent
-WORKSPACE_PATH = SCRIPT_DIR.parents[0]
-
-BANK_PATH = Path(f"{WORKSPACE_PATH}/data/reference_bank/crf_reference_bank.npz")
-REF_GZ_PATH = Path(f"{WORKSPACE_PATH}/data/HIV1_COMBINED_REF.fasta.gz")
-
-VALID_NT = set("ACGTRYKMSWBDHVN")  # IUPAC DNA
-_BAD_ID_CHARS = re.compile(r"[^A-Za-z0-9._+\-]")
 
 
 def _is_hxb2(rec_id: str) -> bool:
@@ -285,18 +233,20 @@ def check_inputs(
 # Worker function to run in parallel on CPU worker processes
 def process_single_sample_worker(
     sample_name: str,
-    preds_slice: np.ndarray,      # (L, C)
+    preds_slice: np.ndarray,
     ploss_slice: np.ndarray,
     compactmapout_entry: list,
-    is_real: np.ndarray,          # (L,)
+    is_real: np.ndarray,
     crf_decoder: CRFReferenceDecoder,
     wto: str,
-    ) -> tuple[str, list[str], dict]:
+    hxb2_to_ata: dict,
+    sample_vis_dir: Path,
+    ) -> tuple[str, list[str]]:
     """Runs CRF decoding on CPU thread/process and prepares data for figure rendering."""
 
     # 1. CRF Decoder Query
     crf_result = decode_sample(crf_decoder, sample_name, preds_slice, is_real,
-                               HXB2_TO_ATA, compactmapout_entry)
+                               hxb2_to_ata, compactmapout_entry)
 
     # 2. String formatting for main CSV
     top5_ref = "  ".join(
@@ -326,10 +276,11 @@ def process_single_sample_worker(
             region_lines.append(f"{sample_name},{start},{end},{subtype},{end - start + 1}\n")
 
     if 'l' in wto:
+        from python_scripts.figs import visualize_combined_light
         out_path = str(sample_vis_dir / f"{sample_name}_light_preds.svg")
         visualize_combined_light(
             regions_aligned=crf_result["regions_aligned"],
-            hxb2_to_ata=HXB2_TO_ATA,
+            hxb2_to_ata=hxb2_to_ata,
             preds_slice=preds_slice,
             pure_st_to_id_dict=ST_TO_ID_DICT,
             n_total=ATA_LEN,
@@ -338,7 +289,8 @@ def process_single_sample_worker(
             floor=0.01
         )
 
-    elif 'f' in wto:
+    if 'f' in wto:
+        from python_scripts.figs import visualize_sample_probs
         out_path = str(sample_vis_dir / f"{sample_name}_preds.png")
         visualize_sample_probs(
             preds_slice=preds_slice,
@@ -346,7 +298,7 @@ def process_single_sample_worker(
             sample_name=sample_name,
             regions_aligned=crf_result["regions_aligned"],
             pure_st_to_id_dict=ST_TO_ID_DICT,
-            hxb2_to_ata=HXB2_TO_ATA,
+            hxb2_to_ata=hxb2_to_ata,
             path=out_path,
         )
 
@@ -447,7 +399,57 @@ def global_results(
     print(f"Summary JSON      {summary_json_path}", flush=True)
 
 
-if __name__ == "__main__":
+def main(argv=None):
+
+    args = parser.parse_args()
+
+    seq_path      = Path(args.seq)
+    mafft_bin     = args.mafft_bin
+    tag           = args.tag
+    out_dir       = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    num_workers   = args.num_cpu
+    batch_size    = args.batch_size
+    wto           = args.wto
+    gpu           = args.gpu
+    no_decoder    = args.no_decoder
+
+    if 'r' in wto:
+        print("r in wto: saving subtype regions in a csv", flush=True)
+    if 'p' in wto:
+        print("p in wto: saving prediction array in a npy file", flush=True)
+    if 'f' in wto:
+        print("f in wto: saving figures in figs folder", flush=True)
+    if 'l' in wto:
+        print("l in wto: saving light svg figures in figs folder", flush=True)
+    if 'm' in wto:
+        print("m in wto: saving attention masks in a npy file", flush=True)
+    if 'a' in wto:
+        print("a in wto: saving alignment in a fasta file", flush=True)
+    if 'c' in wto:
+        print("c in wto: saving MAFFT compact mapout in a txt file", flush=True)
+
+
+    num_workers = min(os.cpu_count(), num_workers)
+    if num_workers == 1:
+        print(f"Using {num_workers} CPU", flush=True)
+    else:
+        print(f"Using {num_workers} CPUs", flush=True)
+
+    device = "cuda" if torch.cuda.is_available() and gpu else "cpu"
+    print(f"Using device: {device}", flush=True)
+    if torch.cuda.is_available():
+        print(f"CUDA device count: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            print(f"  cuda:{i} → {torch.cuda.get_device_name(i)}")
+    device = torch.device(device) if isinstance(device, str) else device
+
+    # Points to the directory where this python file is located
+    SCRIPT_DIR = Path(__file__).resolve().parent
+    WORKSPACE_PATH = SCRIPT_DIR.parents[0]
+
+    VALID_NT = set("ACGTRYKMSWBDHVN")  # IUPAC DNA
+    _BAD_ID_CHARS = re.compile(r"[^A-Za-z0-9._+\-]")
 
     n_packed = int(np.ceil(NUM_SUBTYPES / 8))
     torch.set_float32_matmul_precision('high')
@@ -456,7 +458,7 @@ if __name__ == "__main__":
     ref_tmp = tempfile.TemporaryDirectory(prefix=f"sbtr_ref_{tag}_", ignore_cleanup_errors=True)
     atexit.register(ref_tmp.cleanup)
     COMBINED_REF_PATH = Path(ref_tmp.name) / "HIV1_COMBINED_REF.fasta"
-    with gzip.open(REF_GZ_PATH, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
+    with gzip.open(config.REF_GZ_PATH, "rb") as f_in, open(COMBINED_REF_PATH, "wb") as f_out:
         shutil.copyfileobj(f_in, f_out)
 
     # Load combined reference (HXB2 coords + mafft target + ID filter)
@@ -644,7 +646,7 @@ if __name__ == "__main__":
     )
 
 
-    crf_decoder = None if no_decoder else CRFReferenceDecoder(bank_path=BANK_PATH)
+    crf_decoder = None if no_decoder else CRFReferenceDecoder(bank_path=config.BANK_PATH)
     # Model forward pass
     print("\nRunning model inference...", flush=True)
 
@@ -676,10 +678,10 @@ if __name__ == "__main__":
         np.save(out_dir / f"is_real_{tag}.npy", np.stack([gap_masks[n] for n in seq_names]))
         with open(out_dir / f"names_{tag}.txt", "w") as f:
             f.write("\n".join(seq_names) + "\n")
-        for p in (out_seqs, out_lbls, out_masks, out_att_path):
+        for p in (out_seqs, out_lbls, out_masks, out_att_path, out_post_loss_path):
             os.remove(p)
         print(f"--no_decoder: predictions saved in {out_preds_path}", flush=True)
-        sys.exit(0)
+        return
 
     # CRF decoding and figures
     print(f"\nRunning CRF decoding across available CPUs...", flush=True)
@@ -701,6 +703,8 @@ if __name__ == "__main__":
                 gap_masks[sample_name],
                 crf_decoder,
                 wto,
+                HXB2_TO_ATA,
+                sample_vis_dir,
             )
 
     # Execute tasks concurrently across multiple CPU processes
@@ -778,3 +782,8 @@ if __name__ == "__main__":
         os.remove(out_att_path)
 
     os.remove(out_post_loss_path)
+
+
+
+if __name__ == "__main__":
+    main()

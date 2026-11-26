@@ -120,12 +120,28 @@ The tool always outputs `results_<tag>.csv` and `summary_<tag>.json`. You can re
 Always written to `--out_dir`:
 
 * `results_<tag>.csv`: One row of global results per input sequence.
+
+  The results csv contains one row per sample in the input sequence file. This row details the global results on the sample:
+  * `composition` is a string of the subtypes present in the sequence, separated by `_`. Here `AE_B_C`.
+  * `active_positions` is the range of alignment positions (`first-last`) covered by the sequence once flanking unassigned (`U`) positions are trimmed, or `none` if nothing is left.
+  * `dominant_subtype` is the subtype in majority in the sequence. Here `C`.
+  * `dominant_fraction` is the proportion of `dominant_subtype` in the sequence. Here `0.6100`.
+  * `ref_best_crf` is the closest matching CRF sequence in the reference bank. Here `65_cpx.CN.10.YNFL02.KC870028`.
+  * `ref_best_score` is the matching score of `ref_best_crf`. Here `0.9288`.
+  * `ref_top5` is the top 5 of the closest CRFs to the input sequence. They are given with their score as `<crf>:<score>`. Here `65_cpx:0.9288  106_cpx:0.6668  85_BC:0.6428  110_BC:0.6297  82_cpx:0.6237`.
+  * `active_site_equivalents` lists (joined by `+`) the other CRFs whose subtype structure is fully compatible with `ref_best_crf` over the `active_positions` of the sequence. It is empty when there is none. For partial sequences, these CRFs are added to the candidates of the final decision, since a short fragment cannot discriminate between them.
+  * `final_decision` is a summary of all columns and sbtr's global opinion on the sequence. It looks like `<pure/recombinant>.<composition>.<full/partial>[.<assigned/like/unassigned>[.<crf>]]`:
+    * *pure* if `dominant_fraction` is at least `0.98` (and the sequence does not contain a `E` or `A5` segment, which are always compared to the CRF bank), *recombinant* otherwise. In the decision string, composition is joined with `+`.
+    * *full* if the sequence length is higher or equal than 7000bp, *partial* otherwise.
+    * A *full* pure sequence stops there (e.g. `pure.B.full`). Every other sequence is then compared to the CRF bank:
+    * *unassigned* if `ref_best_score` is under `0.5` (no CRF is appended).
+    * *like* if several CRFs have scores within `0.03` of `ref_best_score` (or, for partial sequences, are active-site equivalents), in which case they are all listed, joined by `+`.
+    * *assigned* if `ref_best_crf` sits alone at the top.
+
 * `summary_<tag>.json`: Run metadata and summary statistics on the input batch of sequences.
 
-Written only when relevant:
-
-* `id_mapping_<tag>.csv`: Written if some sequence IDs had to be renamed (special characters, duplicates, or clash with a reference ID). Columns: `original_id`, `new_id`.
-* `skipped_<tag>.csv`: Written if some sequences were rejected during input checks (non-nucleotide characters, too long, too few informative positions). Columns: `sequence_name`, `reason`.
+* `id_mapping_<tag>.csv`: Sequence IDs that had to be renamed (special characters, duplicates, or clash with a reference ID). Columns: `original_id`, `new_id`.
+* `skipped_<tag>.csv`: Sequences that were rejected during input checks (non-nucleotide characters, too long, too few informative positions). Columns: `sequence_name`, `reason`.
 
 Optional outputs, selected with `--wto`:
 
@@ -147,25 +163,6 @@ With `--no_decoder`, the run stops after the forward pass and writes `prediction
 ## Example output
 
 Below is an example run on `65_cpx.CN.11.ANHUI_HF104.KC183778`, a CRF65_cpx recombinant (subtypes 01_AE / B / C). We consider that `--wto` was set to `fr` to generate both figures and region outputs.
-
-**1. Results csv**
-
-The results csv contains one row per sample in the input sequence file. This row details the global results on the sample:
-* `composition` is a string of the subtypes present in the sequence, separated by `_`. Here `AE_B_C`.
-* `active_positions` is the range of alignment positions (`first-last`) covered by the sequence once flanking unassigned (`U`) positions are trimmed, or `none` if nothing is left.
-* `dominant_subtype` is the subtype in majority in the sequence. Here `C`.
-* `dominant_fraction` is the proportion of `dominant_subtype` in the sequence. Here `0.6100`.
-* `ref_best_crf` is the closest matching CRF sequence in the reference bank. Here `65_cpx.CN.10.YNFL02.KC870028`.
-* `ref_best_score` is the matching score of `ref_best_crf`. Here `0.9288`.
-* `ref_top5` is the top 5 of the closest CRFs to the input sequence. They are given with their score as `<crf>:<score>`. Here `65_cpx:0.9288  106_cpx:0.6668  85_BC:0.6428  110_BC:0.6297  82_cpx:0.6237`.
-* `active_site_equivalents` lists (joined by `+`) the other CRFs whose subtype structure is fully compatible with `ref_best_crf` over the `active_positions` of the sequence. It is empty when there is none. For partial sequences, these CRFs are added to the candidates of the final decision, since a short fragment cannot discriminate between them.
-* `final_decision` is a summary of all columns and sbtr's global opinion on the sequence. It looks like `<pure/recombinant>.<composition>.<full/partial>[.<assigned/like/unassigned>[.<crf>]]`:
-  * *pure* if `dominant_fraction` is at least `0.98` (and the sequence does not contain a `E` or `A5` segment, which are always compared to the CRF bank), *recombinant* otherwise. In the decision string, composition is joined with `+`.
-  * *full* if the sequence length is higher or equal than 7000bp, *partial* otherwise.
-  * A *full* pure sequence stops there (e.g. `pure.B.full`). Every other sequence is then compared to the CRF bank:
-  * *unassigned* if `ref_best_score` is under `0.5` (no CRF is appended).
-  * *like* if several CRFs have scores within `0.03` of `ref_best_score` (or, for partial sequences, are active-site equivalents), in which case they are all listed, joined by `+`.
-  * *assigned* if `ref_best_crf` sits alone at the top.
 
 The line corresponding to our example is shown below.
 
@@ -297,4 +294,4 @@ The process used to augment this set to our training set is described precisely 
 The FASTA files in `data/input/diversity` corresponds to all full length genome (>7000nt) sequences in LANL HIV Database for subtypes A, B, C, D, F, G and CRF01_AE. They were used to compute mutation rates per site thanks to [IQ-TREE](https://iqtree.github.io).
 
 
-All scripts in `python_scripts` were used for preprocessing, data generation, results comparison, or are called by `sbtr.py` when the model is ran.
+All scripts in `scripts` were used for preprocessing, data generation, results comparison, or are called during inference.

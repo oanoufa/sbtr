@@ -3,15 +3,20 @@
 import torch
 import numpy as np
 from typing import Tuple
-from python_scripts._version import __version__ as SBTR_VERSION
+from sbtr._version import __version__ as SBTR_VERSION
+from importlib.resources import files
+
+DATA_DIR = files("sbtr") / "data"
+CRF_SEGMENTS_BD_ATA = DATA_DIR / "lanl_crf_segments_brokedown_aln.csv"
+COMBINED_REF_PATH   = DATA_DIR / "HIV1_COMBINED_REF.fasta"
+REF_GZ_PATH         = DATA_DIR / "HIV1_COMBINED_REF.fasta.gz"
+MAPPING_PATH        = DATA_DIR / "hxb2_ata_mapping.csv"
+BANK_PATH           = DATA_DIR / "crf_reference_bank.npz"
 
 WORKSPACE_PATH = "/pasteur/helix/projects/mPath/oanoufa/sbtr"
 PURE_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_PURE_REF.fasta"
 CRF_REF_PATH = f"{WORKSPACE_PATH}/data/output/HIV1_CRF_REF.fasta"
-COMBINED_REF_PATH = f"{WORKSPACE_PATH}/data/HIV1_COMBINED_REF.fasta"
 TOKEN_PATH = f"{WORKSPACE_PATH}/hftoken.txt"
-CRF_SEGMENTS_BD_ATA=f"{WORKSPACE_PATH}/data/lanl_crf_segments_brokedown_aln.csv"
-MAPPING_PATH = f"{WORKSPACE_PATH}/data/hxb2_ata_mapping.csv"
 
 # GLOBAL PARAMETERS
 ATA_LEN = 10240 # max length of sequences in the dataset is (11954) (16980) (11561) NOW 10240 and multiple of 128 (10240)
@@ -68,7 +73,7 @@ MIN_INFORMATIVE_BP = 250    # non-N bases after dealigning
 MAX_N_FRACTION     = 0.2    # warning only
 
 # MODEL PARAMETERS
-VERSION = "0.5"
+VERSION = "0.6"
 MODEL_REVISION = f"v{SBTR_VERSION}"
 PAD_LEN = 128
 SEQ_LEN_AFTER_PAD = ((ATA_LEN + PAD_LEN - 1) // PAD_LEN) * PAD_LEN
@@ -76,8 +81,8 @@ SEQ_LEN_AFTER_PAD = ((ATA_LEN + PAD_LEN - 1) // PAD_LEN) * PAD_LEN
 MODEL_CONFIG = {
     # Model
     "model_name": "oanoufa/sbtr_ntv3_650M", # oanoufa/sbtr_ntv3_650M oanoufa/sbtr_custom
-    "backbone": "InstaDeepAI/NTv3_650M_pre", # zhihan1996/DNABERT-2-117M InstaDeepAI/NTv3_650M_pre InstaDeepAI/nucleotide-transformer-v2-500m-multi-species
-    "tokenizer": "InstaDeepAI/NTv3_650M_pre", # /pasteur/helix/projects/mPath/oanoufa/sbtr/data/model/tokenizer/custom_hiv_tokenizer
+    "backbone": "InstaDeepAI/NTv3_pretrained", # InstaDeepAI/NTv3_pretrained zhihan1996/DNABERT-2-117M InstaDeepAI/NTv3_650M_pre InstaDeepAI/nucleotide-transformer-v2-500m-multi-species
+    "tokenizer": "InstaDeepAI/NTv3_pretrained", # /pasteur/helix/projects/mPath/oanoufa/sbtr/data/model/tokenizer/custom_hiv_tokenizer
     "checkpoint_name": f"sbtr_v{VERSION}.pt",
     "load_checkpoint": False, # Whether to load from checkpoint to resume training or start fresh training
     "model_version": VERSION,

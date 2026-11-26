@@ -5,7 +5,7 @@ import sys
 
 import numpy as np
 import pandas as pd
-from python_scripts.src import config
+from sbtr import config
 
 # settings
 COLLAPSE_SUBSUBTYPES = True   # F1, F2 become F and A1, A6 become A

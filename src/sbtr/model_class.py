@@ -10,7 +10,7 @@ class HIVSubtypingConfig(PretrainedConfig):
 
     def __init__(
         self,
-        backbone_name: str = "InstaDeepAI/NTv3_650M_pre",
+        backbone_name: str = "InstaDeepAI/NTv3_pretrained",
         backbone_revision: str = None,   # commit SHA of the backbone repo; None = latest
         num_subtypes: int = 22,
         smooth_kernel: int = 5,
@@ -90,9 +90,8 @@ class HFModelForHIVSubtyping(PreTrainedModel):
             trust_remote_code=True,
             code_revision=rev,
         )
-        embed_dim = getattr(
-            backbone_config, "embed_dim", getattr(backbone_config, "hidden_size", 1280)
-        )
+        self.backbone.model.lm_head.requires_grad_(False)
+        embed_dim = self.backbone.model.lm_head.head.in_features   # = conv_init_embed_dim
 
         self.subtype_head = HIVClassificationHead(
             embed_dim=embed_dim,
@@ -110,14 +109,15 @@ class HFModelForHIVSubtyping(PreTrainedModel):
             config.backbone_name,
             trust_remote_code=True,
         )
+        model.backbone.model.lm_head.requires_grad_(False)
         return model
 
     def forward(self, tokens: torch.Tensor, attention_mask: torch.Tensor = None, **kwargs) -> Dict[str, torch.Tensor]:
         backbone_inputs = {"input_ids": tokens}
         if attention_mask is not None:
             backbone_inputs["attention_mask"] = attention_mask
-        outputs = self.backbone(**backbone_inputs, output_hidden_states=True)
-        embedding = outputs.hidden_states[self.config.embed_layer]
+        outputs = self.backbone(**backbone_inputs, skip_lm_head=True)
+        embedding = outputs.embedding
 
         subtype_logits = self.subtype_head(embedding)
         return {"subtype_logits": subtype_logits}

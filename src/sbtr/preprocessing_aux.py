@@ -5,16 +5,14 @@ Auxiliary functions for preprocessing sequences.
 import sys
 from Bio import AlignIO, SeqIO
 from Bio.Seq import Seq
-from python_scripts.src import config
 from pathlib import Path
 import subprocess
 import re
 import pandas as pd
-from bs4 import BeautifulSoup, Tag
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 import numpy as np
 
-from python_scripts.src import config
+from sbtr import config
 
 
 ST_TO_ID_DICT = config.ST_TO_ID_DICT
@@ -214,6 +212,7 @@ def scrape_and_parse_lanl_breakpoints(
     html_path="HIV_Circulating_Recombinant_Forms__CRFs_.html",
     verbose=True,
 ):
+    from bs4 import BeautifulSoup, Tag
     soup = BeautifulSoup(_read_html(html_path), "html.parser")
 
     # Page version, so you know which snapshot the output came from

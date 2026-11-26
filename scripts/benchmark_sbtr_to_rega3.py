@@ -9,8 +9,8 @@ from typing import List, Tuple, Dict
 import pandas as pd
 import numpy as np
 
-from python_scripts.figs import visualize_region_comparison
-from python_scripts.src import config
+from sbtr.figs import visualize_region_comparison
+from sbtr import config
 
 parser = argparse.ArgumentParser(
     description='Compare results from various methods.'

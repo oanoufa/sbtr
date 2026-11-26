@@ -7,8 +7,8 @@ import numpy as np
 import pandas as pd
 import re
 
-from python_scripts.src.config import HXB2_ACC, PARTIAL_THR, build_hxb2_ata_maps
-from python_scripts.figs import visualize_region_comparison
+from sbtr.config import HXB2_ACC, PARTIAL_THR, build_hxb2_ata_maps
+from sbtr.figs import visualize_region_comparison
 
 Regions = List[Tuple[int, int, str]]
 RegionsDict = Dict[str, Regions]

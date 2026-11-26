@@ -6,7 +6,7 @@ from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 import pandas as pd
 
-from . import config
+from sbtr import config
 
 MODEL_CONFIG = config.MODEL_CONFIG
 max_length = config.SEQ_LEN_AFTER_PAD

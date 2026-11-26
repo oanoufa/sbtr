@@ -17,7 +17,7 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio import SeqIO
 
-from . import config
+from sbtr import config
 
 CLOCK_RATES = config.CLOCK_RATES
 MAX_YEAR    = config.MAX_YEAR

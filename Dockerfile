@@ -58,5 +58,5 @@ ENV TMPDIR=/tmp \
 RUN mkdir -p /tmp/mpl_config /tmp/huggingface /tmp/mafft /tmp/cache \
     && chmod -R 1777 /tmp
 
-ENTRYPOINT ["python", "python_scripts/sbtr.py"]
+ENTRYPOINT ["python", "src/sbtr/cli.py"]
 CMD ["--help"]

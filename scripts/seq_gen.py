@@ -17,14 +17,14 @@ import plotly.graph_objects as go
 import math
 import shutil
 
-from src import config
-from src.mutator_class import (
+from sbtr import config
+from sbtr.mutator_class import (
     SequenceMutator,
     compute_n_muts,
     mutate_sequence_gtr,
     _ACGT_BYTES,
 )
-from src.decoder_class import CRFReferenceDecoder
+from sbtr.decoder_class import CRFReferenceDecoder
 from figs import (
     plot_fragment_length_distribution,
     plot_reference_distribution_with_year,

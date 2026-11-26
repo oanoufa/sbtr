@@ -6,7 +6,10 @@ data/trash/
 data/input/HIV1_PURE_REF.fasta
 data/input_sequences/
 data/speed_test/
-data/reference_bank/figs
+data/reference_bank/
+data/HIV1_COMBINED_REF.fasta.gz
+data/hxb2_ata_mapping.csv
+data/lanl_crf_segments_brokedown_aln.csv
 
 # docker/apptainer
 *.sif
@@ -25,16 +28,13 @@ figs/sample_vis_*
 shell_scripts/
 
 # local python scripts
-python_scripts/local/
+scripts/local/
 
 # logs
 slurm_logs/
 
 # venv
 .venv_311/
-
-# trash folder
-python_scripts/trash
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

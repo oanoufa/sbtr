@@ -14,11 +14,10 @@ from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 from tqdm import tqdm
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-from src import config
-from src.dataset_class import HIVSequenceDataset, open_memmaps
-from src.model_class import HFModelForHIVSubtyping, HIVSubtypingConfig
-from src.metrics_class import HIVSubtypingMetrics, train_step, validation_step
-from src.benchmark_class import RegionSet, Benchmarker, MaskPolicy, BreakpointConfig
+from sbtr import config
+from sbtr.dataset_class import HIVSequenceDataset, open_memmaps
+from sbtr.model_class import HFModelForHIVSubtyping, HIVSubtypingConfig
+from sbtr.metrics_class import HIVSubtypingMetrics, train_step, validation_step
 from figs import visualize_confusion_matrix
 
 from huggingface_hub import login

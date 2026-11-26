@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from scipy.ndimage import uniform_filter1d
 import csv
 import numpy as np
-from . import config
+from sbtr import config
 
 ST_TO_ID_DICT = config.ST_TO_ID_DICT
 ID_TO_ST_DICT = {v: k for k, v in ST_TO_ID_DICT.items()}
